@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         24 ground-truth checks, several of them red-first
+  codegraph --selftest         25 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -235,9 +235,17 @@ def _defs_and_calls(path, mod):
                 return
             if node.module:
                 top = node.module.split(".")[0]
+                full = node.module.replace(".", "/")
                 imports.append({"src": mod, "callee": top, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
+                if full != top:                                  # the package AND the module inside
+                    imports.append({"src": mod, "callee": full, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                 for a in node.names:
-                    fromimp[a.asname or a.name] = top           # `from memory import recall` -> bare recall() resolves into module memory
+                    # The WHOLE path, not its first segment. `from b.svc import helper` recorded
+                    # the module as "b", so the lookup for helper missed b/svc entirely and the
+                    # call fell through to a tree-wide name match - which found a second helper
+                    # elsewhere and answered AMBIGUOUS, in a file that had said which one it
+                    # meant. The relative branch has always recorded the full path.
+                    fromimp[a.asname or a.name] = full          # `from memory import recall` -> bare recall() resolves into module memory
                     # ...but the name might be a SUBMODULE rather than a function, and
                     # `from pkg import mod` then mod.func() is ordinary package code. Recorded
                     # as a candidate; build() keeps it only if that module really exists.
@@ -638,8 +646,28 @@ def build(dirs=None, write=True):
             if cand in def_ids: dst = cand; conf = "CLASS"
         rt = e.get("recv_type")
         if not dst and rt:                                       # x.method() where `x = Foo()` (local type inference) -> Foo.method
-            for cid in by_name.get(rt, []):
-                if (cid + "." + callee) in def_ids: dst = cid + "." + callee; conf = "TYPED"; break
+            # WHICH class called Foo? The one this module can see - defined here, or imported
+            # here - before any tree-wide search. It used to take whichever id sorted first,
+            # with no ambiguity test at all: a file writing `from b.svc import Client` had
+            # c.get() resolved into a/svc.Client, one line after the Client() call itself was
+            # labelled AMBIGUOUS. The tool contradicted itself inside a single function.
+            cands = []
+            scoped = (cls_ids.get(srcmod, {}).get(rt)
+                      or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
+                      or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
+            if scoped:
+                cands = [scoped]
+            else:
+                cands = [i for i in by_name.get(rt, []) if kind_of.get(i) == "class"]
+            if len(cands) == 1:
+                if (cands[0] + "." + callee) in def_ids:
+                    dst = cands[0] + "." + callee; conf = "TYPED"
+            elif len(cands) > 1:
+                # Several classes answer to that name and nothing here says which. Same rule
+                # as a bare call: list them, pick none.
+                hits = [c + "." + callee for c in cands if (c + "." + callee) in def_ids]
+                if len(hits) == 1: dst = hits[0]; conf = "TYPED"
+                elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
@@ -863,6 +891,21 @@ def _selftest():
     gs = build([sd], write=False)
     ok22 = callers_of(gs, "s.Base.run") == ["s.Kid.run"]
     shutil.rmtree(sd, ignore_errors=True)
+    # TWO classes of one name, and an import that says which. `x = Client()` then x.get() used
+    # to take whichever id sorted first - resolving into a/svc while the file said b/svc.
+    td = tempfile.mkdtemp()
+    for _p, _tag in (("a", "A"), ("b", "B")):
+        os.makedirs(os.path.join(td, _p))
+        _w(os.path.join(td, _p, "__init__.py"), "")
+        _w(os.path.join(td, _p, "svc.py"),
+            f"class Client:\n    def get(self):\n        return '{_tag}'\n")
+    _w(os.path.join(td, "app.py"),
+        "from b.svc import Client\ndef go():\n    c = Client()\n    return c.get()\n")
+    gt = build([td], write=False)
+    _ge = [e for e in gt["calls"] if e["src"] == "app.go" and e["callee"] == "get"]
+    ok23 = (len(_ge) == 1 and _ge[0].get("dst") == "b/svc.Client.get"
+            and callers_of(gt, "a/svc.Client.get") == [])
+    shutil.rmtree(td, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -888,8 +931,9 @@ def _selftest():
     print(f"  super().run() is a real caller of the base method it reaches: {ok22}")
     print(f"  RED-FIRST - thing.load() with no import of thing resolves to NOTHING: {ok18a}")
     print(f"  RED-FIRST - one dot too many climbs out of the tree, not onto thing.py: {ok18b}")
+    print(f"  x = Client(); x.get() resolves to the Client this file IMPORTED: {ok23}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

@@ -46,7 +46,7 @@ Every call edge carries a confidence label:
 | label | meaning |
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
-| `TYPED` | `x = Foo(); x.method()` — resolved by local type inference, and refused when two branches give `x` two types |
+| `TYPED` | `x = Foo(); x.method()` — resolved by local type inference: which `Foo` is decided by what this file defines or imports, refused when two branches give `x` two types, and refused when two classes answer to the name |
 | `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
@@ -73,9 +73,9 @@ measure how much of the standard library you happen to use:
 {
   "call_edges": 2663,
   "call_sites": 3552,
-  "edge_confidence": {"UNTYPED": 992, "QUALIFIED": 484, "EXTERNAL": 420, "BUILTIN": 387,
-                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 55, "RESOLVED": 36,
-                      "INHERITED": 10, "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
+  "edge_confidence": {"UNTYPED": 992, "QUALIFIED": 520, "EXTERNAL": 420, "BUILTIN": 387,
+                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 55, "INHERITED": 10,
+                      "TYPED": 3, "CLASS": 1, "RESOLVED": 0, "AMBIGUOUS": 0},
   "resolved_to_one_def": 864,
   "could_have_been_resolved": 1856,
   "resolution_rate": 0.466
@@ -87,6 +87,9 @@ place are method calls on objects it has no type for — the honest ceiling of s
 this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
 which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
 every point since came from a resolution bug fixed with a test, not from a change to the sum.
+`RESOLVED` reaching zero on this tree is the same story from the other side: that label is the
+weakest one — a bare name that happens to be unique — and every call it used to catch is now
+placed by the import that names it.
 
 ## The commands
 
@@ -103,7 +106,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         24 ground-truth checks, several of them red-first
+codegraph --selftest         25 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -205,7 +208,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 24 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 25 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -220,8 +223,10 @@ including **red-first controls** that prove the naive approach fails where this 
 - `super().run()`, whose caller never writes the name of what it calls
 - `thing.load()` in a file that never imported `thing`, next to a `thing.py` that would have
   answered — and the same trap reached by writing one dot too many in a relative import
+- two classes called `Client`, one import naming which, and a method call that has to land on
+  the one the file imported
 
-The test suite adds 231 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 237 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -249,7 +254,8 @@ two decorators whose `wrapper`s are different functions,
 a generated file too deeply nested to walk,
 a file restored from a backup with the timestamp it used to have,
 a dangling symlink that must not make every query rebuild,
-and a blank argument, which is a missing one rather than a pattern matching everything
+a blank argument, which is a missing one rather than a pattern matching everything,
+and a class name that two files answer to
 — and codegraph reading its own source.
 
 ## Licence

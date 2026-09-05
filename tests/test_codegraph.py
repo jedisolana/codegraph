@@ -2586,3 +2586,91 @@ class TheCommandLineSaysWhatItIsDoing(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("is a module", r.stderr)
         self.assertIn("deps a", r.stderr)
+
+
+class AnImportNamesTheModuleNotJustItsPackage(Sandbox):
+    """`from b.svc import helper` recorded the module as "b" - the first segment. The lookup
+    for helper then missed b/svc entirely, the call fell through to a tree-wide name match, and
+    a second helper somewhere else made it AMBIGUOUS: "say which", in a file that had said
+    which. The relative-import branch has always recorded the whole path."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(os.path.join("b", "__init__.py"), "")
+        self.write(os.path.join("b", "svc.py"), "def helper():\n    return 'the right one'\n")
+        self.write("other.py", "def helper():\n    return 'a different module'\n")
+
+    def test_a_dotted_import_resolves_the_name_it_imported(self):
+        self.write("app.py", "from b.svc import helper\n\ndef go():\n    return helper()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("b/svc.helper", "QUALIFIED"))
+        self.assertEqual(codegraph.callers_of(g, "other.helper"), [])
+
+    def test_both_the_package_and_the_module_are_recorded_as_imports(self):
+        self.write("app.py", "from b.svc import helper\n\ndef go():\n    return helper()\n")
+        g = self.graph(write=False)
+        edges = {(i["src"], i["callee"]) for i in g["imports"]}
+        self.assertIn(("app", "b/svc"), edges)
+        self.assertIn(("app", "b"), edges)
+        self.assertIn("b/svc", codegraph.module_deps(g, "app")[0])
+
+    def test_an_out_of_tree_import_invents_no_module(self):
+        """A guard: `from os.path import join` must not make os/path look like ours."""
+        self.write("app.py", "from os.path import join\n\ndef go():\n    return join('a', 'b')\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(codegraph.module_deps(g, "app")[0], [])
+
+
+class ATypeNameIsResolvedWhereItWasWritten(Sandbox):
+    """`x = Foo()` then `x.method()` took whichever Foo sorted first in the whole tree, with no
+    ambiguity test at all. A file writing `from b.svc import Client` had c.get() resolved into
+    a/svc.Client - one line after the Client() call itself was labelled AMBIGUOUS. The tool
+    contradicted itself inside a single function."""
+
+    def setUp(self):
+        super().setUp()
+        for pkg, tag in (("a", "A"), ("b", "B")):
+            self.write(os.path.join(pkg, "__init__.py"), "")
+            self.write(os.path.join(pkg, "svc.py"),
+                       f"class Client:\n    def get(self):\n        return '{tag}'\n")
+
+    def edge(self, g, callee):
+        m = [e for e in g["calls"] if e["src"] == "app.go" and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0]
+
+    def test_the_import_says_which_class_it_is(self):
+        self.write("app.py", "from b.svc import Client\n"
+                             "\n"
+                             "def go():\n"
+                             "    c = Client()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        got = self.edge(g, "get")
+        self.assertEqual((got.get("dst"), got["confidence"]), ("b/svc.Client.get", "TYPED"))
+        self.assertEqual(codegraph.callers_of(g, "a/svc.Client.get"), [])
+
+    def test_a_class_in_this_module_wins(self):
+        self.write("app.py", "class Client:\n"
+                             "    def get(self):\n"
+                             "        return 'local'\n"
+                             "\n"
+                             "def go():\n"
+                             "    c = Client()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "get").get("dst"), "app.Client.get")
+
+    def test_with_nothing_to_say_which_it_picks_none(self):
+        """Two classes of that name and no import: the same rule a bare call follows."""
+        self.write("app.py", "def go():\n    c = Client()\n    return c.get()\n")
+        g = self.graph(write=False)
+        got = self.edge(g, "get")
+        self.assertIsNone(got.get("dst"))
+        self.assertEqual(got["confidence"], "AMBIGUOUS")
+        self.assertEqual(got["candidates"], ["a/svc.Client.get", "b/svc.Client.get"])
+        self.assertEqual(codegraph.callers_of(g, "a/svc.Client.get"), [])
+        self.assertEqual(codegraph.callers_of(g, "b/svc.Client.get"), [])
