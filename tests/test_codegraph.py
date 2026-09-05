@@ -1274,5 +1274,75 @@ class ThreeAnswersNotOne(unittest.TestCase):
         self.assertEqual(self.run_it("where", "alone").returncode, 0)
 
 
+class TheLibraryRefusesWhatTheCliRefuses(Sandbox):
+    """Round thirteen named the lesson - a fix with two entry points is not fixed until both
+    are - and round fourteen made the same mistake again: the command line learned to reject a
+    misspelled name, the LIBRARY went on returning three empty lists. An agent calling
+    impact() with a typo is told nothing depends on the function it is about to change."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pulse.py", "def digest():\n    return 1\n")
+        self.write("court.py", "def digest():\n    return 2\n")
+        self.write("usera.py", "import pulse\ndef a():\n    return pulse.digest()\n")
+        self.write("uses.py", "import json\ndef go():\n    return json.loads('{}')\n")
+        self.g = self.graph(write=False)
+
+    def test_every_library_entry_point_rejects_an_unknown_name(self):
+        for fn, args in ((codegraph.impact, ("nope",)), (codegraph.callers_of, ("nope",)),
+                         (codegraph.blast_radius, ("nope",)), (codegraph.sites, ("nope",)),
+                         (codegraph.calls_from, ("nope",)),
+                         (codegraph.path, ("nope", "pulse.digest"))):
+            with self.subTest(fn.__name__), self.assertRaises(codegraph.Unknown):
+                fn(self.g, *args)
+
+    def test_module_deps_rejects_a_module_that_does_not_exist(self):
+        with self.assertRaises(codegraph.Unknown):
+            codegraph.module_deps(self.g, "nosuchmodule")
+        self.assertEqual(codegraph.module_deps(self.g, "pulse"), ([], ["usera"]))
+
+    def test_path_refuses_an_ambiguous_endpoint(self):
+        """The one query verb that had no guard at all."""
+        with self.assertRaises(codegraph.Ambiguous):
+            codegraph.path(self.g, "digest", "pulse.digest")
+        with self.assertRaises(codegraph.Ambiguous):
+            codegraph.path(self.g, "usera.a", "digest")
+
+    def test_a_qualified_id_that_does_not_exist_is_unknown_not_empty(self):
+        with self.assertRaises(codegraph.Unknown):
+            codegraph.impact(self.g, "typo.name")
+
+    def test_a_name_called_but_not_defined_here_is_still_answerable(self):
+        """"Where do we call json.loads" must keep working - it is neither unknown nor ours."""
+        self.assertTrue(codegraph.sites(self.g, "loads"))
+
+    def test_the_real_cases_are_untouched(self):
+        self.assertEqual(codegraph.impact(self.g, "pulse.digest")["callers"], ["usera.a"])
+        self.assertEqual(codegraph.path(self.g, "usera.a", "pulse.digest"),
+                         ["usera.a", "pulse.digest"])
+        self.assertEqual(codegraph.callers_of(self.g, "court.digest"), [])
+
+    def test_blast_radius_still_walks_internally(self):
+        """The gate must not fire on the ids the traversal generates for itself."""
+        self.write("c.py", "def leaf():\n    return 1\ndef mid():\n    return leaf()\n"
+                           "def top():\n    return mid()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.blast_radius(g, "c.leaf"), ["c.mid", "c.top"])
+
+    def test_both_doors_agree(self):
+        """The point of the round: the same name gets the same verdict either way in."""
+        for name, exc in (("nope", codegraph.Unknown), ("digest", codegraph.Ambiguous)):
+            with self.subTest(name), self.assertRaises(exc):
+                codegraph.impact(self.g, name)
+        self.write("solo.py", "def only():\n    return 1\n")
+        self.graph()                                     # write it so the CLI can read it
+        cli = {}
+        for name in ("nope", "digest", "only"):
+            r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "impact", name],
+                               cwd=self.dir, capture_output=True, text=True, timeout=180)
+            cli[name] = r.returncode
+        self.assertEqual(cli, {"nope": 1, "digest": 2, "only": 0})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

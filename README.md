@@ -134,9 +134,10 @@ codegraph.impact(g, "spend_cap")   # {"callers": [...], "sites": [...], "blast":
 function that five others depend on, here are their line numbers." The output is small, exact,
 and cheap — no model call, no network.
 
-If the name matches more than one definition it raises `codegraph.Ambiguous`, carrying the
-candidates, rather than merging their callers into one answer. An agent should catch that and
-pick — the same refusal the command line makes, through the same code.
+The library refuses exactly what the command line refuses, through the same code:
+`codegraph.Ambiguous` when several definitions answer to the name, carrying the candidates, and
+`codegraph.Unknown` when this graph has never seen it. Neither is answered with an empty
+result, because "nothing depends on this" is the one reply a misspelling must never get.
 
 ## What it cannot do
 
@@ -196,7 +197,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 126 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 134 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping

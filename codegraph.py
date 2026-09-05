@@ -678,6 +678,16 @@ def _by_name(g, name):
     return [n["id"] for n in g["nodes"] if n["name"] == name and n["kind"] in ("func", "class")]
 
 
+class Unknown(Exception):
+    """A name this graph has never seen: not defined here, and not called here either.
+
+    Raised rather than answered with an empty result. "Nothing depends on this" and "I have
+    never heard of that" are different facts, and a misspelling that returns the first is how
+    an agent talks itself into an unsafe edit. The command line learned this a round ago; the
+    library - the door an agent actually uses - kept returning the plausible empty answer.
+    """
+
+
 class Ambiguous(Exception):
     """A bare name that several definitions answer to.
 
@@ -694,8 +704,15 @@ class Ambiguous(Exception):
 
 
 def _one(g, target):
-    """The definitions a query may act on, refusing to merge several into one answer."""
-    ids = _targets(g, target)
+    """The definitions a query may act on: never merged, never invented.
+
+    Raises Ambiguous for a name several definitions answer to, and Unknown for one the graph
+    has never seen. A name that is only CALLED here - json.loads - is neither: asking where it
+    is called is a fair question, so it passes through and the caller's fallback answers it.
+    """
+    kind, ids = _describe(g, target)
+    if kind == "unknown":
+        raise Unknown(f"nothing named {target!r} is defined or called in this graph")
     if len(ids) > 1:
         raise Ambiguous(target, ids)
     return ids
@@ -742,6 +759,8 @@ def callers_of(g, target):
 
 def calls_from(g, node_id):
     """RESOLVED in-tree calls made by node_id (the specific definitions it reaches)."""
+    for i in _one(g, node_id):
+        return sorted({e["dst"] for e in g["calls"] if e["src"] == i and e.get("dst")})
     return sorted({e["dst"] for e in g["calls"] if e["src"] == node_id and e.get("dst")})
 
 
@@ -822,8 +841,8 @@ def path(g, src, dst, max_hops=None):
     fwd = {}
     for e in g["calls"]:
         if e.get("dst"): fwd.setdefault(e["src"], []).append(e["dst"])
-    goals = set(_targets(g, dst) or [dst])
-    for s in (_targets(g, src) or [src]):
+    goals = set(_one(g, dst) or [dst])
+    for s in (_one(g, src) or [src]):
         q = collections.deque([[s]]); seen = {s}
         while q:
             p = q.popleft()
@@ -837,6 +856,11 @@ def path(g, src, dst, max_hops=None):
 def module_deps(g, mod):
     """(imports, importers) for a module: in-tree modules it imports, and in-tree modules that import it."""
     intree = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
+    if mod not in intree:
+        # ([], []) for a module that does not exist reads exactly like a module with no
+        # dependencies, which is a far more reassuring fact than the truth. The command line
+        # has refused this since round six; the library went on returning the comfortable pair.
+        raise Unknown(f"no module {mod!r} in this graph")
     imports = sorted({e["callee"] for e in g["imports"] if e["src"] == mod and e["callee"] in intree})
     importers = sorted({e["src"] for e in g["imports"] if e["callee"] == mod and e["src"] in intree})
     return imports, importers
@@ -893,7 +917,9 @@ def impact(g, name):
     """the PRE-EDIT SAFETY view of a function - everything you need before you change it, in one shot:
     its direct callers, every call SITE (file:line), and the transitive blast radius. This is the self-edit
     checklist: read these before touching `name`."""
-    return {"callers": callers_of(g, name), "sites": sites(g, name), "blast": blast_radius(g, name)}
+    _one(g, name)                                    # refuse unknown and ambiguous names FIRST,
+    return {"callers": callers_of(g, name),          # before three empty lists look like an answer
+            "sites": sites(g, name), "blast": blast_radius(g, name)}
 
 
 def stats(g):
