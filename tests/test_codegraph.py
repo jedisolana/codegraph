@@ -13,6 +13,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -881,6 +882,89 @@ class TheGraphIsFoundFromAnywhereInTheTree(Sandbox):
         os.environ["CODEGRAPH_OUT"] = os.path.join(self.dir, "codegraph.json")
         self.addCleanup(os.environ.pop, "CODEGRAPH_OUT", None)
         self.assertEqual(codegraph._find_graph(), codegraph.OUT)
+
+
+class EncodingsRealFilesHave(Sandbox):
+    """A byte-order mark is not a syntax error. Visual Studio and Notepad write them and Python
+    accepts them - but reading as plain utf-8 left the mark at the top of the file, ast.parse
+    threw, and the WHOLE FILE silently became an empty module. Every function in it vanished
+    from every blast radius, with nothing said."""
+
+    def raw(self, name, data):
+        with open(os.path.join(self.dir, name), "wb") as f:
+            f.write(data)
+
+    def test_a_file_with_a_byte_order_mark_is_read(self):
+        self.raw("bom.py", b"\xef\xbb\xbfdef with_bom():\n    return 1\n")
+        self.assertIn("bom.with_bom", {n["id"] for n in self.graph(write=False)["nodes"]})
+
+    def test_a_bom_file_resolves_calls_like_any_other(self):
+        self.raw("bom.py", b"\xef\xbb\xbfdef helper():\n    return 1\n"
+                           b"def go():\n    return helper()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "bom.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("bom.helper", "LOCAL"))
+
+    def test_crlf_line_numbers_are_right(self):
+        self.raw("crlf.py", b"def a():\r\n    return 1\r\n\r\n\r\ndef b():\r\n    return a()\r\n")
+        self.assertEqual(codegraph.where(self.graph(write=False), "b"), [("crlf.b", "crlf.py:5")])
+
+    def test_tabs_are_fine(self):
+        self.raw("tabs.py", b"def t():\n\treturn 1\n")
+        self.assertIn("tabs.t", {n["id"] for n in self.graph(write=False)["nodes"]})
+
+
+class AnUnreadableFileIsReported(Sandbox):
+    """Skipping a file the parser cannot read is right. Skipping it in SILENCE is not: an empty
+    module in the graph looks exactly like a file with nothing in it, and the difference is
+    every function you were about to change."""
+
+    def test_it_is_named_rather_than_becoming_an_empty_module(self):
+        self.write("good.py", "def fine():\n    return 1\n")
+        with open(os.path.join(self.dir, "bad.py"), "wb") as f:
+            f.write(b"def ok():\n    return 1\n# \x00 embedded nul\n")
+        g = self.graph(write=False)
+        self.assertEqual(len(g["unreadable"]), 1, g["unreadable"])
+        self.assertIn("bad.py", g["unreadable"][0])
+        mods = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
+        self.assertEqual(mods, {"good"}, "the unparseable file is still in the graph as a module")
+        self.assertEqual(codegraph.stats(g)["unreadable_files"], 1)
+
+    def test_python_2_source_is_named_not_swallowed(self):
+        self.write("old.py", "print 'python two'\n")
+        self.write("new.py", "def fine():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertTrue(any("old.py" in u for u in g["unreadable"]), g["unreadable"])
+        self.assertIn("new.fine", {n["id"] for n in g["nodes"]})
+
+    def test_the_cli_says_so_on_stderr(self):
+        self.write("good.py", "def fine():\n    return 1\n")
+        self.write("broken.py", "def (((\n")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("could not parse", r.stderr)
+        self.assertIn("broken.py", r.stderr)
+
+    def test_a_clean_tree_reports_nothing(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        self.assertEqual(self.graph(write=False)["unreadable"], [])
+
+
+class TheReadmeDoesNotOversell(unittest.TestCase):
+    """Numbers in prose go stale silently. These are the two the README states outright."""
+
+    def test_the_claimed_check_counts_are_real(self):
+        readme = os.path.join(HERE, "README.md")
+        with open(readme, encoding="utf-8") as f:
+            text = f.read()
+        claimed_selftest = int(re.search(r"(\d+) ground-truth checks", text).group(1))
+        claimed_suite = int(re.search(r"test suite adds (\d+) more", text).group(1))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            codegraph._selftest()
+        actual_selftest = out.getvalue().count(": True") + out.getvalue().count(": False")
+        self.assertEqual(claimed_selftest, actual_selftest)
+        suite = unittest.defaultTestLoader.discover(os.path.join(HERE, "tests"))
+        self.assertEqual(claimed_suite, suite.countTestCases())
 
 
 if __name__ == "__main__":

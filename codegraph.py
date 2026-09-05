@@ -60,15 +60,25 @@ except Exception:
     _VERSION = "0"
 
 
+class Unparseable(Exception):
+    """A .py file the parser could not read. Reported, never swallowed."""
+
+
 def _defs_and_calls(path, mod):
     """Extract definition nodes and call edges from one file via ast. Returns (defs, edges).
     defs: list of {id, kind, name, module, line}. edges: list of {src, callee, kind, line}."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as _fh:   # a context manager, so a
-            src = _fh.read()                                          # big tree does not leak a
-        tree = ast.parse(src, filename=path)                          # handle per file
-    except (SyntaxError, ValueError):
-        return [], [], [], {}, {}                              # unparseable file (py2, template, partial) - skip it, don't crash the build
+        # utf-8-SIG, because a byte-order mark is not a syntax error. Visual Studio and Notepad
+        # write them, Python itself accepts them - and plain utf-8 left the mark as a stray
+        # character at the top of the file, so ast.parse threw and the WHOLE FILE silently
+        # became an empty module. Every function in it disappeared from every blast radius.
+        with open(path, encoding="utf-8-sig", errors="replace") as _fh:   # a context manager, so
+            src = _fh.read()                                              # a big tree does not
+        tree = ast.parse(src, filename=path)                              # leak a handle per file
+    except (SyntaxError, ValueError) as ex:
+        # py2, a template, a half-written file. Skipping is right; skipping in SILENCE is not -
+        # an empty module in the graph looks exactly like a file with nothing in it.
+        raise Unparseable(f"{os.path.relpath(path)}: {ex}") from ex
     defs, edges, imports = [], [], []
     aliases, fromimp = {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
 
@@ -286,7 +296,7 @@ def build(dirs=None, write=True):
                 _c = json.load(_fh)
             cache = _c.get("files", {}) if _c.get("_v") == _VERSION else {}   # discard the whole cache if codegraph's code changed (versioned namespace)
         except Exception: cache = {}
-    nodes, calls, imports = [], [], []
+    nodes, calls, imports, unreadable = [], [], [], []
     mod_alias, mod_from, mod_root = {}, {}, {}; newcache = {}
     for path, d, root in pairs:
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
@@ -306,7 +316,12 @@ def build(dirs=None, write=True):
         if c and c.get("mtime") == mt:                          # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
         else:
-            d, e, im, al, fi = _defs_and_calls(path, mid)
+            try:
+                d, e, im, al, fi = _defs_and_calls(path, mid)
+            except Unparseable as ex:
+                unreadable.append(str(ex))
+                nodes.pop()                                      # not a module we can describe
+                continue
         if not multiroot:
             newcache[path] = {"mtime": mt, "defs": d, "calls": [dict(x) for x in e], "imports": im, "aliases": al, "fromimp": fi}
         nodes += d; calls += e; imports += im
@@ -411,7 +426,7 @@ def build(dirs=None, write=True):
     # the graph", which cannot see a DELETION: removing a file changes nobody's mtime, so the
     # graph kept answering about code that was gone - `where` would send you to a deleted file.
     graph = {"nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
-             "sources": sorted(p for p, _, _ in pairs)}
+             "sources": sorted(p for p, _, _ in pairs), "unreadable": sorted(unreadable)}
     if write:
         _jwrite({"_v": _VERSION, "files": newcache}, CACHE)   # cache: RAW per-file parse + code version; atomic write so an interrupted build can't corrupt it
         _jwrite(graph, OUT)                                    # atomic: a crash mid-write leaves the previous good graph, not a truncated one
@@ -591,7 +606,11 @@ def _find_graph(start=None):
     exclude the rest of the repository without ever saying so. An explicit CODEGRAPH_OUT is
     always obeyed; `build` still writes exactly where you point it.
     """
-    if os.environ.get("CODEGRAPH_OUT"):
+    if os.path.exists(OUT) or os.environ.get("CODEGRAPH_OUT"):
+        # The configured location wins whenever it actually holds a graph. Walking up
+        # unconditionally broke the library contract - set codegraph.OUT, call load(), and it
+        # would answer from whatever graph happened to sit in a parent directory instead.
+        # The walk is for the CLI case only: no graph here, so look where the repo root is.
         return OUT
     d = os.path.abspath(start or os.getcwd())
     while True:
@@ -820,7 +839,8 @@ def stats(g):
     # Edges are relationships; sites are places in the source. They are different numbers, and
     # reporting only the first hid the fact that one edge can stand for a dozen call sites.
     sites_total = sum(len(e.get("lines") or [e.get("line")]) for e in g["calls"])
-    return {"nodes": dict(kinds), "call_edges": len(g["calls"]), "call_sites": sites_total,
+    return {"nodes": dict(kinds), "unreadable_files": len(g.get("unreadable", [])),
+            "call_edges": len(g["calls"]), "call_sites": sites_total,
             "edge_confidence": dict(conf),
             "resolved_to_one_def": specific,
             "could_have_been_resolved": winnable,
@@ -847,6 +867,8 @@ def _main(argv=None):
         except BadPath as e:
             print(f"cannot build: {e}", file=sys.stderr)
             return 1
+        for bad in g.get("unreadable", []):
+            print(f"skipped (could not parse) {bad}", file=sys.stderr)
         if not [n for n in g["nodes"] if n["kind"] == "module"]:
             print(f"no .py files found under {', '.join(g['dirs'])}", file=sys.stderr)
             return 1
