@@ -8,7 +8,8 @@ defines, imports and calls.
 Every call edge carries a CONFIDENCE, because the useful part is knowing when the answer is
 solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL and CONSTRUCTOR each pin a call
 to exactly one definition. AMBIGUOUS lists the candidates instead of choosing between them.
-BUILTIN, EXTERNAL and UNTYPED say the target is not here, or cannot be determined. Nothing is
+BUILTIN and EXTERNAL say the target is not here; UNTYPED says the receiver could not be typed
+and the target might be. Nothing is
 guessed: a blast radius that quietly picked one of two same-named functions would be worse
 than no blast radius at all.
 
@@ -1161,6 +1162,20 @@ def build(dirs=None, write=True):
                 # resolution rate mean something: it is the denominator of what was winnable.
                 conf = "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
+    # UNTYPED is a claim: the receiver could not be typed, so the target MIGHT be in this tree.
+    # For a call like `rows.append(x)` or `text.strip()` that claim is false and the tool can
+    # prove it - no definition anywhere in the tree carries that name, so the target is not
+    # here, and EXTERNAL is what it is. On one real codebase nine in ten "cannot tell" edges
+    # were `.get()`, `.items()`, `.join()` and `.assertEqual()`, none of which the tree defines.
+    # This is not the resolution rate being flattered by dropping hard cases from the sum; it
+    # is impossible cases leaving a denominator that was never theirs to be in.
+    # Only for a METHOD call, where the name written IS the target's name. For a bare call on
+    # a local - `handler = pick(); handler()` - the name is the variable's, and says nothing
+    # about what it holds, which may very well be in this tree.
+    for e in calls:
+        if (e["confidence"] == "UNTYPED" and e.get("method")
+                and e["callee"] not in by_name):
+            e["confidence"] = "EXTERNAL"
     # Constructing an object RUNS its __init__, and that edge was missing. `impact __init__`
     # on a class built in twenty places answered "callers: (none), blast: 0" with exit code 0 -
     # the tool's one unforgivable answer, given to the single most commonly edited method in
@@ -1201,7 +1216,11 @@ def build(dirs=None, write=True):
     # was a local, the root of a dotted chain, the enclosing class, the inferred type - and not
     # one of them is read again once the target is known. They were being written to disk,
     # loaded back on every query, and held in memory through both serialisations.
-    keep = ("src", "dst", "callee", "confidence", "recv", "mod", "line", "lines", "candidates")
+    # `method` is a fact about the CALL SITE - was it written `f()` or `x.f()` - not machinery
+    # from resolving it, and without it nothing downstream can tell the two apart. `recv` does
+    # not answer that: it is None both for a bare call and for `get_thing().f()`.
+    keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",
+            "candidates")
     calls = [{k: e[k] for k in keep if k in e} for e in calls]
     graph = {"version": _VERSION,
              "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),

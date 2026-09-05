@@ -431,14 +431,19 @@ class Inheritance(Sandbox):
 class TheResolutionRateMeansSomething(Sandbox):
     def test_the_denominator_is_what_was_winnable(self):
         """Counting builtins and library calls measures how much stdlib you use. Leaving out
-        the untypeable method calls makes it tautologically 1.0."""
+        the untypeable method calls makes it tautologically 1.0.
+
+        The UNTYPED example has to be a name this tree DEFINES somewhere, because that is what
+        the label now claims: the receiver could not be typed, and the target might be here.
+        `d.get('k')` is not that - nothing here has a `get`, so it cannot be ours."""
         self.write("w.py",
                    "import os\n"
                    "def helper():\n    return 1\n"
+                   "class Store:\n    def fetch(self, k):\n        return k\n"
                    "def go(d):\n"
                    "    a = len('x')\n"            # BUILTIN   - not winnable
                    "    b = os.path.join('a')\n"   # EXTERNAL  - not winnable
-                   "    c = d.get('k')\n"          # UNTYPED   - winnable, and lost
+                   "    c = d.fetch('k')\n"        # UNTYPED   - winnable, and lost
                    "    return helper() and a and b and c\n")   # LOCAL - winnable, and won
         s = codegraph.stats(self.graph(write=False))
         c = s["edge_confidence"]
@@ -4510,7 +4515,10 @@ class TheGraphCarriesWhatAQuestionNeeds(Sandbox):
     of them is read once the target is known. They were written to disk, loaded back on every
     query, and held in memory through two serialisations."""
 
-    WORKING = ("method", "recv_root", "recv_path", "recv_local", "callee_local", "kind",
+    # `method` is NOT here: whether a call was written `f()` or `x.f()` is a fact about the
+    # call site, and nothing downstream can tell the two apart without it - `recv` cannot, being
+    # None for a bare call and for `get_thing().f()` alike.
+    WORKING = ("recv_root", "recv_path", "recv_local", "callee_local", "kind",
                "encl_class", "recv_type", "invoke_type", "super_of", "super_from")
 
     def tree(self):
@@ -4559,7 +4567,7 @@ class TheGraphCarriesWhatAQuestionNeeds(Sandbox):
         with open(codegraph.CACHE, encoding="utf-8") as f:
             cached = json.load(f)
         edges = [e for entry in cached["files"].values() for e in entry["calls"]]
-        self.assertTrue(any("method" in e for e in edges), "the cache lost the working fields")
+        self.assertTrue(any("recv_local" in e for e in edges), "the cache lost the working fields")
         warm = codegraph.build([self.dir])
         self.assertEqual(codegraph.callers_of(warm, "svc.Client.get"),
                          ["app.Mine.go", "app.use"])
@@ -4572,3 +4580,58 @@ class TheGraphCarriesWhatAQuestionNeeds(Sandbox):
         g = self.graph(write=False)
         call, = [e for e in g["calls"] if e["src"] == "c.run"]
         self.assertEqual(call["candidates"], ["a.go", "b.go"])
+
+
+class UntypedMeansItMightBeYours(Sandbox):
+    """UNTYPED is a claim, not a shrug: the receiver could not be typed, so the target MIGHT be
+    in this tree. For `rows.append(x)` or `text.strip()` that claim is false and the tool can
+    prove it - no definition anywhere carries that name. On one real codebase nine in ten
+    "cannot tell" edges were `.get()`, `.items()`, `.join()` and `.assertEqual()`."""
+
+    def label(self, g, callee):
+        m = [e for e in g["calls"] if e["callee"] == callee and e["src"] == "app.go"]
+        self.assertEqual(len(m), 1, m)
+        return m[0]["confidence"]
+
+    def test_a_method_no_definition_here_has_is_external(self):
+        self.write("app.py", "def go(rows, text):\n"
+                             "    rows.append(1)\n"
+                             "    return text.strip()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.label(g, "append"), "EXTERNAL")
+        self.assertEqual(self.label(g, "strip"), "EXTERNAL")
+
+    def test_a_method_something_here_does_define_stays_untyped(self):
+        """The other half, and the whole point of keeping the two labels apart: this one could
+        genuinely be the tree's own, and saying EXTERNAL would claim knowledge."""
+        self.write("store.py", "class Store:\n    def append(self, x):\n        return x\n")
+        self.write("app.py", "def go(rows, text):\n"
+                             "    rows.append(1)\n"
+                             "    return text.strip()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.label(g, "append"), "UNTYPED")
+        self.assertEqual(self.label(g, "strip"), "EXTERNAL")
+
+    def test_a_bare_call_on_a_local_is_not_reclassified(self):
+        """`handler = pick(); handler()` - the name written is the VARIABLE's, and says nothing
+        about what it holds, which may very well be in this tree."""
+        self.write("app.py", "def pick():\n    return None\n"
+                             "\n"
+                             "def go():\n"
+                             "    handler = pick()\n"
+                             "    return handler()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go" and e["callee"] == "handler"]
+        self.assertEqual(call["confidence"], "UNTYPED")
+
+    def test_the_rate_counts_only_what_could_have_been_won(self):
+        """A tree of nothing but list and string calls has no winnable calls to lose."""
+        self.write("app.py", "def helper():\n    return 1\n"
+                             "\n"
+                             "def go(rows):\n"
+                             "    rows.append(1)\n"
+                             "    rows.sort()\n"
+                             "    return helper()\n")
+        s = codegraph.stats(self.graph(write=False))
+        self.assertEqual(s["could_have_been_resolved"], 1)
+        self.assertEqual(s["resolution_rate"], 1.0)

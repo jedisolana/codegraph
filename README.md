@@ -60,10 +60,15 @@ Most call-graph tools guess and hand you one answer. This one refuses. An `AMBIG
 a real result: it means the question does not have a single answer, and a blast radius that
 quietly picked one would be worse than no blast radius at all.
 
-`UNTYPED` is the one that matters. It means *a method call whose receiver could not be typed* —
-`d.get()`, `x.run()`. The target might well be in your tree; the tool simply cannot tell. It is
-deliberately not lumped in with `EXTERNAL`, because that would claim knowledge it does not have
-and would flatter the resolution rate by shrinking the denominator.
+`UNTYPED` is the one that matters, and it is a claim rather than a shrug: *the receiver could
+not be typed, and the target might be in your tree.* `x.run()` where something of yours defines
+a `run`. It is deliberately not lumped in with `EXTERNAL`, because that would claim knowledge it
+does not have.
+
+The claim has to be true, though. `rows.append(1)` and `text.strip()` are not calls it failed
+to place — **nothing in your tree is named `append` or `strip`**, so the target cannot be here,
+and the tool can prove that rather than guess it. Those are `EXTERNAL`. On one real codebase
+nine of every ten "cannot tell" edges were `.get()`, `.items()`, `.join()` and `.assertEqual()`.
 
 `stats` reports that rate over **what was winnable** — resolved, plus ambiguous, plus the calls
 it could not type. Builtins and library calls are excluded, since counting them would only
@@ -73,20 +78,26 @@ measure how much of the standard library you happen to use:
 {
   "call_edges": 2694,
   "call_sites": 3590,
-  "edge_confidence": {"UNTYPED": 998, "QUALIFIED": 536, "EXTERNAL": 425, "BUILTIN": 389,
-                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 57, "INHERITED": 10,
+  "edge_confidence": {"EXTERNAL": 1347, "QUALIFIED": 536, "BUILTIN": 389, "LOCAL": 197,
+                      "SELF-METHOD": 78, "UNTYPED": 76, "CONSTRUCTOR": 57, "INHERITED": 10,
                       "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
   "resolved_to_one_def": 882,
-  "could_have_been_resolved": 1880,
-  "resolution_rate": 0.469
+  "could_have_been_resolved": 958,
+  "resolution_rate": 0.921
 }
 ```
 
-That 0.469 is a real number on a real codebase, measured the hard way. Most of what it cannot
-place are method calls on objects it has no type for — the honest ceiling of static analysis
-this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
-which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
-every point since came from a resolution bug fixed with a test, not from a change to the sum.
+That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
+A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
+resolved, it is measuring how much of Python you happen to use, and the same reasoning that
+keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
+been yours.
+
+The number this README first published was 0.29, over a denominator that swept in every
+impossible call. Two things moved it: resolution bugs fixed with tests, and then that
+denominator being made to mean something. Both directions are in `CHANGELOG.md`, with the
+count of fabricated edges each one removed.
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
 every real way a bare name reaches a definition had a rule of its own, it fired fifteen times
@@ -263,7 +274,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 367 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 371 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -317,7 +328,8 @@ a base class named the two ways Python lets you name one,
 a class defined inside the very function that builds one,
 a base class that is really a local variable holding a generic alias,
 an import written as `import_module("pkg.widget")`,
-and a graph that carries what a question needs and not the machinery that answered it
+a graph that carries what a question needs and not the machinery that answered it,
+and `rows.append(1)` in a tree that has no `append`, beside one that does
 — and codegraph reading its own source.
 
 ## Licence

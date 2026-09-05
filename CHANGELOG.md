@@ -39,6 +39,12 @@ they are the answers a call graph must never give:
 - **The wrong same-named thing.** Two nested helpers called `inner`; a bare call reaching a
   method it cannot see; a class name resolved to the wrong one of two; `from b.svc import
   Client` answered with `a/svc.Client`.
+- **"I cannot tell" said about a list.** `UNTYPED` claims the receiver could not be typed and
+  the target might be in your tree. For `rows.append(1)` that claim is false and provable —
+  nothing in the tree is named `append` — so those are `EXTERNAL` now. Nine of every ten
+  "cannot tell" edges on one real codebase were `.get()`, `.items()`, `.join()` and
+  `.assertEqual()`. It applies only to method calls, where the name written is the target's;
+  for a bare call on a local the name is the variable's and says nothing.
 - **A name the file never mentions.** A bare call used to be matched against every definition
   in the tree and resolved whenever exactly one had that name — a coincidence, not a
   resolution. Every real way a bare name reaches a definition has its own rule now (this
