@@ -50,7 +50,12 @@ _BUILTINS = set(dir(builtins))                              # next()/len()/sorte
 # overridable so a build server can put them wherever it likes.
 HOME = os.environ.get("CODEGRAPH_ROOT") or os.getcwd()
 OUT = os.environ.get("CODEGRAPH_OUT") or os.path.join(HOME, "codegraph.json")
-CACHE = os.environ.get("CODEGRAPH_CACHE") or os.path.join(HOME, "codegraph.cache.json")          # per-file parse cache keyed by path+mtime (incremental build)
+# The cache lives beside the GRAPH, not beside the source. Keying it off HOME meant setting
+# CODEGRAPH_OUT redirected the graph and left the cache writing into the directory that was
+# unwritable in the first place - so the escape hatch this tool prints when a build fails did
+# not actually work. Advice that has not been run is not advice.
+CACHE = (os.environ.get("CODEGRAPH_CACHE")
+         or os.path.join(os.path.dirname(OUT) or ".", "codegraph.cache.json"))          # per-file parse cache keyed by path+mtime (incremental build)
 # The cache is namespaced by codegraph's OWN source hash: edit the parser and every stale parse
 # is invalidated, so a change here can never silently reuse yesterday's extraction.
 try:
@@ -155,7 +160,13 @@ def _defs_and_calls(path, mod):
     except (SyntaxError, ValueError) as ex:
         # py2, a template, a half-written file. Skipping is right; skipping in SILENCE is not -
         # an empty module in the graph looks exactly like a file with nothing in it.
-        raise Unparseable(f"{os.path.relpath(path)}: {ex}") from ex
+        raise Unparseable(f"{os.path.relpath(path)}: could not parse: {ex}") from ex
+    except OSError as ex:
+        # A file the process cannot READ - restrictive permissions in a vendored directory, a
+        # container running as a different user. One such file used to end the whole build on
+        # a PermissionError traceback, which is the same mistake a dangling symlink once made:
+        # a single awkward file is not a reason to refuse to analyse a codebase.
+        raise Unparseable(f"{os.path.relpath(path)}: could not read: {ex.strerror or ex}") from ex
     defs, edges, imports = [], [], []
     aliases, fromimp = {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
     submodules = {}                                             # name -> the module id it MIGHT be, confirmed in build()
@@ -628,8 +639,16 @@ def build(dirs=None, write=True):
              "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
              "sources": sorted(p for p, _, _ in pairs), "unreadable": sorted(unreadable)}
     if write:
-        _jwrite({"_v": _VERSION, "files": newcache}, CACHE)   # cache: RAW per-file parse + code version; atomic write so an interrupted build can't corrupt it
-        _jwrite(graph, OUT)                                    # atomic: a crash mid-write leaves the previous good graph, not a truncated one
+        for target, what in ((CACHE, "cache"), (OUT, "graph")):
+            try:
+                _jwrite({"_v": _VERSION, "files": newcache} if what == "cache" else graph, target)
+            except OSError as ex:
+                # A read-only checkout, a container mount, someone else's repository. The
+                # analysis itself worked; only the writing failed, and there is somewhere else
+                # to put it. Name the path that ACTUALLY failed - reporting the graph's
+                # directory when the cache was the problem sends people to the wrong place.
+                raise BadPath(f"cannot write the {what} to {target}: {ex.strerror or ex}\n"
+                              f"  set CODEGRAPH_OUT to a writable path") from ex
     return graph
 
 
@@ -1207,14 +1226,16 @@ def _main(argv=None):
             print(f"cannot build: {e}", file=sys.stderr)
             return 1
         for bad in g.get("unreadable", []):
-            print(f"skipped (could not parse) {bad}", file=sys.stderr)
+            print(f"skipped {bad}", file=sys.stderr)   # the reason carries the detail: a
+                                                       # syntax error and a permission error
+                                                       # are not the same complaint
         if not [n for n in g["nodes"] if n["kind"] == "module"]:
             # "no .py files found" directly contradicted the skip lines printed just above it
             # when the files were there and simply would not parse. Two different problems,
             # and only one of them is solved by pointing at a different directory.
             bad = len(g.get("unreadable", []))
             where_ = ", ".join(g["dirs"])
-            print(f"found {bad} .py file(s) under {where_}, none of which could be parsed"
+            print(f"found {bad} .py file(s) under {where_}, none of which could be read"
                   if bad else f"no .py files found under {where_}", file=sys.stderr)
             return 1
         print(json.dumps(stats(g), indent=2))

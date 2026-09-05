@@ -1422,7 +1422,8 @@ class TheMessageMatchesTheSituation(Sandbox):
         r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
                            cwd=self.dir, capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("none of which could be parsed", r.stderr)
+        self.assertIn("none of which could be read", r.stderr)   # the umbrella term: a syntax
+                                                                 # error and a locked file both
         self.assertNotIn("no .py files found", r.stderr)
 
     def test_a_directory_with_no_python_still_says_so(self):
@@ -1903,6 +1904,76 @@ class TheRemainingImportForms(Sandbox):
     def test_an_aliased_from_import_of_a_submodule_resolves(self):
         self.write("app.py", "from pkg.sub import leaf as lf\ndef f():\n    return lf.deep()\n")
         self.assertEqual(self.edge("app.f", "deep")["dst"], "pkg/sub/leaf.deep")
+
+
+class WhenTheFilesystemSaysNo(Sandbox):
+    """Two ordinary situations - a container running as another user, a read-only mount - and
+    both ended in a PermissionError traceback."""
+
+    def test_one_unreadable_file_does_not_end_the_build(self):
+        """The same mistake a dangling symlink once made: a single awkward file is not a
+        reason to refuse to analyse a codebase."""
+        self.write("ok.py", "def good():\n    return 1\n")
+        locked = os.path.join(self.dir, "locked.py")
+        with open(locked, "w", encoding="utf-8") as f:
+            f.write("def secret():\n    return 1\n")
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o644)
+        if os.access(locked, os.R_OK):
+            self.skipTest("cannot make a file unreadable here (running as root?)")
+        g = self.graph(write=False)
+        self.assertIn("ok.good", {n["id"] for n in g["nodes"]})
+        self.assertTrue(any("could not read" in u for u in g["unreadable"]), g["unreadable"])
+
+    def test_the_message_names_the_actual_complaint(self):
+        """A syntax error and a permission error are not the same problem, and "could not
+        parse" for a file nobody could open sends you looking at the wrong thing."""
+        self.write("bad.py", "def (((\n")
+        g = self.graph(write=False)
+        self.assertTrue(any("could not parse" in u for u in g["unreadable"]))
+
+
+class WhenTheDirectoryIsReadOnly(unittest.TestCase):
+    """The analysis works; only the writing fails, and there is somewhere else to put it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def f():\n    return 1\n")
+        os.chmod(self.dir, 0o555)
+        self.addCleanup(os.chmod, self.dir, 0o755)
+        if os.access(self.dir, os.W_OK):
+            self.skipTest("cannot make a directory read-only here (running as root?)")
+
+    def run_it(self, env=None):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180,
+                              env={**os.environ, **(env or {})})
+
+    def test_it_explains_instead_of_crashing(self):
+        r = self.run_it()
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("cannot write", r.stderr)
+
+    def test_the_message_names_the_file_that_actually_failed(self):
+        """It used to report the graph's directory whichever write failed, which sends people
+        to the wrong place - the cache is written first."""
+        r = self.run_it()
+        self.assertIn("codegraph.cache.json", r.stderr)
+
+    def test_the_advice_it_prints_actually_works(self):
+        """The escape hatch redirected the graph and left the cache writing into the directory
+        that was unwritable in the first place. Advice that has not been run is not advice."""
+        out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        target = os.path.join(out, "codegraph.json")
+        r = self.run_it({"CODEGRAPH_OUT": target})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(target))
+        self.assertTrue(os.path.exists(os.path.join(out, "codegraph.cache.json")),
+                        "the cache did not follow the graph")
 
 
 if __name__ == "__main__":
