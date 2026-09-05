@@ -879,6 +879,26 @@ def stats(g):
             "func_defs": len(defs), "never_called_in_tree": len(unreachable)}
 
 
+def _one_target(g, name):
+    """The single definition a command should act on, or None once the choice is explained.
+
+    A bare name that matches several definitions used to be MERGED silently: `impact digest`
+    with a pulse.digest and a court.digest reported both callers and a blast radius of two,
+    when the function being changed has one. That is the precise failure this tool exists to
+    prevent - the README's opening argument is that grep cannot tell two same-named functions
+    apart - reachable by typing the obvious thing, since nobody types a qualified id first.
+    Worse than overstating: you go and "fix" a caller of the other function.
+    """
+    ids = _targets(g, name)
+    if len(ids) > 1:
+        where_ = {n["id"]: f"{n['module']}.py:{n['line']}" for n in g["nodes"]}
+        print(f"{name!r} names {len(ids)} definitions - say which:", file=sys.stderr)
+        for i in sorted(ids):
+            print(f"    {i}  {where_.get(i, '')}", file=sys.stderr)
+        return None
+    return ids[0] if ids else name
+
+
 def _main(argv=None):
     """The CLI, as a function so `pip install` can expose it as a console script -- and so the
     tests can drive it in-process instead of shelling out."""
@@ -904,19 +924,32 @@ def _main(argv=None):
             print(f"no .py files found under {', '.join(g['dirs'])}", file=sys.stderr)
             return 1
         print(json.dumps(stats(g), indent=2))
-    elif a[0] == "callers": print("\n".join(callers_of(load(), a[1])) or "(none)")
+    elif a[0] == "callers":
+        g = load()
+        t = _one_target(g, a[1])
+        if t is None: return 2
+        print("\n".join(callers_of(g, t)) or "(none)")
     elif a[0] == "calls":
         g = load()
         targets = _targets(g, a[1])
+        if len(targets) > 1 and _one_target(g, a[1]) is None: return 2
         if not targets:
             print("(not found)")            # it used to print nothing whatsoever - no name, no
             return 1                        # "(none)", no error: an empty line and exit 0
         for i in targets:
             print("\n".join(calls_from(g, i)) or "(none)")
-    elif a[0] == "blast": print("\n".join(blast_radius(load(), a[1])) or "(none)")
+    elif a[0] == "blast":
+        g = load()
+        t = _one_target(g, a[1])
+        if t is None: return 2
+        print("\n".join(blast_radius(g, t)) or "(none)")
     elif a[0] == "where": print("\n".join(f"{i}  {loc}" for i, loc in where(load(), a[1])) or "(not found)")
     elif a[0] == "find": print("\n".join(f"{i}  {loc}" for i, loc in find(load(), a[1])) or "(none)")
-    elif a[0] == "sites": print("\n".join(f"{loc}  {c}" for loc, c in sites(load(), a[1])) or "(none)")
+    elif a[0] == "sites":
+        g = load()
+        t = _one_target(g, a[1])
+        if t is None: return 2
+        print("\n".join(f"{loc}  {c}" for loc, c in sites(g, t)) or "(none)")
     elif a[0] == "path": p = path(load(), a[1], a[2]); print(" -> ".join(p) if p else "(no path)")
     elif a[0] == "deps":
         g = load()
@@ -932,7 +965,10 @@ def _main(argv=None):
         cy = cycles(load())
         print("\n".join(" <-> ".join(group) for group in cy) or "(none)")
     elif a[0] == "impact":
-        im = impact(load(), a[1])
+        g = load()
+        t = _one_target(g, a[1])
+        if t is None: return 2
+        im = impact(g, t)
         print("callers:", ", ".join(im["callers"]) or "(none)")
         print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
         n = len(im["blast"])

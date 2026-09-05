@@ -1093,5 +1093,84 @@ class SmallWordsMatter(unittest.TestCase):
         self.assertIn("2 functions could be affected", self.impact("leaf"))
 
 
+class AnAmbiguousNameIsNotMerged(unittest.TestCase):
+    """The README's opening argument is that grep cannot tell you two files define `digest` and
+    only one is the one you are about to break. Typed the obvious way - a bare name, because
+    nobody types a qualified id first - the tool merged both: two callers reported when the
+    function being changed has one. Worse than overstating; you go and "fix" a caller of the
+    other function."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for mod, body in (("pulse", "pulse"), ("court", "court")):
+            with open(os.path.join(self.dir, f"{mod}.py"), "w", encoding="utf-8") as f:
+                f.write(f"def digest():\n    return {body!r}\n")
+        for user, mod in (("usera", "pulse"), ("userb", "court")):
+            with open(os.path.join(self.dir, f"{user}.py"), "w", encoding="utf-8") as f:
+                f.write(f"import {mod}\ndef go():\n    return {mod}.digest()\n")
+        self.run_it("build", ".")
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def test_every_acting_verb_refuses_to_merge(self):
+        for verb in ("impact", "blast", "callers", "sites", "calls"):
+            with self.subTest(verb):
+                r = self.run_it(verb, "digest")
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("names 2 definitions", r.stderr)
+                self.assertIn("pulse.digest", r.stderr)
+                self.assertIn("court.digest", r.stderr)
+
+    def test_it_says_where_each_one_lives(self):
+        r = self.run_it("impact", "digest")
+        self.assertIn("pulse.py:1", r.stderr)
+        self.assertIn("court.py:1", r.stderr)
+
+    def test_a_qualified_id_answers_for_exactly_that_one(self):
+        r = self.run_it("impact", "pulse.digest")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("usera.go", r.stdout)
+        self.assertNotIn("userb.go", r.stdout)
+        self.assertIn("1 function could be affected", r.stdout)
+
+    def test_an_unambiguous_bare_name_still_just_works(self):
+        """The guard must not make the common case harder."""
+        with open(os.path.join(self.dir, "solo.py"), "w", encoding="utf-8") as f:
+            f.write("def only_one():\n    return 1\n")
+        self.run_it("build", ".")
+        r = self.run_it("impact", "only_one")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_where_and_find_still_show_every_match(self):
+        """Those two exist to list them - they must not be narrowed."""
+        self.assertEqual(self.run_it("where", "digest").stdout.count("digest"), 2)
+        self.assertEqual(self.run_it("find", "diges").stdout.count("digest"), 2)
+
+
+class TheReadmeExampleRuns(unittest.TestCase):
+    """The one python block in the README had never been executed. A guide drifts the moment
+    nothing runs it, and the first person to hit the difference is a stranger pasting it."""
+
+    def test_the_library_example_works_as_written(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            block = re.search(r"```python\n(.*?)```", f.read(), re.S)
+        self.assertIsNotNone(block, "the README lost its library example")
+        code = block.group(1)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "app.py"), "w", encoding="utf-8") as f:
+            f.write("def spend_cap():\n    return 1\ndef use():\n    return spend_cap()\n")
+        subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                       cwd=d, capture_output=True, timeout=180)
+        runner = os.path.join(d, "_readme_example.py")
+        with open(runner, "w", encoding="utf-8") as f:
+            f.write(f"import sys\nsys.path.insert(0, {HERE!r})\n" + code)
+        r = subprocess.run([sys.executable, runner], cwd=d, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

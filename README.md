@@ -24,7 +24,9 @@ to open, and the transitive radius — before you touch anything.
 ## Why
 
 `grep` finds the name. It cannot tell you that two files define a function called `digest` and
-only one of them is the one you are about to break. Your editor's "find references" can, but it
+only one of them is the one you are about to break. Ask this for `digest` and it will not guess
+either — it names both and waits for you to say which, because merging their callers into one
+answer is how you end up "fixing" a caller of the other one. Your editor's "find references" can, but it
 needs a language server running, and it will not give you the *transitive* answer: who calls the
 callers.
 
@@ -179,14 +181,14 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 109 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 115 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
 directory arguments, two trees whose folders share a name, three calls to one function
 from one place, eight builds racing each other, files with a
 byte-order mark, a symlink pointing back into the tree, a graph built
-by an older copy of the tool — and codegraph reading its own source.
+by an older copy of the tool, two functions that share a name — and codegraph reading its own source.
 
 ## Licence
 
