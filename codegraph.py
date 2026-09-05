@@ -406,7 +406,16 @@ def _defs_and_calls(path, mod):
             # only Names were collected, so a qualified base produced no parent at all and
             # every method inherited through it went unresolved. The dotted string is what the
             # class-name rule already understands.
-            bases = [b for b in (_annotated_class(b) for b in node.bases) if b]
+            # A base whose name is a local VARIABLE is not a class this can follow.
+            # `V = Visitor[List[int]]` then `class IntListVisitor(V)` is ordinary generic code,
+            # and V is a value - it was being matched against every class in the tree and given
+            # a parent in an unrelated test module. Calls have refused shadowed names since the
+            # beginning; bases never asked.
+            bases = []
+            for b in node.bases:
+                name = _annotated_class(b)
+                if name and not any(name.split(".")[0] in v for v, _d in self.bound):
+                    bases.append(name)
             defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
                          "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
@@ -586,6 +595,19 @@ def _defs_and_calls(path, mod):
                 else:
                     recv_path = None
             else: callee = None
+            if callee in ("import_module", "__import__") and node.args:
+                # `import_module("curses.textpad")` is an import, written as a call. The name
+                # is right there as a constant, and a plugin loader or a test that reaches for
+                # a module this way is doing exactly what an import statement does - so `deps`
+                # and `cycles` should see it. Only a literal counts: a variable is a runtime
+                # decision and nobody can read it from here.
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    target = first.value.replace(".", "/")
+                    if target and not target.startswith("/"):
+                        imports.append({"src": mod, "callee": target, "kind": "IMPORT",
+                                        "line": node.lineno, "module_level": len(self.owner) == 1,
+                                        "maybe": True})
             if callee:                                          # attribute this call to its NEAREST enclosing owner (a def, or the module if top-level)
                 # The module is carried, not re-derived. It used to be recovered by splitting
                 # the qualified id on its first dot - which is wrong the moment a DIRECTORY has

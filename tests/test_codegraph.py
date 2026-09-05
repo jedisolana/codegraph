@@ -4406,3 +4406,99 @@ class ANameThisFileNeverMentionsIsNotYours(Sandbox):
         g = self.graph(write=False)
         self.assertEqual({e["confidence"] for e in g["calls"] if e["src"] == "app.go"},
                          {"BUILTIN"})
+
+
+class ABaseThatIsAVariableIsNotABase(Sandbox):
+    """`V = Visitor[List[int]]` and then `class IntListVisitor(V)` is ordinary generic code, and
+    V is a value. It was matched against every class in the tree and given a parent in an
+    unrelated module - which then supplied a constructor edge and a method lookup. Calls have
+    refused shadowed names from the beginning; bases never asked."""
+
+    def test_a_base_bound_as_a_local_resolves_to_nothing(self):
+        self.write("far.py", "class Alias:\n"
+                             "    def __init__(self):\n        pass\n"
+                             "    def run(self):\n        return 'the wrong parent'\n")
+        self.write("app.py", "def make():\n"
+                             "    Alias = dict\n"
+                             "    class Mine(Alias):\n"
+                             "        def go(self):\n"
+                             "            return self.run()\n"
+                             "    return Mine()\n")
+        g = self.graph(write=False)
+        node, = [n for n in g["nodes"] if n["id"] == "app.make.Mine"]
+        self.assertEqual(node.get("bases"), [])
+        self.assertEqual(codegraph.callers_of(g, "far.Alias.run"), [])
+        self.assertEqual(codegraph.callers_of(g, "far.Alias.__init__"), [])
+
+    def test_a_base_bound_at_module_level_is_refused_too(self):
+        self.write("far.py", "class Built:\n    def run(self):\n        return 1\n")
+        self.write("app.py", "Built = make_base()\n"
+                             "\n"
+                             "class Mine(Built):\n"
+                             "    def go(self):\n"
+                             "        return self.run()\n")
+        g = self.graph(write=False)
+        mine, = [n for n in g["nodes"] if n["id"] == "app.Mine"]
+        self.assertEqual(mine.get("bases"), [])
+        self.assertEqual(codegraph.callers_of(g, "far.Built.run"), [])
+
+    def test_an_ordinary_base_is_untouched(self):
+        self.write("base.py", "class Real:\n    def run(self):\n        return 1\n")
+        self.write("app.py", "from base import Real\n"
+                             "\n"
+                             "class Mine(Real):\n"
+                             "    def go(self):\n"
+                             "        return self.run()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.Mine.go" and e["callee"] == "run"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("base.Real.run", "INHERITED"))
+
+
+class AnImportWrittenAsACallIsStillAnImport(Sandbox):
+    """`import_module("curses.textpad")` is an import with a different spelling. A plugin
+    loader, a lazy import, or a test reaching for an optional module does exactly what an
+    import statement does, and `deps` and `cycles` could not see any of it."""
+
+    def test_a_literal_dynamic_import_is_recorded(self):
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "widget.py"), "def draw():\n    return 1\n")
+        self.write("app.py", "from importlib import import_module\n"
+                             "\n"
+                             "def load():\n"
+                             "    return import_module('pkg.widget')\n")
+        g = self.graph(write=False)
+        self.assertIn("pkg/widget", codegraph.module_deps(g, "app")[0])
+        self.assertEqual(codegraph.module_deps(g, "pkg/widget")[1], ["app"])
+
+    def test_the_old_two_argument_form_counts(self):
+        self.write("plain.py", "def work():\n    return 1\n")
+        self.write("app.py", "def load():\n    return __import__('plain')\n")
+        g = self.graph(write=False)
+        self.assertIn("plain", codegraph.module_deps(g, "app")[0])
+
+    def test_a_name_that_is_not_a_literal_is_not_guessed(self):
+        """The guard: a variable is a runtime decision and nobody can read it from here."""
+        self.write("plain.py", "def work():\n    return 1\n")
+        self.write("app.py", "from importlib import import_module\n"
+                             "\n"
+                             "def load(which):\n"
+                             "    return import_module(which)\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.module_deps(g, "app")[0], [])
+
+    def test_a_module_that_is_not_in_the_tree_adds_no_edge(self):
+        self.write("app.py", "from importlib import import_module\n"
+                             "\n"
+                             "def load():\n"
+                             "    return import_module('json.decoder')\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.module_deps(g, "app")[0], [])
+
+    def test_a_dynamic_import_can_complete_a_cycle(self):
+        """The point of recording it: a loader that reaches back into its own package is a
+        real cycle, and it was invisible."""
+        self.write("a.py", "from importlib import import_module\n"
+                           "b = import_module('b')\n"
+                           "def ga():\n    return 1\n")
+        self.write("b.py", "import a\ndef gb():\n    return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [("a", "b")])

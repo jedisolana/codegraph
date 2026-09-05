@@ -108,7 +108,7 @@ codegraph sites <name>       every call site as file:line, relative to what you 
 codegraph where <name>       where a symbol is defined
 codegraph find <substr>      fuzzy symbol search
 codegraph path <from> <to>   a call path connecting two functions
-codegraph deps <module>      a module's in-tree imports and importers
+codegraph deps <module>      a module's in-tree imports and importers, `import_module("x")` included
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         32 ground-truth checks, several of them red-first
@@ -257,7 +257,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 355 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 363 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -308,7 +308,9 @@ every way Python has of binding a name, one at a time,
 a resolution pass that must not depend on the order its edges arrive in,
 the scope analysis checked against the one CPython's own compiler does,
 a base class named the two ways Python lets you name one,
-and a class defined inside the very function that builds one
+a class defined inside the very function that builds one,
+a base class that is really a local variable holding a generic alias,
+and an import written as `import_module("pkg.widget")`
 — and codegraph reading its own source.
 
 ## Licence
