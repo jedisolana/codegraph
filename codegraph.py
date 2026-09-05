@@ -122,7 +122,12 @@ def _defs_and_calls(path, mod):
 
         def visit_ClassDef(self, node):
             qid = self._qual(node.name)
-            defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod, "line": node.lineno})
+            # Base classes by NAME. Resolved to ids in build(), where the whole tree is known, so
+            # `self.method()` can be found on a parent instead of giving up - which is the single
+            # most common shape this used to miss.
+            bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
+                         "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
             for c in node.body: self.visit(c)
             self.classes.pop(); self.scope.pop()
@@ -146,13 +151,19 @@ def _defs_and_calls(path, mod):
         def visit_Call(self, node):
             fn = node.func
             recv = None; method = False
+            recv_root = None
             if isinstance(fn, ast.Name): callee = fn.id                          # a BARE call foo() - may be local/imported
             elif isinstance(fn, ast.Attribute):
                 callee = fn.attr; method = True                                  # a METHOD call X.attr() - only resolves via a known module or self, else external
                 recv = fn.value.id if isinstance(fn.value, ast.Name) else None   # the `memory` in memory.recall(); None when the receiver is open(...)/a[0]/x.y (still a method call, never bare)
+                root = fn.value                                  # and the ROOT of a dotted chain:
+                while isinstance(root, ast.Attribute): root = root.value   # the `os` in os.path.join()
+                recv_root = root.id if isinstance(root, ast.Name) else None
             else: callee = None
             if callee:                                          # attribute this call to its NEAREST enclosing owner (a def, or the module if top-level)
-                edge = {"src": self.owner[-1], "callee": callee, "recv": recv, "method": method, "kind": "CALL", "line": getattr(node, "lineno", 0)}
+                edge = {"src": self.owner[-1], "callee": callee, "recv": recv, "method": method,
+                        "recv_root": recv_root if isinstance(fn, ast.Attribute) else None,
+                        "kind": "CALL", "line": getattr(node, "lineno", 0)}
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and recv in self.vtypes[-1]: edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
                 edges.append(edge)
@@ -228,7 +239,7 @@ def build(dirs=None, write=True):
         nodes += d; calls += e; imports += im
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root
     if multiroot:                                              # remap import aliases to the SAME-ROOT module id, so within-tree imports resolve to the right tree
-        allmods = {n["id"] for n in nodes if n["kind"] == "module"}
+        allmods = {n["id"] for n in nodes if n["kind"] == "module"}   # the ids known at this point
         qual = lambda r, b: (f"{r}/{b}" if f"{r}/{b}" in allmods else b)
         for mid in list(mod_alias):
             r = mod_root[mid]
@@ -237,15 +248,48 @@ def build(dirs=None, write=True):
             # "<root>/<already-rooted-id>" is never a real module.
             mod_alias[mid] = {k: qual(r, v) for k, v in mod_alias[mid].items()}
             mod_from[mid] = {k: qual(r, v) for k, v in mod_from[mid].items()}
+    allmods = {n["id"] for n in nodes if n["kind"] == "module"}
     by_name = defaultdict(list); by_modname = {}; def_ids = set()
+    cls_ids = defaultdict(dict)                                  # module -> {ClassName: class id}
     for n in nodes:
         if n["kind"] in ("func", "class"):
             by_name[n["name"]].append(n["id"]); by_modname[(n["module"], n["name"])] = n["id"]; def_ids.add(n["id"])
+        if n["kind"] == "class":
+            cls_ids[n["module"]][n["name"]] = n["id"]
+    bases_of = {}                                                # class id -> base class ids
+    for n in nodes:
+        if n["kind"] == "class" and n.get("bases"):
+            here = cls_ids.get(n["module"], {})
+            resolved = []
+            for b in n["bases"]:
+                if b in here: resolved.append(here[b])           # a base in the same module
+                else:
+                    hits = [i for i in by_name.get(b, []) if i.split(".")[-1] == b]
+                    if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
+            bases_of[n["id"]] = resolved
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         ec = e.get("encl_class")
         if ec and (ec + "." + callee) in def_ids:                # self.method()/cls.method() -> the method in the ENCLOSING class (exact scope)
             dst = ec + "." + callee; conf = "SELF-METHOD"
+        elif ec:
+            # INHERITED: self.method() where the method lives on a base class. Walk the chain,
+            # depth-first and left-to-right - Python's own order - and stop at the first class
+            # that defines it. `seen` guards a cyclic hierarchy, which is illegal in Python but
+            # trivially expressible in a half-written file.
+            stack, walked = list(bases_of.get(ec, ())), {ec}
+            while stack:
+                b = stack.pop(0)
+                if b in walked: continue
+                walked.add(b)
+                if (b + "." + callee) in def_ids:
+                    dst = b + "." + callee; conf = "INHERITED"; break
+                stack = list(bases_of.get(b, ())) + stack
+        if not dst and method and recv and recv in cls_ids.get(srcmod, {}):
+            # ClassName.method() written out in full - a classmethod call, or an explicit
+            # unbound call. The receiver is a class in this module, not an unknown object.
+            cand = cls_ids[srcmod][recv] + "." + callee
+            if cand in def_ids: dst = cand; conf = "CLASS"
         rt = e.get("recv_type")
         if not dst and rt:                                       # x.method() where `x = Foo()` (local type inference) -> Foo.method
             for cid in by_name.get(rt, []):
@@ -257,14 +301,24 @@ def build(dirs=None, write=True):
         if not dst and not method and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
             dst = by_modname[(srcmod, callee)]; conf = "LOCAL"
         if not dst and not method:                               # a BARE call
-            if callee in _BUILTINS: conf = "EXTERNAL"            # a builtin (next/len/sorted/open...) - never a same-named in-tree def
+            if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
             else:
                 tgts = by_name.get(callee, [])
                 if len(tgts) == 1: dst = tgts[0]; conf = "RESOLVED"
                 elif len(tgts) > 1: conf = "AMBIGUOUS"; e["candidates"] = tgts
                 else: conf = "EXTERNAL"
-        if not dst and conf is None:                             # a METHOD call X.attr() with no in-tree module/self receiver: json.load()/open(..).write()/d.get() -> EXTERNAL, never a same-named in-tree func
-            conf = "EXTERNAL"
+        if not dst and conf is None:
+            rr = e.get("recv_root")
+            if rr and mod_alias.get(srcmod, {}).get(rr) not in (None, *allmods):
+                # os.path.join(), json.load() - the chain is rooted in a module you imported
+                # that is not one of ours. Knowably external, not a blind spot.
+                conf = "EXTERNAL"
+            else:
+                # A METHOD call whose receiver could not be typed: d.get(), x.run(), self.a.b().
+                # This is the tool's real blind spot, and it is NOT the same as external - the
+                # target might well be in your tree. Naming it separately is what makes the
+                # resolution rate mean something: it is the denominator of what was winnable.
+                conf = "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
     nodes.sort(key=lambda n: (n["kind"], n["id"]))              # DETERMINISTIC output: byte-reproducible across runs regardless of os.walk order -> two builds are diffable
     calls.sort(key=lambda e: (e["src"], e.get("recv") or "", e["callee"], e.get("line", 0)))
@@ -304,7 +358,7 @@ def _selftest():
     sm = [e for e in g["calls"] if e["src"] == "caller.Box.use" and e["callee"] == "helper"]
     ok4 = len(sm) == 1 and sm[0].get("dst") == "caller.Box.helper" and sm[0]["confidence"] == "SELF-METHOD"
     we = [e for e in g["calls"] if e["src"] == "caller.w" and e["callee"] == "write"]
-    ok5 = len(we) == 1 and we[0].get("dst") is None and we[0]["confidence"] == "EXTERNAL"   # method call, NOT the in-tree alpha.write
+    ok5 = len(we) == 1 and we[0].get("dst") is None and we[0]["confidence"] == "UNTYPED"   # a method on a value we cannot type - and NOT the in-tree alpha.write
     ok6 = any(loc.startswith("caller.py:") for loc, c in sites(g, "alpha.digest") if c == "caller.run")
     ok7 = path(g, "caller.run", "alpha.digest") == ["caller.run", "alpha.digest"]
     imp = impact(g, "alpha.digest")
@@ -356,7 +410,7 @@ def _selftest():
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
     print(f"  RED-FIRST control - naive name-match conflates (would wrongly blame beta.digest): {ok3}")
     print(f"  self.helper() resolves inside its class -> caller.Box.helper (SELF-METHOD): {ok4}")
-    print(f"  RED-FIRST - open(..).write() stays EXTERNAL, not falsely -> alpha.write: {ok5}")
+    print(f"  RED-FIRST - open(..).write() stays UNTYPED, not falsely -> alpha.write: {ok5}")
     print(f"  sites() finds the exact call site (caller.py:line) of alpha.digest: {ok6}")
     print(f"  path() traces caller.run -> alpha.digest: {ok7}")
     print(f"  impact() gives callers + sites + blast in one pre-edit view: {ok8}")
@@ -448,14 +502,34 @@ def calls_from(g, node_id):
     return sorted({e["dst"] for e in g["calls"] if e["src"] == node_id and e.get("dst")})
 
 
-def blast_radius(g, target, max_hops=6):
-    """transitive callers of `target` - what could break if you change it. Walks RESOLVED caller edges by id,
-    so the radius follows the actual call graph, not a same-name coincidence."""
+def _callers_index(g):
+    """dst -> the set of ids that call it, built once.
+
+    blast_radius used to call callers_of() per node, and callers_of() scans every edge, so a
+    wide radius was O(nodes x edges). One pass instead.
+    """
+    idx = defaultdict(set)
+    for e in g["calls"]:
+        if e.get("dst"): idx[e["dst"]].add(e["src"])
+    return idx
+
+
+def blast_radius(g, target, max_hops=None):
+    """Transitive callers of `target` - what could break if you change it. COMPLETE by default.
+
+    It used to stop after six hops and say nothing about it: a twelve-deep call chain reported
+    six of eleven callers as though that were the answer, and the five it dropped were the ones
+    furthest from the change - exactly the ones you would not think to check yourself. A
+    truncated blast radius is worse than none, because it is trusted. The graph is finite and
+    `seen` guarantees termination, so the cap bought nothing. Pass max_hops to bound it on
+    purpose; then the answer is partial because you asked for it to be.
+    """
+    idx = _callers_index(g)
     frontier, seen, hops = set(callers_of(g, target)), set(), 0
-    while frontier and hops < max_hops:
+    while frontier and (max_hops is None or hops < max_hops):
         seen |= frontier
         nxt = set()
-        for caller_id in frontier: nxt |= set(callers_of(g, caller_id))
+        for caller_id in frontier: nxt |= idx.get(caller_id, set())
         frontier = nxt - seen; hops += 1
     return sorted(seen)
 
@@ -483,8 +557,13 @@ def sites(g, target):
     return sorted(out)
 
 
-def path(g, src, dst, max_hops=8):
-    """a CALL PATH from src to dst (how src reaches dst) over resolved edges, or [] if none within max_hops."""
+def path(g, src, dst, max_hops=None):
+    """A call path from src to dst over resolved edges, or [] if there is genuinely none.
+
+    Also uncapped now. It stopped at eight hops and returned [] - which prints as "(no path)",
+    i.e. absence of evidence reported as evidence of absence. Breadth-first over a finite graph
+    with a visited set terminates by itself, and the first path found is a shortest one.
+    """
     import collections
     fwd = {}
     for e in g["calls"]:
@@ -496,7 +575,8 @@ def path(g, src, dst, max_hops=8):
             p = q.popleft()
             for nxt in fwd.get(p[-1], []):
                 if nxt in goals: return p + [nxt]
-                if nxt not in seen and len(p) < max_hops: seen.add(nxt); q.append(p + [nxt])
+                if nxt not in seen and (max_hops is None or len(p) < max_hops):
+                    seen.add(nxt); q.append(p + [nxt])
     return []
 
 
@@ -535,11 +615,20 @@ def stats(g):
     called = {e["dst"] for e in g["calls"] if e.get("dst")}
     defs = [n["id"] for n in g["nodes"] if n["kind"] == "func"]
     unreachable = [d for d in defs if d not in called]           # never called in-tree (entrypoints, dead code, or dynamic)
-    specific = conf["QUALIFIED"] + conf["LOCAL"] + conf["RESOLVED"]   # calls resolved to ONE definition
-    in_tree = len(g["calls"]) - conf["EXTERNAL"]                  # calls whose target could be in-tree (excl builtins/stdlib/methods)
+    # Calls resolved to ONE definition. This used to add up three named labels by hand, so
+    # SELF-METHOD and TYPED edges - which resolve to exactly one def - went uncounted, and the
+    # rate was understated. Worse, it was a list that had to be edited every time a label was
+    # added: INHERITED and CLASS would have been silently missing too. Ask the edge instead.
+    specific = sum(1 for e in g["calls"] if e.get("dst"))
+    # The rate is over what was WINNABLE. Counting builtins and stdlib in the denominator
+    # measures how much of the standard library you happen to use; leaving out the untyped
+    # method calls makes it tautologically 1.0, since almost everything else resolves by
+    # definition. Winnable = resolved + ambiguous + the method calls it could not type.
+    winnable = specific + conf["AMBIGUOUS"] + conf["UNTYPED"]
     return {"nodes": dict(kinds), "call_edges": len(g["calls"]), "edge_confidence": dict(conf),
             "resolved_to_one_def": specific,
-            "in_tree_resolution_rate": round(specific / max(in_tree, 1), 3),
+            "could_have_been_resolved": winnable,
+            "resolution_rate": round(specific / max(winnable, 1), 3),
             "func_defs": len(defs), "never_called_in_tree": len(unreachable)}
 
 

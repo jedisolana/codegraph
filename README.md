@@ -41,6 +41,8 @@ Every call edge carries a confidence label:
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
 | `TYPED` | `x = Foo(); x.method()` — resolved by local type inference |
+| `INHERITED` | `self.method()` where the method lives on a base class |
+| `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module you imported |
 | `LOCAL` | a bare call to a function in the same module |
 | `RESOLVED` | a bare call, and exactly one definition of that name exists |
@@ -51,16 +53,31 @@ Most call-graph tools guess and hand you one answer. This one refuses. An `AMBIG
 a real result: it means the question does not have a single answer, and a blast radius that
 quietly picked one would be worse than no blast radius at all.
 
-`stats` reports the resolution rate, so you know how much of the graph is solid:
+`UNTYPED` is the one that matters. It means *a method call whose receiver could not be typed* —
+`d.get()`, `x.run()`. The target might well be in your tree; the tool simply cannot tell. It is
+deliberately not lumped in with `EXTERNAL`, because that would claim knowledge it does not have
+and would flatter the resolution rate by shrinking the denominator.
+
+`stats` reports that rate over **what was winnable** — resolved, plus ambiguous, plus the calls
+it could not type. Builtins and library calls are excluded, since counting them would only
+measure how much of the standard library you happen to use:
 
 ```json
 {
   "call_edges": 2580,
-  "edge_confidence": {"QUALIFIED": 201, "LOCAL": 197, "SELF-METHOD": 78,
-                      "RESOLVED": 46, "TYPED": 3, "AMBIGUOUS": 1, "EXTERNAL": 2054},
-  "in_tree_resolution_rate": 0.844
+  "edge_confidence": {"UNTYPED": 1261, "EXTERNAL": 421, "BUILTIN": 379, "QUALIFIED": 201,
+                      "LOCAL": 197, "SELF-METHOD": 78, "RESOLVED": 39, "TYPED": 3,
+                      "CLASS": 1, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 519,
+  "could_have_been_resolved": 1780,
+  "resolution_rate": 0.292
 }
 ```
+
+That 0.29 is a real number on a real codebase, and it is not flattering. Most of what it cannot
+place are method calls on objects it has no type for — the honest ceiling of static analysis
+this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
+which is how a metric ends up meaning nothing.
 
 ## The commands
 
@@ -77,7 +94,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             mutual import cycles (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         seventeen ground-truth checks, several red-first
+codegraph --selftest         17 ground-truth checks, several of them red-first
 ```
 
 Queries rebuild automatically when a source file has changed, so you are never answered from a
@@ -108,8 +125,9 @@ Static analysis, honestly labelled:
 - **Dynamic dispatch defeats it** — `getattr(obj, name)()`, dispatch tables, monkeypatching,
   plugin registries. These land as `EXTERNAL`, which is the truthful answer.
 - **Decorators that replace a function** are not followed.
-- **Inheritance is not resolved.** `self.method()` resolves within the defining class, not up a
-  base class chain.
+- **Inheritance is resolved by name, not by import.** `self.method()` walks the base chain when
+  the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
+  A base imported under an alias, or built by a metaclass, is not followed.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`. Nothing beyond that.
 
 Everything it cannot resolve is labelled rather than guessed, so the limits are visible in the
@@ -117,7 +135,8 @@ output instead of hidden in it.
 
 ## Why not something else
 
-- **`grep` / `ctags`** — finds names, not relationships. No transitive answer.
+- **`grep` / `ctags`** — finds names, not relationships. No transitive answer, and it cannot
+  tell two same-named functions apart.
 - **`pyan`, `code2flow`** — call graphs, but they want Graphviz and hand you a picture. This
   hands you an answer to a question, and installs nothing.
 - **`pydeps`** — module imports only, not function calls.
@@ -144,7 +163,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks them —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 17 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -153,8 +172,10 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds the CLI, the on-disk contract, cache invalidation, corrupt-file recovery,
-and codegraph reading its own source.
+The test suite adds 42 more: the CLI and its error messages, the on-disk contract, cache
+invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
+and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain — and codegraph
+reading its own source.
 
 ## Licence
 

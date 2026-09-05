@@ -76,11 +76,20 @@ class ConfidenceIsHonest(Sandbox):
         self.write("mine.py", "def open():\n    return 1\n")
         self.write("uses.py", "def r():\n    return open('f')\n")
         e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "uses.r")
-        self.assertEqual((e.get("dst"), e["confidence"]), (None, "EXTERNAL"))
+        self.assertEqual((e.get("dst"), e["confidence"]), (None, "BUILTIN"))
 
-    def test_a_method_on_an_unknown_object_stays_external(self):
+    def test_a_method_on_an_object_it_cannot_type_is_untyped_not_external(self):
+        """UNTYPED is the honest label: the target might be in your tree, it just cannot tell.
+        Calling it EXTERNAL would claim knowledge it does not have, and would quietly inflate
+        the resolution rate by shrinking the denominator."""
         self.write("m.py", "def write():\n    return 1\n")
         self.write("u.py", "def r(fh):\n    return fh.write('x')\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "u.r")
+        self.assertEqual((e.get("dst"), e["confidence"]), (None, "UNTYPED"))
+
+    def test_a_call_rooted_in_an_imported_library_is_external(self):
+        """os.path.join() is knowably not yours - it must not sit in the blind-spot bucket."""
+        self.write("u.py", "import os\ndef r():\n    return os.path.join('a', 'b')\n")
         e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "u.r")
         self.assertEqual((e.get("dst"), e["confidence"]), (None, "EXTERNAL"))
 
@@ -220,7 +229,9 @@ class ItCanReadItself(unittest.TestCase):
         self.assertIn("codegraph.build", codegraph.callers_of(g, "codegraph._defs_and_calls"))
         self.assertIn("codegraph._main", codegraph.blast_radius(g, "codegraph.load"))
         s = codegraph.stats(g)
-        self.assertGreater(s["in_tree_resolution_rate"], 0.5, s)
+        self.assertGreater(s["resolution_rate"], 0.3, s)
+        self.assertEqual(s["resolved_to_one_def"],
+                         sum(1 for e in g["calls"] if e.get("dst")), "the count is hand-kept again")
 
 
 class ItLeaksNothing(unittest.TestCase):
@@ -336,6 +347,96 @@ class BadInputIsAMessageNotATraceback(unittest.TestCase):
         r = self.run_it("build", "app.py")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("app.leaf", self.run_it("where", "leaf").stdout)
+
+
+class AnIncompleteAnswerIsTheWorstAnswer(Sandbox):
+    """blast_radius stopped after six hops and said nothing about it. A twelve-deep chain
+    reported six of eleven callers as though that were the answer - and the five it dropped
+    were the ones furthest from the change, exactly the ones you would not think to check."""
+
+    def chain(self, depth):
+        for i in range(depth):
+            nxt = f"from m{i+1:02d} import f{i+1}\n" if i < depth - 1 else ""
+            body = f"    return f{i+1}()" if i < depth - 1 else "    return 1"
+            self.write(f"m{i:02d}.py", f"{nxt}def f{i}():\n{body}\n")
+        return self.graph(write=False)
+
+    def test_the_blast_radius_is_complete_however_deep_the_chain(self):
+        g = self.chain(12)
+        got = codegraph.blast_radius(g, "m11.f11")
+        self.assertEqual(len(got), 11, f"truncated: {got}")
+        self.assertIn("m00.f0", got, "the caller furthest from the change was dropped")
+
+    def test_a_bound_is_still_available_when_you_ask_for_one(self):
+        g = self.chain(12)
+        self.assertEqual(len(codegraph.blast_radius(g, "m11.f11", max_hops=3)), 3)
+
+    def test_path_finds_a_route_longer_than_eight_hops(self):
+        """It returned [] past eight, which prints as '(no path)': absence of evidence
+        reported as evidence of absence."""
+        g = self.chain(12)
+        p = codegraph.path(g, "m00.f0", "m11.f11")
+        self.assertEqual(len(p), 12, p)
+
+    def test_a_cycle_in_the_call_graph_terminates(self):
+        self.write("a.py", "def x():\n    return y()\ndef y():\n    return x()\n")
+        self.assertEqual(codegraph.blast_radius(self.graph(write=False), "a.x"), ["a.x", "a.y"])
+
+
+class Inheritance(Sandbox):
+    def test_a_method_on_a_base_class_is_found(self):
+        self.write("p.py", "class Parent:\n    def shared(self):\n        return 1\n")
+        self.write("c.py", "from p import Parent\nclass Child(Parent):\n"
+                           "    def use(self):\n        return self.shared()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "c.Child.use")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("p.Parent.shared", "INHERITED"))
+
+    def test_the_nearest_definition_wins(self):
+        """A child that overrides must resolve to its own, not the parent's."""
+        self.write("h.py", "class A:\n    def m(self):\n        return 1\n"
+                           "class B(A):\n    def m(self):\n        return 2\n"
+                           "    def use(self):\n        return self.m()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "h.B.use")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("h.B.m", "SELF-METHOD"))
+
+    def test_a_class_referenced_by_name_resolves(self):
+        self.write("k.py", "class P:\n    @classmethod\n    def make(cls):\n        return 1\n"
+                           "def go():\n    return P.make()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "k.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("k.P.make", "CLASS"))
+
+    def test_a_cyclic_hierarchy_does_not_hang(self):
+        """Illegal in Python, trivially expressible in a half-written file."""
+        self.write("z.py", "class A(B):\n    def use(self):\n        return self.gone()\n"
+                           "class B(A):\n    pass\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "z.A.use")
+        self.assertIsNone(e.get("dst"))
+
+    def test_an_unresolvable_base_is_not_guessed(self):
+        self.write("q.py", "import ast\nclass V(ast.NodeVisitor):\n"
+                           "    def go(self):\n        return self.visit(1)\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "q.V.go")
+        self.assertIsNone(e.get("dst"), "it invented a target for a base class it cannot see")
+
+
+class TheResolutionRateMeansSomething(Sandbox):
+    def test_the_denominator_is_what_was_winnable(self):
+        """Counting builtins and library calls measures how much stdlib you use. Leaving out
+        the untypeable method calls makes it tautologically 1.0."""
+        self.write("w.py",
+                   "import os\n"
+                   "def helper():\n    return 1\n"
+                   "def go(d):\n"
+                   "    a = len('x')\n"            # BUILTIN   - not winnable
+                   "    b = os.path.join('a')\n"   # EXTERNAL  - not winnable
+                   "    c = d.get('k')\n"          # UNTYPED   - winnable, and lost
+                   "    return helper() and a and b and c\n")   # LOCAL - winnable, and won
+        s = codegraph.stats(self.graph(write=False))
+        c = s["edge_confidence"]
+        self.assertEqual((c.get("BUILTIN"), c.get("EXTERNAL"), c.get("UNTYPED"), c.get("LOCAL")),
+                         (1, 1, 1, 1), c)
+        self.assertEqual(s["could_have_been_resolved"], 2, "builtins or library calls got counted")
+        self.assertEqual(s["resolution_rate"], 0.5)
 
 
 if __name__ == "__main__":

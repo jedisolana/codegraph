@@ -39,4 +39,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # which keeps the AST visitor readable as a table of cases rather than a page of stubs. A
 # linter that fights the author on eighty-five lines is a linter that gets switched off.
 # E731/RUF005 are the same call: a named lambda and `a + [b]` are fine here.
-ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005"]
+# SIM108: a ternary that runs to a hundred characters is not clearer than an if/else, and
+# here the two branches carry the comments explaining why a call is external rather than
+# merely untypeable - which is the distinction the whole resolution rate rests on.
+ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005", "SIM108"]
