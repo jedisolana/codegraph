@@ -201,10 +201,23 @@ def _defs_and_calls(path, mod):
             self.generic_visit(node)                            # recurse into args/keywords (which may hold more calls)
 
     V().visit(tree)
-    seen = {}                                                   # dedup: one edge per (src, recv, callee) triple, keep first line
+    # One EDGE per (caller, receiver, name) - that is one relationship, and it keeps the graph
+    # the right size. But it used to keep only the first line and drop the rest, so a function
+    # calling helper() on lines 6, 7 and 8 produced a single site: line 6. `sites` promises
+    # "every call site - the exact places to edit", and refactoring from a list that is
+    # missing two of three is how you break a codebase with a tool bought to prevent that.
+    # The relationship is deduplicated; the places are all kept.
+    seen = {}
     for e in edges:
-        k = (e["src"], e.get("recv"), e["callee"])   # one edge per (caller, receiver, name)
-        if k not in seen: seen[k] = e
+        k = (e["src"], e.get("recv"), e["callee"])
+        if k in seen:
+            seen[k]["lines"].append(e["line"])
+        else:
+            e["lines"] = [e["line"]]
+            seen[k] = e
+    for e in seen.values():
+        e["lines"] = sorted(set(e["lines"]))
+        e["line"] = e["lines"][0]                    # the first, for anything reading one line
     return defs, list(seen.values()), imports, aliases, fromimp
 
 
@@ -648,7 +661,8 @@ def sites(g, target):
     for e in g["calls"]:
         if (e.get("dst") in ids) if ids else (e["callee"] == name):
             m = e.get("mod") or mod_of.get(e["src"]) or e["src"].split(".")[0]
-            out.add((f"{m}.py:{e['line']}", e["src"]))
+            for ln in e.get("lines") or [e["line"]]:
+                out.add((f"{m}.py:{ln}", e["src"]))
     return sorted(out)
 
 
@@ -755,7 +769,11 @@ def stats(g):
     # method calls makes it tautologically 1.0, since almost everything else resolves by
     # definition. Winnable = resolved + ambiguous + the method calls it could not type.
     winnable = specific + conf["AMBIGUOUS"] + conf["UNTYPED"]
-    return {"nodes": dict(kinds), "call_edges": len(g["calls"]), "edge_confidence": dict(conf),
+    # Edges are relationships; sites are places in the source. They are different numbers, and
+    # reporting only the first hid the fact that one edge can stand for a dozen call sites.
+    sites_total = sum(len(e.get("lines") or [e.get("line")]) for e in g["calls"])
+    return {"nodes": dict(kinds), "call_edges": len(g["calls"]), "call_sites": sites_total,
+            "edge_confidence": dict(conf),
             "resolved_to_one_def": specific,
             "could_have_been_resolved": winnable,
             "resolution_rate": round(specific / max(winnable, 1), 3),

@@ -726,5 +726,90 @@ class AnUnknownNameSaysSo(unittest.TestCase):
         self.assertIn("(none)", r.stdout)
 
 
+class EveryCallSiteIsAPlaceToEdit(Sandbox):
+    """`sites` is documented as "every call site - the exact places to edit". Edges were
+    deduplicated per (caller, receiver, name) keeping only the FIRST line, so a function
+    calling helper() three times reported one site. Refactoring from a list that is missing
+    two of three is how you break a codebase with the tool bought to prevent that."""
+
+    def test_three_calls_from_one_function_are_three_sites(self):
+        self.write("m.py", "def helper():\n    return 1\n\n\ndef caller():\n"
+                           "    a = helper()\n    b = helper()\n    c = helper()\n"
+                           "    return a + b + c\n")
+        got = codegraph.sites(self.graph(write=False), "helper")
+        self.assertEqual([loc for loc, _ in got], ["m.py:6", "m.py:7", "m.py:8"])
+
+    def test_the_graph_still_holds_one_edge_per_relationship(self):
+        """The dedup is right for the graph - it is only the line list that was lossy."""
+        self.write("m.py", "def helper():\n    return 1\ndef caller():\n"
+                           "    return helper() + helper()\n")
+        g = self.graph(write=False)
+        edges = [e for e in g["calls"] if e["callee"] == "helper"]
+        self.assertEqual(len(edges), 1, "one relationship became several edges")
+        self.assertEqual(edges[0]["lines"], [4])
+
+    def test_stats_counts_edges_and_sites_separately(self):
+        self.write("m.py", "def helper():\n    return 1\ndef caller():\n"
+                           "    helper()\n    helper()\n    return helper()\n")
+        st = codegraph.stats(self.graph(write=False))
+        self.assertEqual((st["call_edges"], st["call_sites"]), (1, 3))
+
+    def test_impact_lists_them_all(self):
+        self.write("m.py", "def helper():\n    return 1\ndef caller():\n"
+                           "    helper()\n    return helper()\n")
+        self.assertEqual(len(codegraph.impact(self.graph(write=False), "helper")["sites"]), 2)
+
+
+class ClassesAreCallableToo(Sandbox):
+    """Instantiating a class is a call, and "what breaks if I change this class" is a headline
+    question. Pinned so the answer cannot quietly become empty."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("lib.py", "class Engine:\n    def start(self):\n        return 1\n\n"
+                             "def build():\n    return Engine()\n")
+        self.write("app.py", "from lib import Engine\ndef main():\n    e = Engine()\n"
+                             "    return e.start()\n")
+        self.g = self.graph(write=False)
+
+    def test_instantiation_counts_as_a_caller(self):
+        self.assertEqual(codegraph.callers_of(self.g, "lib.Engine"), ["app.main", "lib.build"])
+
+    def test_a_class_has_a_blast_radius(self):
+        self.assertIn("app.main", codegraph.blast_radius(self.g, "lib.Engine"))
+
+    def test_a_method_on_a_locally_constructed_instance_resolves(self):
+        e = next(x for x in self.g["calls"] if x["src"] == "app.main" and x["callee"] == "start")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("lib.Engine.start", "TYPED"))
+
+
+class UnusualButLegalPython(Sandbox):
+    """Shapes real code contains that a parser can quietly mishandle."""
+
+    def test_a_nested_class_method_is_indexed(self):
+        self.write("n.py", "class Outer:\n    class Inner:\n        def deep(self):\n"
+                           "            return 1\n")
+        self.assertIn("n.Outer.Inner.deep", {x["id"] for x in self.graph(write=False)["nodes"]})
+
+    def test_an_async_method_resolves_self_calls(self):
+        self.write("a.py", "class C:\n    async def go(self):\n        return self.helper()\n"
+                           "    def helper(self):\n        return 1\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "a.C.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("a.C.helper", "SELF-METHOD"))
+
+    def test_a_local_module_shadowing_the_stdlib_wins(self):
+        """A json.py in your tree IS what `import json` gets, and the graph should say so."""
+        self.write("json.py", "def loads(s):\n    return 1\n")
+        self.write("u.py", "import json\ndef go():\n    return json.loads('{}')\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "u.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("json.loads", "QUALIFIED"))
+
+    def test_an_empty_file_is_a_module_not_a_crash(self):
+        self.write("blank.py", "")
+        self.write("comment.py", "# nothing here\n")
+        mods = {n["id"] for n in self.graph(write=False)["nodes"] if n["kind"] == "module"}
+        self.assertEqual(mods, {"blank", "comment"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
