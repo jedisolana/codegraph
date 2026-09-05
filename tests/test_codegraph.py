@@ -4502,3 +4502,73 @@ class AnImportWrittenAsACallIsStillAnImport(Sandbox):
                            "def ga():\n    return 1\n")
         self.write("b.py", "import a\ndef gb():\n    return 1\n")
         self.assertEqual(codegraph.cycles(self.graph(write=False)), [("a", "b")])
+
+
+class TheGraphCarriesWhatAQuestionNeeds(Sandbox):
+    """An edge accumulates a dozen working fields on the way to a target - whether the receiver
+    was a local, the root of a dotted chain, the enclosing class, the inferred type - and none
+    of them is read once the target is known. They were written to disk, loaded back on every
+    query, and held in memory through two serialisations."""
+
+    WORKING = ("method", "recv_root", "recv_path", "recv_local", "callee_local", "kind",
+               "encl_class", "recv_type", "invoke_type", "super_of", "super_from")
+
+    def tree(self):
+        self.write("svc.py", "class Client:\n"
+                             "    def __init__(self):\n        pass\n"
+                             "    def get(self):\n        return 1\n")
+        self.write("app.py", "import svc\n"
+                             "from svc import Client\n"
+                             "\n"
+                             "class Mine(Client):\n"
+                             "    def go(self):\n"
+                             "        return super().get()\n"
+                             "\n"
+                             "def use(c: Client):\n"
+                             "    x = svc.Client()\n"
+                             "    return x.get() + c.get()\n")
+
+    def test_the_working_fields_do_not_reach_the_graph(self):
+        self.tree()
+        g = self.graph(write=False)
+        self.assertTrue(g["calls"], "no edges to check")
+        for e in g["calls"]:
+            for field in self.WORKING:
+                self.assertNotIn(field, e, f"{field} survived into the graph: {e}")
+
+    def test_everything_a_query_reads_is_still_there(self):
+        """The other half. Dropping a field a verb needs would be a silent empty answer."""
+        self.tree()
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.get"),
+                         ["app.Mine.go", "app.use"])
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.__init__"), ["app.use"])
+        self.assertTrue(codegraph.sites(g, "svc.Client.get"))
+        self.assertTrue(codegraph.impact(g, "svc.Client.get")["blast"])
+        self.assertEqual(codegraph.stats(g)["nodes"]["class"], 2)
+        labels = {e["confidence"] for e in g["calls"]}
+        self.assertIn("TYPED", labels)
+        self.assertIn("INHERITED", labels)
+        self.assertIn("CONSTRUCTOR", labels)
+
+    def test_the_cache_keeps_them_because_it_replays_resolution(self):
+        """The cache is the input to a later resolution, so it needs the working fields the
+        graph does not - a second build reads them back and must reach the same answers."""
+        self.tree()
+        codegraph.build([self.dir])
+        with open(codegraph.CACHE, encoding="utf-8") as f:
+            cached = json.load(f)
+        edges = [e for entry in cached["files"].values() for e in entry["calls"]]
+        self.assertTrue(any("method" in e for e in edges), "the cache lost the working fields")
+        warm = codegraph.build([self.dir])
+        self.assertEqual(codegraph.callers_of(warm, "svc.Client.get"),
+                         ["app.Mine.go", "app.use"])
+
+    def test_an_ambiguous_edge_still_names_its_candidates(self):
+        """`candidates` is the one working field that IS an answer."""
+        self.write("a.py", "def go():\n    return 1\n")
+        self.write("b.py", "def go():\n    return 2\n")
+        self.write("c.py", "from a import *\nfrom b import *\ndef run():\n    return go()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "c.run"]
+        self.assertEqual(call["candidates"], ["a.go", "b.go"])

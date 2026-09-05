@@ -847,7 +847,11 @@ def build(dirs=None, write=True):
             nodes.pop()                                          # drop the module node just added
             continue
         stamps[path] = stamp
-        c = cache.get(path)
+        # POP, not get: this file's old parse is finished with the moment it is copied, and
+        # the copy goes into newcache. Holding both tables whole is where a build peaks - the
+        # entries are released one at a time now, so the old table shrinks as the new one grows
+        # instead of the two standing at full size together.
+        c = cache.pop(path, None)
         if c and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             # A shallow copy PER EDGE, not a deep one. Resolution writes dst/confidence/
             # candidates onto these dicts, and those writes must not reach the cache that is
@@ -873,6 +877,11 @@ def build(dirs=None, write=True):
         nodes += d; calls += e; imports += im
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
         mod_alt[mid] = alt; mod_orig[mid] = orig
+    # The cache read off disk has done its job: every file has either been reused from it or
+    # reparsed, and the answers are in `newcache` now. Holding it through resolution and two
+    # JSON writes is a second copy of the whole tree's parse for nothing - on a large one that
+    # is hundreds of megabytes still resident at the moment of peak use.
+    cache = None
     if multiroot:                                              # remap import aliases to the SAME-ROOT module id, so within-tree imports resolve to the right tree
         allmods = {n["id"] for n in nodes if n["kind"] == "module"}   # the ids known at this point
         qual = lambda r, b: (f"{r}/{b}" if f"{r}/{b}" in allmods else b)
@@ -1187,6 +1196,13 @@ def build(dirs=None, write=True):
     # Stamped with codegraph's OWN source hash. The parse cache had this from the start; the
     # graph did not, so upgrading the tool and querying an unchanged tree served the previous
     # version's answers - every resolution fix invisible until somebody happened to edit a file.
+    # The graph carries what a QUESTION needs; the machinery that answered it stays behind.
+    # An edge accumulates a dozen working fields on the way to a target - whether the receiver
+    # was a local, the root of a dotted chain, the enclosing class, the inferred type - and not
+    # one of them is read again once the target is known. They were being written to disk,
+    # loaded back on every query, and held in memory through both serialisations.
+    keep = ("src", "dst", "callee", "confidence", "recv", "mod", "line", "lines", "candidates")
+    calls = [{k: e[k] for k in keep if k in e} for e in calls]
     graph = {"version": _VERSION,
              "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
              "sources": {p: stamps[p] for p in sorted(stamps)}, "unreadable": sorted(unreadable)}
@@ -1194,6 +1210,8 @@ def build(dirs=None, write=True):
         for target, what in ((CACHE, "cache"), (OUT, "graph")):
             try:
                 _jwrite({"_v": _VERSION, "files": newcache} if what == "cache" else graph, target)
+                if what == "cache":
+                    newcache = {}      # written; the graph is serialised next and wants the room
             except OSError as ex:
                 if what == "cache":
                     # The cache is an OPTIMISATION. Losing it costs a second on the next build

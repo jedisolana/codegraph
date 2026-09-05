@@ -263,7 +263,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 363 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 367 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -316,7 +316,8 @@ the scope analysis checked against the one CPython's own compiler does,
 a base class named the two ways Python lets you name one,
 a class defined inside the very function that builds one,
 a base class that is really a local variable holding a generic alias,
-and an import written as `import_module("pkg.widget")`
+an import written as `import_module("pkg.widget")`,
+and a graph that carries what a question needs and not the machinery that answered it
 — and codegraph reading its own source.
 
 ## Licence
