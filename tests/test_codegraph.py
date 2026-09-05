@@ -3787,3 +3787,76 @@ class TheCacheIsAnOptimisationNotARequirement(Sandbox):
                 codegraph.build([self.dir])
         finally:
             os.replace = real
+
+
+class ASecondBuildIsTheSameBuild(Sandbox):
+    """The cached parse is handed to resolution, which writes dst and confidence onto every
+    edge it touches. Those writes must not reach the cache that is about to be written back, or
+    the second build answers from the first build's conclusions instead of re-deriving them."""
+
+    TREE = (
+        ("svc.py", "class Client:\n"
+                  "    def __init__(self):\n        pass\n"
+                   "    def get(self):\n        return 1\n"),
+        ("app.py", "from svc import Client\n"
+                  "\n"
+                  "def go():\n"
+                  "    c = Client()\n"
+                  "    return c.get()\n"
+                  "\n"
+                   "def again():\n"
+                   "    return go()\n"),
+    )
+
+    def build_tree(self):
+        for name, body in self.TREE:
+            self.write(name, body)
+
+    def test_the_warm_graph_is_identical_to_the_cold_one(self):
+        self.build_tree()
+        cold = codegraph.build([self.dir])
+        warm = codegraph.build([self.dir])
+        self.assertEqual(json.dumps(cold, sort_keys=True), json.dumps(warm, sort_keys=True))
+        self.assertEqual(codegraph.callers_of(warm, "svc.Client.get"), ["app.go"])
+
+    def test_the_cache_holds_no_conclusions(self):
+        """It is a record of what was PARSED. A dst or a confidence in there is a conclusion,
+        and a conclusion cached is a conclusion never re-checked when the rest of the tree
+        changes around it."""
+        self.build_tree()
+        codegraph.build([self.dir])
+        with open(codegraph.CACHE, encoding="utf-8") as f:
+            cache = json.load(f)
+        edges = [e for entry in cache["files"].values() for e in entry["calls"]]
+        self.assertTrue(edges, "no edges were cached at all")
+        for e in edges:
+            self.assertNotIn("dst", e, e)
+            self.assertNotIn("confidence", e, e)
+            self.assertNotIn("candidates", e, e)
+
+    def test_resolving_does_not_reach_back_into_the_cache_in_memory(self):
+        """The shallow copy is per EDGE, so the dicts resolution writes to are not the dicts
+        the cache holds. A single shared list of dicts would make this fail."""
+        self.build_tree()
+        codegraph.build([self.dir])
+        with open(codegraph.CACHE, encoding="utf-8") as f:
+            before = json.load(f)
+        codegraph.build([self.dir])
+        with open(codegraph.CACHE, encoding="utf-8") as f:
+            after = json.load(f)
+        self.assertEqual(json.dumps(before, sort_keys=True), json.dumps(after, sort_keys=True))
+
+    def test_the_line_numbers_survive_the_copy(self):
+        """The one nested value an edge carries. A copy that flattened it would take `sites`
+        down to one line per relationship, which is a promise this makes on the front page."""
+        self.write("m.py", "def helper():\n    return 1\n"
+                           "def uses():\n"
+                           "    a = helper()\n"
+                           "    b = helper()\n"
+                           "    c = helper()\n"
+                           "    return a + b + c\n")
+        cold = codegraph.build([self.dir])
+        warm = codegraph.build([self.dir])
+        expected = ["m.py:4", "m.py:5", "m.py:6"]
+        self.assertEqual([loc for loc, _ in codegraph.sites(cold, "m.helper")], expected)
+        self.assertEqual([loc for loc, _ in codegraph.sites(warm, "m.helper")], expected)

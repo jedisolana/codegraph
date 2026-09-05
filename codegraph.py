@@ -33,7 +33,6 @@ matches several definitions or the command was malformed.
 import ast
 import builtins
 import contextlib
-import copy
 import glob
 import hashlib
 import json
@@ -764,7 +763,14 @@ def build(dirs=None, write=True):
         stamps[path] = stamp
         c = cache.get(path)
         if c and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
-            d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
+            # A shallow copy PER EDGE, not a deep one. Resolution writes dst/confidence/
+            # candidates onto these dicts, and those writes must not reach the cache that is
+            # about to be written back - but every value it touches is a scalar, and the only
+            # nested value an edge carries is its list of line numbers, which nothing mutates
+            # after parsing. copy.deepcopy walked six million objects to protect against a
+            # write that does not happen; on a large tree that was a third of a warm build.
+            d, e, im, al, fi = (c["defs"], [dict(x) for x in c["calls"]],
+                                c["imports"], c["aliases"], c["fromimp"])
             sub = c.get("submodules", {}); alt = c.get("fromalt", {})
             orig = c.get("fromorig", {})
         else:
@@ -1424,8 +1430,13 @@ def _jwrite(obj, path):
     """
     tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
+        # `json.dump(obj, fh)` and `fh.write(json.dumps(obj))` produce identical bytes and are
+        # not the same speed: dump streams through the PURE-PYTHON encoder, because the C one
+        # is only reachable from the one-shot path that dumps() takes. On a large graph that is
+        # five times the work for the same output.
+        text = json.dumps(obj, ensure_ascii=False)
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, ensure_ascii=False)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         # POSIX renames over an open file without complaint. WINDOWS does not: if any other
