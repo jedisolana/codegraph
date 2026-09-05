@@ -204,6 +204,9 @@ def _defs_and_calls(path, mod):
                     imports.append({"src": mod, "callee": target, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                     for a in node.names:
                         fromimp[a.asname or a.name] = target
+                        # the name may be a SUBMODULE, same as the absolute form - the two
+                        # branches have to learn the same things or one of them lags behind
+                        submodules[a.asname or a.name] = f"{target}/{a.name}"
                 else:                                            # from . import thing - each NAME is itself a module
                     for a in node.names:
                         target = "/".join([*base, a.name])
@@ -513,6 +516,21 @@ def build(dirs=None, write=True):
         for name, target in cand.items():
             if target in allmods:
                 mod_alias.setdefault(mid, {}).setdefault(name, target)
+    # RE-EXPORTS. `pkg/__init__` does `from .thing import load`, and another module does
+    # `from pkg import load`. The name is not defined in pkg/__init__ at all, so the import
+    # pointed at a module that does not have it. It happened to resolve anyway whenever the
+    # name was unique in the tree - which is luck, and stops being luck the moment two modules
+    # define it. Follow the chain to where the name actually lives, with a hop limit because a
+    # circular re-export is expressible even if it would not import.
+    defined_in = {(n["module"], n["name"]) for n in nodes if n["kind"] in ("func", "class")}
+    for mid in mod_from:
+        for name, target in list(mod_from[mid].items()):
+            hops, seen_hops = 0, set()
+            while (target, name) not in defined_in and target in mod_from and hops < 8:
+                nxt = mod_from[target].get(name)
+                if not nxt or nxt in seen_hops: break
+                seen_hops.add(nxt); target = nxt; hops += 1
+            mod_from[mid][name] = target
     by_name = defaultdict(list); by_modname = {}; def_ids = set()
     cls_ids = defaultdict(dict)                                  # module -> {ClassName: class id}
     for n in nodes:

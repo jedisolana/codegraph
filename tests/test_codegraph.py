@@ -1849,5 +1849,61 @@ class ImportingASubmodule(Sandbox):
         self.assertGreater(codegraph.stats(g)["resolution_rate"], 0.4)
 
 
+class TheRemainingImportForms(Sandbox):
+    """Sweeping the siblings of last round's fix rather than waiting for a later round to find
+    them: relative submodule imports, and names re-exported through a package's __init__."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "pkg", "sub"))
+        self.write("pkg/__init__.py", "from .thing import load\n")
+        self.write("pkg/thing.py", "def load():\n    return 'the real load'\n")
+        self.write("pkg/sub/__init__.py", "")
+        self.write("pkg/sub/leaf.py", "def deep():\n    return 1\n")
+
+    def edge(self, src, callee):
+        hits = [e for e in self.graph(write=False)["calls"]
+                if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(hits), 1, f"expected one edge from {src}, got {hits}")
+        return hits[0]
+
+    def test_a_relative_import_of_a_submodule_resolves(self):
+        """The absolute form was fixed last round and this one was left behind - the two
+        branches have to learn the same things or one of them lags."""
+        self.write("pkg/rel.py", "from .sub import leaf\ndef f():\n    return leaf.deep()\n")
+        e = self.edge("pkg/rel.f", "deep")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("pkg/sub/leaf.deep", "QUALIFIED"))
+
+    def test_a_relative_alias_still_resolves(self):
+        self.write("pkg/rel.py", "from . import thing as t\ndef f():\n    return t.load()\n")
+        self.assertEqual(self.edge("pkg/rel.f", "load")["dst"], "pkg/thing.load")
+
+    def test_a_name_re_exported_through_a_package_is_followed_home(self):
+        """`pkg/__init__` does `from .thing import load`; another module does
+        `from pkg import load`. The name is not defined in __init__ at all."""
+        self.write("app.py", "from pkg import load\ndef f():\n    return load()\n")
+        e = self.edge("app.f", "load")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("pkg/thing.load", "QUALIFIED"))
+
+    def test_the_re_export_is_followed_rather_than_guessed(self):
+        """It used to resolve only because the name was unique in the tree, which is luck.
+        A second load() elsewhere turned that luck into AMBIGUOUS."""
+        self.write("decoy.py", "def load():\n    return 'a different load'\n")
+        self.write("app.py", "from pkg import load\ndef f():\n    return load()\n")
+        e = self.edge("app.f", "load")
+        self.assertEqual(e.get("dst"), "pkg/thing.load", "the decoy broke it")
+
+    def test_a_circular_re_export_terminates(self):
+        self.write("a.py", "from b import spin\n")
+        self.write("b.py", "from a import spin\n")
+        self.write("app.py", "from a import spin\ndef f():\n    return spin()\n")
+        e = self.edge("app.f", "spin")
+        self.assertIsNone(e.get("dst"))          # nothing defines it; never invented
+
+    def test_an_aliased_from_import_of_a_submodule_resolves(self):
+        self.write("app.py", "from pkg.sub import leaf as lf\ndef f():\n    return lf.deep()\n")
+        self.assertEqual(self.edge("app.f", "deep")["dst"], "pkg/sub/leaf.deep")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
