@@ -72,6 +72,22 @@ _MATCH_BINDS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasatt
 _MATCH_MAP = getattr(ast, "MatchMapping", ())
 
 
+def _say(path):
+    """A path to put in a message, shortened when that is possible and safe.
+
+    `os.path.relpath` RAISES on Windows when the file and the current directory are on
+    different drives - `ValueError: path is on mount 'C:', start on mount 'D:'`. Every skip
+    message went through it, so on a machine with the code on one drive and the temp directory
+    on another, a single unparseable file ended the whole build with a traceback. The one thing
+    the skip path exists to prevent, on an entire platform, for two years of Python.
+    """
+    try:
+        rel = os.path.relpath(path)
+    except (ValueError, OSError):
+        return path
+    return rel if len(rel) < len(path) else path
+
+
 def _bound_names(node):
     """Names this function binds in its OWN scope: parameters, assignments, loop targets,
     `with ... as`, `except ... as`, walruses, imports, and nested defs.
@@ -185,16 +201,22 @@ def _defs_and_calls(path, mod):
         with open(path, encoding="utf-8-sig", errors="replace") as _fh:   # a context manager, so
             src = _fh.read()                                              # a big tree does not
         tree = ast.parse(src, filename=path)                              # leak a handle per file
-    except (SyntaxError, ValueError, RecursionError) as ex:
+    except RecursionError as ex:
+        # Which of the two recursion limits a generated file hits - the parser's or the
+        # walker's - depends on the platform and the interpreter version, and the person
+        # reading the message does not care. One sentence for one situation.
+        raise Unparseable(f"{_say(path)}: too deeply nested to analyse "
+                          f"(generated code?): {ex}") from ex
+    except (SyntaxError, ValueError) as ex:
         # py2, a template, a half-written file. Skipping is right; skipping in SILENCE is not -
         # an empty module in the graph looks exactly like a file with nothing in it.
-        raise Unparseable(f"{os.path.relpath(path)}: could not parse: {ex}") from ex
+        raise Unparseable(f"{_say(path)}: could not parse: {ex}") from ex
     except OSError as ex:
         # A file the process cannot READ - restrictive permissions in a vendored directory, a
         # container running as a different user. One such file used to end the whole build on
         # a PermissionError traceback, which is the same mistake a dangling symlink once made:
         # a single awkward file is not a reason to refuse to analyse a codebase.
-        raise Unparseable(f"{os.path.relpath(path)}: could not read: {ex.strerror or ex}") from ex
+        raise Unparseable(f"{_say(path)}: could not read: {ex.strerror or ex}") from ex
     defs, edges, imports = [], [], []
     aliases, fromimp, fromorig = {}, {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
     # One name imported from two different modules - the try/except ImportError idiom. A plain
@@ -552,7 +574,7 @@ def _defs_and_calls(path, mod):
         # thousands of frames long - every other file in the tree lost its answers to it, which
         # is the same mistake a dangling symlink and an unreadable file each made once. Named
         # on stderr and left out, like every other file this cannot read.
-        raise Unparseable(f"{os.path.relpath(path)}: too deeply nested to analyse "
+        raise Unparseable(f"{_say(path)}: too deeply nested to analyse "
                           f"(generated code?): {ex}") from ex
     # One EDGE per (caller, receiver, name) - that is one relationship, and it keeps the graph
     # the right size. But it used to keep only the first line and drop the rest, so a function

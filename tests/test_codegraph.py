@@ -3638,6 +3638,8 @@ class WhatSecurityMdPromises(unittest.TestCase):
                 self.imports.add(n.module.split(".")[0])
 
     def test_it_imports_nothing_but_the_standard_library(self):
+        if not hasattr(sys, "stdlib_module_names"):
+            self.skipTest("sys.stdlib_module_names arrives in 3.10")   # 3.9 is the floor
         outside = sorted(m for m in self.imports if m not in sys.stdlib_module_names)
         self.assertEqual(outside, [], "a dependency crept in")
 
@@ -3661,3 +3663,51 @@ class WhatSecurityMdPromises(unittest.TestCase):
         self.assertIsNotNone(m, "SECURITY.md lost the sentence this checks")
         self.assertEqual(words.get(m.group(1)), len(self.imports),
                          f"SECURITY.md says {m.group(1)}; the file imports {len(self.imports)}")
+
+
+class ASkipMessageMustNotBeAbleToCrash(Sandbox):
+    """Every "skipped" line went through `os.path.relpath`, which RAISES on Windows when the
+    file and the current directory are on different drives. The checkout is on D: and the temp
+    directory is on C:, so one unparseable file ended the whole build with a ValueError - the
+    exact thing the skip path exists to prevent, on an entire platform. Found by CI, on the
+    first run, because this machine has one drive."""
+
+    def test_a_build_survives_a_relpath_that_raises(self):
+        self.write("good.py", "def ok():\n    return 1\n")
+        self.write("bad.py", "def (((\n")
+        real = os.path.relpath
+
+        def two_drives(path, start=None):
+            # Only the one-argument form crosses drives. `relpath(file, root)` inside build()
+            # is computing a module id from a root the file was found under, which cannot.
+            if start is None:
+                raise ValueError("path is on mount 'C:', start on mount 'D:'")
+            return real(path, start)
+
+        os.path.relpath = two_drives
+        try:
+            g = codegraph.build([self.dir], write=False)
+        finally:
+            os.path.relpath = real
+        self.assertIn("good.ok", {n["id"] for n in g["nodes"]})
+        self.assertEqual(len(g["unreadable"]), 1, g["unreadable"])
+        self.assertIn("bad.py", g["unreadable"][0])
+
+    def test_a_far_away_file_keeps_its_real_path(self):
+        """`../../../../../opt/homebrew/...` is not a shorter way to say an absolute path, and
+        it is what the message used to contain when the tree was nowhere near the cwd."""
+        self.assertEqual(codegraph._say("/opt/x/y.py"),
+                         os.path.relpath("/opt/x/y.py")
+                         if len(os.path.relpath("/opt/x/y.py")) < len("/opt/x/y.py")
+                         else "/opt/x/y.py")
+        deep = os.path.join(self.dir, "m.py")
+        self.assertLessEqual(len(codegraph._say(deep)), len(deep))
+
+    def test_both_recursion_limits_give_the_same_sentence(self):
+        """A generated file blows either the parser's stack or the walker's, depending on the
+        platform and the version. The person reading the message does not care, and a test
+        that asserted one wording passed on a Mac and failed on Linux."""
+        self.write("gen.py", "TABLE = " + "1+" * 30000 + "1\n")
+        g = self.graph(write=False)
+        self.assertEqual(len(g["unreadable"]), 1, g["unreadable"])
+        self.assertIn("too deeply nested", g["unreadable"][0])

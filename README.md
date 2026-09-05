@@ -248,7 +248,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 312 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 315 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -290,7 +290,8 @@ an instance that is called rather than a method on it,
 a package that has to be able to name its own importers,
 and a star import, which is a binding and not a name spelled "*"
 — plus the three promises SECURITY.md makes about this file: no network, no execution,
-nothing but the standard library
+nothing but the standard library,
+and a skip message on a machine whose code and temp directory are on different drives
 — and codegraph reading its own source.
 
 ## Licence
