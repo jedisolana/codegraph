@@ -93,8 +93,9 @@ def main(argv):
     every = list(candidates(ast.parse(text)))
     random.seed(seed)
     sample = random.sample(every, min(want, len(every)))
-    print(f"{len(every)} possible mutations; trying {len(sample)}")
-    survivors, killed, t0 = [], 0, time.time()
+    print(f"{len(every)} possible mutations; trying {len(sample)}", flush=True)
+    survivors, hung, killed, t0 = [], [], 0, time.time()
+    tried = 0
     try:
         for kind, line, detail in sample:
             m = Mutator(kind, line)
@@ -107,14 +108,34 @@ def main(argv):
                 continue                      # an unparseable mutation is not a mutation
             with open(TARGET, "w", encoding="utf-8") as fh:
                 fh.write(code)
-            r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests",
-                                "-q", "--failfast"],
-                               cwd=ROOT, capture_output=True, text=True, timeout=600)
+            # A short leash. The suite runs in about eight seconds, and some mutations do not
+            # make it FAIL - they make it never finish. Flip the comparison that ends a `while`
+            # and the tool loops for ever. At ten minutes each, one of those ended a run of
+            # seven hundred by raising TimeoutExpired straight through this harness.
+            try:
+                r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests",
+                                    "-q", "--failfast"],
+                                   cwd=ROOT, capture_output=True, text=True, timeout=90)
+            except subprocess.TimeoutExpired:
+                hung.append((line, kind, detail))
+                killed += 1          # a change that makes it spin for ever is one somebody notices
+                tried += 1
+                print(f"  HUNG      line {line}: {kind} {detail}", flush=True)
+                continue
+            tried += 1
             if r.returncode == 0:
                 survivors.append((line, kind, detail))
-                print(f"  SURVIVED  line {line}: {kind} {detail}")
+                print(f"  SURVIVED  line {line}: {kind} {detail}", flush=True)
             else:
                 killed += 1
+            if tried % 25 == 0:
+                # A run of seven hundred takes twenty minutes, and stdout is a pipe as often as
+                # a terminal. Without this it prints nothing at all until it is finished, which
+                # looks exactly like being stuck - as it did the first time it was left running.
+                done = tried / len(sample)
+                left = (time.time() - t0) * (1 - done) / done
+                print(f"  {tried}/{len(sample)}  {killed} killed, {len(survivors)} survived"
+                      f"  ~{left/60:.0f} min left", flush=True)
     finally:
         shutil.copy(backup, TARGET)
         with open(TARGET, encoding="utf-8") as fh:
@@ -122,7 +143,8 @@ def main(argv):
         if after != before:
             sys.exit(f"codegraph.py was NOT restored - put it back from {backup}")
     print(f"{killed + len(survivors)} mutations in {time.time() - t0:.0f}s: "
-          f"{killed} killed, {len(survivors)} survived")
+          f"{killed} killed ({len(hung)} of them by hanging), {len(survivors)} survived",
+          flush=True)
     return 1 if survivors else 0
 
 
