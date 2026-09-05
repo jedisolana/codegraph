@@ -99,7 +99,7 @@ codegraph impact <name>      callers + call sites + blast radius, and what it co
 codegraph callers <name>     who calls this
 codegraph calls <name>       what this calls
 codegraph blast <name>       transitive callers — what could break
-codegraph sites <name>       every call site as file:line — all of them, not one per caller
+codegraph sites <name>       every call site as file:line, relative to what you built — all of them
 codegraph where <name>       where a symbol is defined
 codegraph find <substr>      fuzzy symbol search
 codegraph path <from> <to>   a call path connecting two functions
@@ -244,7 +244,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `[config.dumps(r) for config in rows]` on one line and `config.dumps(2)` on the next, where
   the same name is the loop variable and then the module again
 
-The test suite adds 281 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 289 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -279,7 +279,9 @@ a variable reassigned to something the tool cannot name,
 a helper nested in one function that a second function must not reach,
 a loop variable at the top of a file with the same name as an import,
 a module that imports itself,
-and a codegraph.json that is valid JSON and not a graph
+a codegraph.json that is valid JSON and not a graph,
+a class attribute with the same name as an import,
+and two trees whose call sites have to name files that exist
 — and codegraph reading its own source.
 
 ## Licence

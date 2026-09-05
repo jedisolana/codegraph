@@ -65,6 +65,13 @@ except Exception:
     _VERSION = "0"
 
 
+# `match` binds names through PATTERNS, not through Name(Store): `case [config]` and
+# `case str() as config` each carry the name as a plain string on the pattern node. Built with
+# getattr because these node types arrive in 3.10 and this file runs on 3.9.
+_MATCH_BINDS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasattr(ast, n))
+_MATCH_MAP = getattr(ast, "MatchMapping", ())
+
+
 def _bound_names(node):
     """Names this function binds in its OWN scope: parameters, assignments, loop targets,
     `with ... as`, `except ... as`, walruses, imports, and nested defs.
@@ -112,6 +119,10 @@ def _bound_names(node):
             pass
         elif isinstance(n, ast.ExceptHandler) and n.name:
             names.add(n.name)
+        elif _MATCH_BINDS and isinstance(n, _MATCH_BINDS) and n.name:
+            names.add(n.name)                     # case [config] / case str() as config
+        elif _MATCH_MAP and isinstance(n, _MATCH_MAP) and n.rest:
+            names.add(n.rest)                     # case {**rest}
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             freed.update(n.names)                 # declared elsewhere; collected and removed last,
         stack.extend(ast.iter_child_nodes(n))     # because the walk order is not source order
@@ -291,7 +302,19 @@ def _defs_and_calls(path, mod):
             defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
                          "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
-            for c in node.body: self.visit(c)
+            # A class body is a scope: `class A: config = 1` then config.dumps() in that body
+            # is the attribute, not the imported module, and it used to resolve into the module.
+            # A METHOD does not see class attributes, so the frame comes back off around every
+            # nested def - which is exactly what Python's own lookup does with class scopes.
+            self.bound.append(_bound_names(node))
+            for c in node.body:
+                if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    hidden = self.bound.pop()
+                    self.visit(c)
+                    self.bound.append(hidden)
+                else:
+                    self.visit(c)
+            self.bound.pop()
             self.classes.pop(); self.scope.pop()
 
         def _decorators(self, node):
@@ -668,7 +691,11 @@ def build(dirs=None, write=True):
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
         base = os.path.basename(rel)
         mid = f"{root}/{rel}" if multiroot else rel             # SINGLE flat tree: bare 'memory' (unchanged). Nested: 'sub/mod'. Multi-tree: 'root/...'
-        nodes.append({"id": mid, "kind": "module", "name": base, "module": mid, "line": 0})
+        nodes.append({"id": mid, "kind": "module", "name": base, "module": mid, "line": 0,
+                      "file": path})            # the REAL file. A module id is not a path: in a
+                                                # multi-root build it starts with a synthetic
+                                                # label, and `sites` was printing places that do
+                                                # not exist - or, worse, that do and are wrong.
         try:
             _st = os.stat(path)
             stamp = [_st.st_mtime, _st.st_size]        # SIZE as well as time: a restored file can
@@ -1325,6 +1352,33 @@ def load(fresh=True):
     return g
 
 
+def _files(g):
+    """module id -> the file to open, relative to the directory the GRAPH lives in.
+
+    `sites` promises the exact places to edit, and it was building them out of module ids -
+    fine for a single tree, where an id really is a path, and wrong the moment there are two
+    roots: ids are prefixed with a label then, so the answer named a file that does not exist.
+    Anchored to the roots the graph was built from - their common parent - so the same query
+    gives the same answer wherever it is asked from. For one tree that is the tree itself, which
+    is what these paths have always been relative to.
+    """
+    dirs = [d for d in g.get("dirs") or [] if d]
+    try:
+        base = os.path.commonpath(dirs) if dirs else None
+    except ValueError:
+        base = None                              # roots on different Windows drives
+    out = {}
+    for n in g["nodes"]:
+        if n["kind"] != "module":
+            continue
+        f = n.get("file")
+        if f and base:
+            with contextlib.suppress(ValueError):    # a different Windows drive: absolute it is
+                f = os.path.relpath(f, base).replace(os.sep, "/")
+        out[n["id"]] = f or (n["id"] + ".py")
+    return out
+
+
 def _by_name(g, name):
     return [n["id"] for n in g["nodes"] if n["name"] == name and n["kind"] in ("func", "class")]
 
@@ -1477,10 +1531,11 @@ def where(g, name):
     # what a name means. It used to strip to the bare name, so `where Base.__init__` listed
     # Own.__init__ as well - a definition that is not the one you asked about.
     want = set(_ids_matching(g, name))
+    files = _files(g)
     out = []
     for n in g["nodes"]:
         if n["id"] in want:
-            where_ = f"{n['module']}.py:{n['line']}"
+            where_ = f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}"
             if n.get("shadows"):     # the live definition, plus the lines it overrides
                 where_ += " (shadows " + ", ".join(f"line {ln}" for ln in n["shadows"]) + ")"
             out.append((n["id"], where_))
@@ -1490,8 +1545,9 @@ def where(g, name):
 def find(g, substr):
     """fuzzy symbol search - every function/class whose name CONTAINS substr (replaces broad greps for a name)."""
     s = substr.lower()
-    return sorted((n["id"], f"{n['module']}.py:{n['line']}") for n in g["nodes"]
-                  if n["kind"] in ("func", "class") and s in n["name"].lower())
+    files = _files(g)
+    return sorted((n["id"], f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}")
+                  for n in g["nodes"] if n["kind"] in ("func", "class") and s in n["name"].lower())
 
 
 def sites(g, target):
@@ -1499,12 +1555,13 @@ def sites(g, target):
     REFACTOR helper). Uses resolved edges when target is a known def; else the bare callee name."""
     ids = set(_one(g, target)); name = target.split(".")[-1]
     mod_of = {n["id"]: n["module"] for n in g["nodes"]}
+    files = _files(g)
     out = set()
     for e in g["calls"]:
         if (e.get("dst") in ids) if ids else (e["callee"] == name):
             m = e.get("mod") or mod_of.get(e["src"]) or e["src"].split(".")[0]
             for ln in e.get("lines") or [e["line"]]:
-                out.add((f"{m}.py:{ln}", e["src"]))
+                out.add((f"{files.get(m, m + '.py')}:{ln}", e["src"]))
     return sorted(out)
 
 

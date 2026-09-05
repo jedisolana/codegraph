@@ -3236,3 +3236,141 @@ class AGraphFileHasToBeAGraph(unittest.TestCase):
     def test_a_real_graph_is_still_accepted(self):
         self.assertEqual(self.run_it("build", ".").returncode, 0)
         self.assertEqual(self.run_it("callers", "f").returncode, 0)
+
+
+class AClassBodyIsAScope(Sandbox):
+    """`class A: config = 1` and then config.dumps() in that body is the class attribute, not
+    the imported module - and it resolved into the module. A METHOD, on the other hand, does not
+    see class attributes at all, which is the half a naive fix gets wrong."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+
+    def edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "dumps"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_class_attribute_shadows_in_the_class_body(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "class A:\n"
+                             "    config = 'an attribute'\n"
+                             "    y = config.dumps(1)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"), (None, "UNTYPED"))
+
+    def test_a_method_does_not_see_the_class_attribute(self):
+        """The guard. Python looks straight past class scope from inside a method, so config
+        there is still the module - and a fix that left the frame on the stack would silence
+        every method of every class that has an attribute named like an import."""
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "class A:\n"
+                             "    config = 'an attribute'\n"
+                             "\n"
+                             "    def method(self):\n"
+                             "        return config.dumps(1)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app.A.method"),
+                         ("config.dumps", "QUALIFIED"))
+
+    def test_a_class_nested_in_a_class_does_not_see_the_outer_one(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "class A:\n"
+                             "    config = 'an attribute'\n"
+                             "\n"
+                             "    class Inner:\n"
+                             "        y = config.dumps(1)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"),
+                         ("config.dumps", "QUALIFIED"))
+
+
+class MatchBindsNamesToo(Sandbox):
+    """`case [config]` and `case str() as config` bind a name, and they carry it as a plain
+    string on the pattern rather than as a Name node - so the pre-scan walked straight past
+    them and config.dumps() resolved into the imported module."""
+
+    def setUp(self):
+        super().setUp()
+        if sys.version_info < (3, 10):
+            self.skipTest("match statements arrive in 3.10")
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+
+    def dst(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "dumps"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst")
+
+    def test_a_capture_pattern_binds(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "def go(v):\n"
+                             "    match v:\n"
+                             "        case [config]:\n"
+                             "            return config.dumps(1)\n")
+        self.assertIsNone(self.dst(self.graph(write=False), "app.go"))
+
+    def test_an_as_pattern_binds(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "def go(v):\n"
+                             "    match v:\n"
+                             "        case str() as config:\n"
+                             "            return config.dumps(1)\n")
+        self.assertIsNone(self.dst(self.graph(write=False), "app.go"))
+
+    def test_a_match_that_binds_nothing_leaves_the_module_alone(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "def go(v):\n"
+                             "    match v:\n"
+                             "        case []:\n"
+                             "            return config.dumps(1)\n")
+        self.assertEqual(self.dst(self.graph(write=False), "app.go"), "config.dumps")
+
+
+class EveryLocationIsAPlaceYouCanOpen(unittest.TestCase):
+    """`sites` promises the exact places to edit, and built them out of module ids. An id is a
+    path only while there is one tree: with two roots the ids carry a synthetic label, so the
+    answer named a file that does not exist - or, worse, one that does and is the wrong file."""
+
+    def setUp(self):
+        # Two roots under DIFFERENT parents, so a module id is visibly not a path: the ids come
+        # out "api/util" and "worker/job" while the files live at "a/api/util.py" and
+        # "b/worker/job.py" relative to the common root.
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, "a", "api"))
+        os.makedirs(os.path.join(self.root, "b", "worker"))
+        self.write("a/api/util.py", "def shared():\n    return 1\n")
+        self.write("b/worker/job.py", "from api.util import shared\n"
+                                      "def run():\n"
+                                      "    return shared()\n")
+        self.out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.out, ignore_errors=True)
+        self._saved = {k: getattr(codegraph, k) for k in ("HOME", "OUT", "CACHE")}
+        codegraph.OUT = os.path.join(self.out, "codegraph.json")
+        codegraph.CACHE = os.path.join(self.out, "codegraph.cache.json")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(codegraph, k, v)
+
+    def write(self, rel, body):
+        with open(os.path.join(self.root, *rel.split("/")), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def test_two_roots_give_paths_that_resolve(self):
+        g = codegraph.build([os.path.join(self.root, "a", "api"),
+                             os.path.join(self.root, "b", "worker")], write=False)
+        (_, loc), = codegraph.where(g, "shared")
+        site, = codegraph.sites(g, "api/util.shared")
+        for path in (loc.rsplit(":", 1)[0], site[0].rsplit(":", 1)[0]):
+            self.assertTrue(os.path.exists(os.path.join(self.root, path)),
+                            f"{path} does not exist under {self.root}")
+
+    def test_one_root_still_reads_as_a_plain_relative_path(self):
+        g = codegraph.build([self.root], write=False)
+        (_, loc), = codegraph.where(g, "shared")
+        self.assertEqual(loc, "a/api/util.py:1")
