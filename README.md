@@ -104,9 +104,9 @@ codegraph where <name>       where a symbol is defined
 codegraph find <substr>      fuzzy symbol search
 codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
-codegraph cycles             import cycles of any length (refactor smells)
+codegraph cycles             import cycles of any length, including a module importing itself
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         29 ground-truth checks, several of them red-first
+codegraph --selftest         30 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -216,7 +216,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 29 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 30 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -241,8 +241,10 @@ including **red-first controls** that prove the naive approach fails where this 
   `svc.Client()`, which any function that imported `svc` can
 - `lambda config: config.dumps(x)` in a file that imports a module called `config`, beside a
   deferred `import config` inside a function, which is the same name meaning the opposite thing
+- `[config.dumps(r) for config in rows]` on one line and `config.dumps(2)` on the next, where
+  the same name is the loop variable and then the module again
 
-The test suite adds 272 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 281 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -275,7 +277,9 @@ a class name that two files answer to,
 a repository holding both thing.py and thing/__init__.py,
 a variable reassigned to something the tool cannot name,
 a helper nested in one function that a second function must not reach,
-and a loop variable at the top of a file with the same name as an import
+a loop variable at the top of a file with the same name as an import,
+a module that imports itself,
+and a codegraph.json that is valid JSON and not a graph
 — and codegraph reading its own source.
 
 ## Licence

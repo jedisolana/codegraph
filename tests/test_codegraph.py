@@ -3121,3 +3121,118 @@ class ADeferredImportIsStillAnImport(Sandbox):
         g = self.graph(write=False)
         self.assertEqual(codegraph.cycles(g), [])
         self.assertEqual(codegraph.callers_of(g, "memory.recall"), ["app.go"])
+
+
+class AComprehensionKeepsItsVariable(Sandbox):
+    """In Python 3 a comprehension's loop variable is its own scope: it shadows inside the
+    comprehension and does not exist outside it. The pre-scan collected it as a name bound in
+    the ENCLOSING scope, so `[r for config in rows]` silenced every config.x() call around it -
+    and once the module itself gained a pre-scan, one such line at the top of a file silenced
+    the whole file."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+
+    def edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "dumps"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_it_does_not_leak_out_of_a_function(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "def go(rows):\n"
+                             "    xs = [r for config in rows]\n"
+                             "    return config.dumps(len(xs))\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app.go"),
+                         ("config.dumps", "QUALIFIED"))
+
+    def test_it_does_not_leak_out_of_a_module(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "ROWS = [r for config in [[1]]]\n"
+                             "\n"
+                             "def go():\n"
+                             "    return config.dumps(1)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app.go"),
+                         ("config.dumps", "QUALIFIED"))
+
+    def test_it_does_shadow_inside_itself(self):
+        """The other half, and the reason this cannot simply be deleted from the pre-scan."""
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "ROWS = [config.dumps(r) for config in [[1]]]\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"), (None, "UNTYPED"))
+
+    def test_the_first_iterable_is_evaluated_outside(self):
+        """`[x for config in config.dumps(0)]` - the outermost iterable runs in the enclosing
+        scope, before the loop variable exists."""
+        self.write("app.py", "import config\n\nROWS = [x for config in config.dumps(0)]\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"),
+                         ("config.dumps", "QUALIFIED"))
+
+
+class AModuleThatImportsItself(Sandbox):
+    """`deps` reported the module as its own importer while `cycles` said "(none)". Two verbs
+    cannot disagree about whether an edge is there."""
+
+    def test_a_self_import_is_a_cycle(self):
+        self.write("selfmod.py", "import selfmod\n"
+                                 "def a():\n"
+                                 "    return selfmod.b()\n"
+                                 "def b():\n"
+                                 "    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.cycles(g), [("selfmod",)])
+        imports, importers = codegraph.module_deps(g, "selfmod")
+        self.assertEqual((imports, importers), (["selfmod"], ["selfmod"]))
+
+    def test_the_command_line_does_not_print_a_cycle_of_one_name(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "selfmod.py"), "w", encoding="utf-8") as f:
+            f.write("import selfmod\ndef a():\n    return selfmod.a()\n")
+        cg = os.path.join(HERE, "codegraph.py")
+        subprocess.run([sys.executable, cg, "build", "."], cwd=d, capture_output=True, timeout=180)
+        r = subprocess.run([sys.executable, cg, "cycles"], cwd=d,
+                           capture_output=True, text=True, timeout=180)
+        self.assertIn("selfmod <-> itself", r.stdout)
+
+    def test_two_modules_are_still_reported_as_a_pair(self):
+        self.write("a.py", "import b\ndef f():\n    return 1\n")
+        self.write("b.py", "import a\ndef g():\n    return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [("a", "b")])
+
+
+class AGraphFileHasToBeAGraph(unittest.TestCase):
+    """Valid JSON is not the same as a graph. A file left by another tool, a bad merge, or
+    someone's codegraph.json from a different project parses perfectly and then every query
+    dies on a traceback - `[]` has no .get, and the first thing asked of it is g.get("version").
+    The parse was guarded from the beginning; the shape never was."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def f():\n    return 1\n")
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def write_graph(self, text):
+        with open(os.path.join(self.dir, "codegraph.json"), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_json_of_the_wrong_shape_is_a_message_not_a_traceback(self):
+        for text in ("[]", "null", '"a string"', '{"nodes": {}}', "42"):
+            self.write_graph(text)
+            r = self.run_it("callers", "f")
+            self.assertNotIn("Traceback", r.stderr, text)
+            self.assertIn("not a codegraph graph", r.stdout + r.stderr, text)
+            self.assertEqual(r.returncode, 1, text)
+
+    def test_a_real_graph_is_still_accepted(self):
+        self.assertEqual(self.run_it("build", ".").returncode, 0)
+        self.assertEqual(self.run_it("callers", "f").returncode, 0)

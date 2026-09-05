@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         29 ground-truth checks, several of them red-first
+  codegraph --selftest         30 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -84,8 +84,20 @@ def _bound_names(node):
             if arg is not None:
                 names.add(arg.arg)
     stack = list(node.body)
+    comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
     while stack:
         n = stack.pop()
+        if isinstance(n, comps):
+            # A comprehension's loop variable is its OWN scope in Python 3 and does not leak
+            # out. Collecting it here made `[r for config in rows]` shadow the imported module
+            # `config` for the whole enclosing scope - and since the module gained a pre-scan of
+            # its own, one such line at the top of a file silenced every config.x() call in it.
+            # A walrus INSIDE a comprehension does bind outward, so the rest is still walked.
+            for gen in n.generators:
+                stack.append(gen.iter); stack.extend(gen.ifs)
+            stack.extend(c for c in ast.iter_child_nodes(n)
+                         if not isinstance(c, ast.comprehension))
+            continue
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(n.name)                   # the NAME binds here; the body is its own scope
             continue
@@ -342,6 +354,28 @@ def _defs_and_calls(path, mod):
             self.bound.append(_bound_names(node))
             for c in node.body: self.visit(c)
             self.bound.pop(); self.vtypes.pop(); self.owner.pop(); self.scope.pop()
+
+        def _comp(self, node):
+            """A comprehension shadows INSIDE itself, and nowhere else. The first iterable is
+            evaluated in the enclosing scope, which is where its names still mean what they
+            meant a line earlier."""
+            if node.generators:
+                self.visit(node.generators[0].iter)
+            names = set()
+            for gen in node.generators:
+                for sub in ast.walk(gen.target):
+                    if isinstance(sub, ast.Name): names.add(sub.id)
+            self.bound.append((names, set()))
+            self.vtypes.append({k: v for k, v in self.vtypes[-1].items() if k not in names})
+            for i, gen in enumerate(node.generators):
+                if i: self.visit(gen.iter)
+                for cond in gen.ifs: self.visit(cond)
+            for part in ((node.key, node.value) if isinstance(node, ast.DictComp)
+                         else (node.elt,)):
+                self.visit(part)
+            self.bound.pop(); self.vtypes.pop()
+
+        visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = _comp
 
         def visit_Lambda(self, node):
             """A lambda's parameters are a scope, and they were not one at all.
@@ -1104,6 +1138,19 @@ def _selftest():
     _le = {e["src"]: e.get("dst") for e in gl["calls"] if e["callee"] == "dumps"}
     ok27 = _le.get("app") is None and _le.get("app.deferred") == "config.dumps"
     shutil.rmtree(ld, ignore_errors=True)
+    # A COMPREHENSION's loop variable is its own scope: it shadows inside, and does not exist
+    # outside. Collected as a name bound in the enclosing scope, one line at the top of a file
+    # silenced every call through that name in the whole file.
+    cd4 = tempfile.mkdtemp()
+    _w(os.path.join(cd4, "config.py"), "def dumps(x):\n    return 1\n")
+    _w(os.path.join(cd4, "app.py"),
+        "import config\n"
+        "INSIDE = [config.dumps(r) for config in [[1]]]\n"
+        "def after():\n    return config.dumps(2)\n")
+    gc4 = build([cd4], write=False)
+    _ce = {e["src"]: e.get("dst") for e in gc4["calls"] if e["callee"] == "dumps"}
+    ok28 = _ce.get("app") is None and _ce.get("app.after") == "config.dumps"
+    shutil.rmtree(cd4, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -1134,8 +1181,9 @@ def _selftest():
     print(f"  an annotated parameter is a type, and Dict[str, Client] is NOT one: {ok25}")
     print(f"  RED-FIRST - a class nested in a function is not offered to the tree: {ok26}")
     print(f"  a lambda parameter shadows, and a deferred import still resolves: {ok27}")
+    print(f"  a comprehension variable shadows inside it and nowhere else: {ok28}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27 and ok28)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 
@@ -1258,6 +1306,13 @@ def load(fresh=True):
         sys.exit("no graph yet - run: codegraph build <path>")
     except (json.JSONDecodeError, ValueError):
         sys.exit(f"graph {OUT} is corrupt (interrupted build?) - run: codegraph build <path> to rebuild")
+    if not (isinstance(g, dict) and all(isinstance(g.get(k), list)
+                                        for k in ("nodes", "calls", "imports"))):
+        # Valid JSON is not the same as a graph. A file left by some other tool, a bad merge,
+        # or someone's codegraph.json from a different project parses perfectly and then every
+        # query dies on a traceback - `[]` has no .get, and the first thing asked of it is
+        # g.get("version"). The parse has been guarded since the beginning; the SHAPE never was.
+        sys.exit(f"{OUT} is not a codegraph graph - run: codegraph build <path> to rebuild")
     if fresh and _is_stale(g):
         try:
             g = build(g.get("dirs"))
@@ -1506,8 +1561,11 @@ def cycles(g):
     intree = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
     imp = defaultdict(set)
     for e in g["imports"]:
-        if e.get("module_level", True) and e["src"] in intree and e["callee"] in intree and e["src"] != e["callee"]:
-            imp[e["src"]].add(e["callee"])
+        if e.get("module_level", True) and e["src"] in intree and e["callee"] in intree:
+            imp[e["src"]].add(e["callee"])       # a SELF-import included: `deps` reported the
+                                                 # module as its own importer while this said
+                                                 # "(none)", and two verbs cannot disagree about
+                                                 # whether an edge is there
     # Tarjan, iterative: a recursive walk blows the stack on a deep import chain, and a big
     # repo is exactly where you want this to work.
     index, low, on, stack, out = {}, {}, set(), [], []
@@ -1528,7 +1586,10 @@ def cycles(g):
                     while True:
                         w = stack.pop(); on.discard(w); comp.append(w)
                         if w == node: break
-                    if len(comp) > 1: out.append(tuple(sorted(comp)))
+                    if len(comp) > 1 or node in imp.get(node, ()):
+                        out.append(tuple(sorted(comp)))      # size one counts when it imports
+                                                             # itself - a real loop, and usually
+                                                             # a leftover line nobody meant
             elif nxt not in index:
                 index[nxt] = low[nxt] = counter[0]; counter[0] += 1
                 stack.append(nxt); on.add(nxt)
@@ -1734,7 +1795,10 @@ def _main(argv=None):
         print("importers: " + (", ".join(imp) or "(none)"))
     elif a[0] == "cycles":
         cy = cycles(load())
-        print("\n".join(" <-> ".join(group) for group in cy) or "(none)")
+        # A one-module group is a module that imports ITSELF. Printed as a bare name it read
+        # like a cycle with one participant, which is not a thing.
+        print("\n".join(" <-> ".join(group if len(group) > 1 else (*group, "itself"))
+                        for group in cy) or "(none)")
     elif a[0] == "impact":
         g = load()
         t, rc = _one_target(g, a[1])
