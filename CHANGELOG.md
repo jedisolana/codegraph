@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0
 
 First release.
 
@@ -23,8 +23,8 @@ measure of how easy the questions were.
 
 ### Correctness work before release
 
-Forty audit rounds, each fix carrying a test that fails without it. The ones worth naming,
-because they are the answers a call graph must never give:
+Every fix below carries a test that fails without it. These are the ones worth naming, because
+they are the answers a call graph must never give:
 
 - **"Nothing depends on this"** for code that is called constantly — a class's `__init__`, an
   instance's `__call__`, a method reached through `super()`. None of those call sites contain
@@ -43,7 +43,7 @@ because they are the answers a call graph must never give:
   symlink, an unreadable file, a read-only directory, a `codegraph.json` that is valid JSON and
   not a graph.
 
-The last three rounds came from pointing it at the whole Python standard library — 1,849
-modules, 236,000 call edges — and checking one thing it cannot fake: a call that crosses into
-another module should land somewhere that module's file actually imports. Thirteen thousand did
-not. That number is now about eleven hundred, and most of what remains is re-export chains.
+The last of those came from pointing it at the whole Python standard library — 1,849 modules,
+236,000 call edges — and checking one thing it cannot fake: a call that crosses into another
+module should land somewhere that module's file actually imports. Thirteen thousand did not.
+That number is now about eleven hundred, and most of what remains is re-export chains.

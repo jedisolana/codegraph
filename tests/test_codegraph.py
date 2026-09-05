@@ -2088,6 +2088,23 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                                  f"{os.path.relpath(full, HERE)} contains {bad!r}")
         self.assertGreater(checked, 4, "the scan found almost nothing to read")
 
+    def test_nothing_shipped_carries_a_date(self):
+        """A year in a licence, a changelog heading or a comment dates the work and says when
+        somebody was sitting at a keyboard. The one identity this repository carries is a
+        handle."""
+        year = re.compile(r"\b(?:19|20)[0-9]{2}\b")
+        for full in self.shipped_files():
+            try:
+                with open(full, encoding="utf-8") as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                if "1,849" in line or "236,000" in line:
+                    continue                     # counts, not dates
+                self.assertIsNone(year.search(line),
+                                  f"{os.path.relpath(full, HERE)}:{n} carries a year: {line.strip()[:70]}")
+
     def test_the_help_text_a_user_prints_is_clean(self):
         """The one string the tool puts on a stranger's screen, checked on its own."""
         low = codegraph.__doc__.lower()
