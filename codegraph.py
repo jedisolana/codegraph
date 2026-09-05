@@ -72,7 +72,7 @@ def _bound_names(node):
     `helpers.run()` resolve to the imported module's function and label it QUALIFIED - the
     tool's highest confidence, on an answer that is simply wrong.
     """
-    names, freed = set(), set()
+    names, defined, freed = set(), set(), set()
     a = node.args
     for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
         if arg is not None:
@@ -81,7 +81,7 @@ def _bound_names(node):
     while stack:
         n = stack.pop()
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(n.name)                     # the NAME binds here; the body is its own scope
+            defined.add(n.name)                   # the NAME binds here; the body is its own scope
             continue
         if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
             names.add(n.id)
@@ -93,7 +93,9 @@ def _bound_names(node):
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             freed.update(n.names)                 # declared elsewhere; collected and removed last,
         stack.extend(ast.iter_child_nodes(n))     # because the walk order is not source order
-    return names - freed
+    # (values, definitions). A receiver is shadowed by either; a BARE call is shadowed only by
+    # a value, because a nested `def helper()` really is the helper that a bare helper() means.
+    return names - freed, defined - freed
 
 
 class Unparseable(Exception):
@@ -124,7 +126,7 @@ def _defs_and_calls(path, mod):
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class
             self.vtypes = [{}]                                  # per-scope var->ClassName from `x = Foo(...)`, so x.method() resolves to Foo.method (local type inference)
-            self.bound = [set()]                                # per-scope names bound locally, which SHADOW an imported module of the same name
+            self.bound = [(set(), set())]                       # per-scope (values, defs) bound locally, which SHADOW an imported module or class of the same name
 
         def _qual(self, name):
             return ".".join(self.scope + [name])
@@ -240,7 +242,14 @@ def _defs_and_calls(path, mod):
         def visit_Assign(self, node):
             if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
                     and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
-                self.vtypes[-1][node.targets[0].id] = node.value.func.id          # x = Foo(...) -> x is a Foo (resolved to a class in build())
+                name, cls = node.targets[0].id, node.value.func.id
+                if name in self.vtypes[-1] and self.vtypes[-1][name] != cls:
+                    # `if c: x = Alpha() else: x = Beta()` then x.go() used to pick whichever
+                    # branch was walked last and label it TYPED - right half the time, and
+                    # certain both times. Two answers is not a type.
+                    self.vtypes[-1][name] = None
+                else:
+                    self.vtypes[-1][name] = cls                                   # x = Foo(...) -> x is a Foo (resolved to a class in build())
             self.generic_visit(node)
 
         def visit_Call(self, node):
@@ -264,10 +273,17 @@ def _defs_and_calls(path, mod):
                 edge = {"src": self.owner[-1], "mod": mod, "callee": callee, "recv": recv, "method": method,
                         "recv_root": recv_root if isinstance(fn, ast.Attribute) else None,
                         # a receiver bound in any enclosing scope is NOT the imported module
-                        "recv_local": bool(recv) and any(recv in b for b in self.bound),
+                        # or the class of that name - it is whatever the local name holds
+                        "recv_local": bool(recv) and any(recv in v or recv in d
+                                                         for v, d in self.bound),
+                        # a BARE call to a name holding a value is not the module-level function
+                        # of that name either. Nested defs are excluded: `def g()` then `g()`
+                        # inside the same function really is that g.
+                        "callee_local": (not isinstance(fn, ast.Attribute)
+                                         and any(callee in v for v, _ in self.bound)),
                         "kind": "CALL", "line": getattr(node, "lineno", 0)}
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
-                elif recv and recv in self.vtypes[-1]: edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
+                elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
                 edges.append(edge)
             self.generic_visit(node)                            # recurse into args/keywords (which may hold more calls)
 
@@ -456,7 +472,8 @@ def build(dirs=None, write=True):
                 if (b + "." + callee) in def_ids:
                     dst = b + "." + callee; conf = "INHERITED"; break
                 stack = list(bases_of.get(b, ())) + stack
-        if not dst and method and recv and recv in cls_ids.get(srcmod, {}):
+        if (not dst and method and recv and not e.get("recv_local")
+                and recv in cls_ids.get(srcmod, {})):
             # ClassName.method() written out in full - a classmethod call, or an explicit
             # unbound call. The receiver is a class in this module, not an unknown object.
             cand = cls_ids[srcmod][recv] + "." + callee
@@ -468,11 +485,13 @@ def build(dirs=None, write=True):
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
-        if not dst and not method and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
+        if not dst and not method and e.get("callee_local"):
+            conf = "UNTYPED"                                   # a local name holding something
+        if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
             dst = by_modname.get((mod_from[srcmod][callee], callee)); conf = "QUALIFIED" if dst else conf
-        if not dst and not method and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
+        if not dst and not method and not conf and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
             dst = by_modname[(srcmod, callee)]; conf = "LOCAL"
-        if not dst and not method:                               # a BARE call
+        if not dst and not method and not conf:                  # a BARE call
             if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
             else:
                 tgts = by_name.get(callee, [])

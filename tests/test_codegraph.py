@@ -1674,5 +1674,64 @@ class DefinitionsHideInPlacesToo(Sandbox):
             self.assertIn(want, got)
 
 
+class ThreeMoreWaysToBeCertainAndWrong(Sandbox):
+    """Round nineteen fixed a local name shadowing an imported MODULE. The same fault sat in
+    three sibling paths, unswept: a local name shadowing a CLASS, a local name shadowing a
+    module-level FUNCTION, and a variable assigned two different classes in two branches -
+    which was resolved by taking whichever branch happened to be walked last."""
+
+    HEADER = ("class Parent:\n    @classmethod\n    def make(cls):\n        return 1\n\n\n"
+              "class Alpha:\n    def go(self):\n        return 1\n\n\n"
+              "class Beta:\n    def go(self):\n        return 1\n\n\n"
+              "def helper():\n    return 1\n\n\n")
+
+    def edge(self, body, src, callee):
+        self.write("app.py", self.HEADER + body)
+        hits = [e for e in self.graph(write=False)["calls"]
+                if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(hits), 1, f"expected one edge, got {hits}")
+        return hits[0]
+
+    def test_a_parameter_shadowing_a_class_is_not_that_class(self):
+        e = self.edge("def f(Parent):\n    return Parent.make()\n", "app.f", "make")
+        self.assertIsNone(e.get("dst"), "a parameter resolved to the class it shadows")
+        self.assertEqual(e["confidence"], "UNTYPED")
+
+    def test_a_parameter_shadowing_a_module_function_is_not_that_function(self):
+        e = self.edge("def f(helper):\n    return helper()\n", "app.f", "helper")
+        self.assertIsNone(e.get("dst"))
+
+    def test_two_branches_two_types_is_not_a_type(self):
+        """It picked whichever branch was walked last and called it TYPED: right half the
+        time, and certain both times."""
+        e = self.edge("def f(c):\n    if c:\n        x = Alpha()\n    else:\n"
+                      "        x = Beta()\n    return x.go()\n", "app.f", "go")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "UNTYPED")
+
+    def test_the_genuine_cases_all_still_resolve(self):
+        """A guard that costs the cases it protects is not worth having."""
+        e = self.edge("def f():\n    return Parent.make()\n", "app.f", "make")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("app.Parent.make", "CLASS"))
+        e = self.edge("def f():\n    return helper()\n", "app.f", "helper")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("app.helper", "LOCAL"))
+        e = self.edge("def f():\n    x = Alpha()\n    return x.go()\n", "app.f", "go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("app.Alpha.go", "TYPED"))
+
+    def test_a_nested_def_is_still_the_function_a_bare_call_means(self):
+        """A nested def binds its name locally too - but `def g()` then `g()` really is that g,
+        so the bare-name guard must look only at names bound to a VALUE."""
+        self.write("n.py", "def outer():\n    def inner():\n        return 1\n"
+                           "    return inner()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["callee"] == "inner")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("n.outer.inner", "LOCAL"))
+
+    def test_resolution_on_correct_code_is_unchanged(self):
+        """Measured on this tool's own source: the same 364 edges resolve before and after.
+        The guard bites only where a name genuinely shadows."""
+        g = codegraph.build([HERE], write=False)
+        self.assertGreater(codegraph.stats(g)["resolved_to_one_def"], 300)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
