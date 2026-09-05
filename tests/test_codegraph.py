@@ -705,7 +705,7 @@ class AnUnknownNameSaysSo(unittest.TestCase):
     def test_calls_on_an_unknown_name_says_not_found(self):
         r = self.run_it("calls", "nosuchname")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("not found", r.stdout + r.stderr)
+        self.assertIn("nothing named", r.stdout + r.stderr)
 
     def test_calls_on_a_real_name_still_works(self):
         r = self.run_it("calls", "real")
@@ -1212,6 +1212,66 @@ class BothDoorsRefuseToMerge(Sandbox):
                                "def top():\n    return mid()\n")
         g = self.graph(write=False)
         self.assertEqual(codegraph.blast_radius(g, "chain.leaf"), ["chain.mid", "chain.top"])
+
+
+class ThreeAnswersNotOne(unittest.TestCase):
+    """"No callers", "never heard of it" and "be more specific" are three different facts that
+    all used to print "(none)" and exit 0. For an agent deciding whether an edit is safe, a
+    typo answering "nothing depends on this" is the worst of the three."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.write("solo.py", "def alone():\n    return 1\n")
+        self.write("uses.py", "import json\ndef go():\n    return json.loads('{}')\n")
+        self.write("pulse.py", "def digest():\n    return 1\n")
+        self.write("court.py", "def digest():\n    return 2\n")
+        self.run_it("build", ".")
+
+    def write(self, name, body):
+        with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def test_a_real_name_with_no_callers_succeeds(self):
+        r = self.run_it("callers", "alone")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("(none)", r.stdout)
+
+    def test_a_name_this_graph_never_heard_of_is_an_error(self):
+        for verb in ("impact", "callers", "blast", "sites", "calls"):
+            with self.subTest(verb):
+                r = self.run_it(verb, "definitely_not_here")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("nothing named", r.stderr)
+
+    def test_a_qualified_id_that_does_not_exist_is_also_an_error(self):
+        """A dotted string was taken as a real id without checking, so a typo answered
+        "no callers" with a success code."""
+        r = self.run_it("impact", "typo.name")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing named", r.stderr)
+
+    def test_being_vague_is_a_different_code_from_being_wrong(self):
+        vague = self.run_it("impact", "digest")
+        wrong = self.run_it("impact", "not_a_thing")
+        self.assertEqual((vague.returncode, wrong.returncode), (2, 1))
+
+    def test_a_name_called_here_but_defined_elsewhere_is_answered_and_flagged(self):
+        """"Where do we call json.loads" is a fair question; the answer must not be mistaken
+        for a function of ours that nothing calls."""
+        r = self.run_it("sites", "loads")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("called here but not defined here", r.stderr)
+        self.assertIn("uses.py", r.stdout)
+
+    def test_a_search_that_matches_nothing_exits_like_grep(self):
+        self.assertEqual(self.run_it("where", "zzzz").returncode, 1)
+        self.assertEqual(self.run_it("find", "zzzz").returncode, 1)
+        self.assertEqual(self.run_it("where", "alone").returncode, 0)
 
 
 if __name__ == "__main__":

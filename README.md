@@ -100,6 +100,17 @@ codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         17 ground-truth checks, several of them red-first
 ```
 
+**Exit codes**, because scripts and agents read them:
+
+| code | meaning |
+|---|---|
+| `0` | answered — including a real function with no callers |
+| `1` | this graph has never heard the name, or a search matched nothing |
+| `2` | the name matches several definitions, or the command was malformed |
+
+"Nothing depends on this" and "I do not know that name" are deliberately different answers. A
+misspelling that returns success is how an agent talks itself into an unsafe edit.
+
 Queries find the graph by walking up from where you are, the way git finds `.git`, so you can
 ask from anywhere in the repository. They rebuild automatically when the tree has changed — a file edited, added, **or deleted**.
 Deletion is the one people forget: removing a file changes nobody else's timestamp, so a
@@ -185,14 +196,15 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 120 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 126 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
 directory arguments, two trees whose folders share a name, three calls to one function
 from one place, eight builds racing each other, files with a
 byte-order mark, a symlink pointing back into the tree, a graph built
-by an older copy of the tool, two functions that share a name — and codegraph reading its own source.
+by an older copy of the tool, two functions that share a name, a misspelled
+name that must not answer "nothing depends on this" — and codegraph reading its own source.
 
 ## Licence
 

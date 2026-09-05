@@ -702,7 +702,31 @@ def _one(g, target):
 
 
 def _targets(g, target):
-    return [target] if "." in target else _by_name(g, target)   # a qualified id is itself; a bare name expands to every def of that name
+    """The definitions this name refers to. Empty when nothing here defines it.
+
+    A dotted string used to be taken as a real id without checking, so `impact typo.name`
+    answered "no callers" with a success code - and a caller cannot tell that from a function
+    nothing calls. A qualified id has to exist to count.
+    """
+    if "." in target:
+        return [target] if any(n["id"] == target for n in g["nodes"]) else []
+    return _by_name(g, target)
+
+
+def _describe(g, name):
+    """How this graph knows the name: 'defined' here, only 'called' here, or 'unknown'.
+
+    Three different facts that all used to print "(none)" and exit 0. For a script - or an
+    agent deciding whether an edit is safe - "nothing depends on it" and "I have never heard
+    of it" have to be different answers, because one of them means you typed it wrong.
+    """
+    ids = _targets(g, name)
+    if ids:
+        return "defined", ids
+    bare = name.split(".")[-1]
+    if any(e["callee"] == bare for e in g["calls"]):
+        return "called", []                      # called here, defined elsewhere (stdlib, a library)
+    return "unknown", []
 
 
 def callers_of(g, target):
@@ -911,7 +935,11 @@ def _explain(g, exc):
 
 
 def _one_target(g, name):
-    """The single definition a command should act on, or None once the choice is explained.
+    """(target, exit code). The target is None once the problem has been explained.
+
+    Three failures a script has to tell apart, and they used to be one: 2 means you were vague
+    and must choose, 1 means this graph has never heard the name. Answering "(none)" and
+    exiting 0 for a typo is how an agent concludes nothing depends on a function it misspelled.
 
     A bare name that matches several definitions used to be MERGED silently: `impact digest`
     with a pulse.digest and a court.digest reported both callers and a blast radius of two,
@@ -920,12 +948,21 @@ def _one_target(g, name):
     apart - reachable by typing the obvious thing, since nobody types a qualified id first.
     Worse than overstating: you go and "fix" a caller of the other function.
     """
+    kind, _ = _describe(g, name)
+    if kind == "unknown":
+        print(f"nothing named {name!r} is defined or called in this graph", file=sys.stderr)
+        return None, 1
+    if kind == "called":
+        # A legitimate question - "where do we call json.load" - but say that it is what is
+        # being answered, so an empty result is not mistaken for a function with no callers.
+        print(f"note: {name!r} is called here but not defined here", file=sys.stderr)
+        return name, 0
     try:
         ids = _one(g, name)
     except Ambiguous as exc:
         _explain(g, exc)
-        return None
-    return ids[0] if ids else name
+        return None, 2
+    return ids[0], 0
 
 
 def _main(argv=None):
@@ -955,29 +992,31 @@ def _main(argv=None):
         print(json.dumps(stats(g), indent=2))
     elif a[0] == "callers":
         g = load()
-        t = _one_target(g, a[1])
-        if t is None: return 2
+        t, rc = _one_target(g, a[1])
+        if t is None: return rc
         print("\n".join(callers_of(g, t)) or "(none)")
     elif a[0] == "calls":
         g = load()
-        targets = _targets(g, a[1])
-        if len(targets) > 1 and _one_target(g, a[1]) is None: return 2
-        if not targets:
-            print("(not found)")            # it used to print nothing whatsoever - no name, no
-            return 1                        # "(none)", no error: an empty line and exit 0
-        for i in targets:
-            print("\n".join(calls_from(g, i)) or "(none)")
+        t, rc = _one_target(g, a[1])
+        if t is None: return rc
+        print("\n".join(calls_from(g, t)) or "(none)")
     elif a[0] == "blast":
         g = load()
-        t = _one_target(g, a[1])
-        if t is None: return 2
+        t, rc = _one_target(g, a[1])
+        if t is None: return rc
         print("\n".join(blast_radius(g, t)) or "(none)")
-    elif a[0] == "where": print("\n".join(f"{i}  {loc}" for i, loc in where(load(), a[1])) or "(not found)")
-    elif a[0] == "find": print("\n".join(f"{i}  {loc}" for i, loc in find(load(), a[1])) or "(none)")
+    elif a[0] == "where":
+        hits = where(load(), a[1])
+        print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
+        if not hits: return 1                    # a search that matched nothing, like grep
+    elif a[0] == "find":
+        hits = find(load(), a[1])
+        print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(none)")
+        if not hits: return 1
     elif a[0] == "sites":
         g = load()
-        t = _one_target(g, a[1])
-        if t is None: return 2
+        t, rc = _one_target(g, a[1])
+        if t is None: return rc
         print("\n".join(f"{loc}  {c}" for loc, c in sites(g, t)) or "(none)")
     elif a[0] == "path": p = path(load(), a[1], a[2]); print(" -> ".join(p) if p else "(no path)")
     elif a[0] == "deps":
@@ -995,8 +1034,8 @@ def _main(argv=None):
         print("\n".join(" <-> ".join(group) for group in cy) or "(none)")
     elif a[0] == "impact":
         g = load()
-        t = _one_target(g, a[1])
-        if t is None: return 2
+        t, rc = _one_target(g, a[1])
+        if t is None: return rc
         im = impact(g, t)
         print("callers:", ", ".join(im["callers"]) or "(none)")
         print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
