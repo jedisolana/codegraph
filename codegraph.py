@@ -141,7 +141,16 @@ def _bound_names(node):
             names.add(n.rest)                     # case {**rest}
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             freed.update(n.names)                 # declared elsewhere; collected and removed last,
-        stack.extend(ast.iter_child_nodes(n))     # because the walk order is not source order
+        # `ast.iter_child_nodes` is a generator wrapping `iter_fields`, which is another
+        # generator with a try/except per field. Five million nodes pay for both. The fields
+        # are read directly here; this collects a SET, so the order it sees them in is not
+        # something anything depends on.
+        for f in n._fields:                       # because the walk order is not source order
+            v = getattr(n, f, None)
+            if type(v) is list:
+                stack.extend(x for x in v if isinstance(x, ast.AST))
+            elif isinstance(v, ast.AST):
+                stack.append(v)
     # (values, definitions). A receiver is shadowed by either; a BARE call is shadowed only by
     # a value, because a nested `def helper()` really is the helper that a bare helper() means.
     return names - freed, defined - freed
@@ -228,7 +237,31 @@ def _defs_and_calls(path, mod):
     submodules = {}                                             # name -> the module id it MIGHT be, confirmed in build()
 
     class V(ast.NodeVisitor):
+        def visit(self, node):
+            """`ast.NodeVisitor.visit` builds the string "visit_" + the class name and does a
+            getattr with a default, for every one of five million nodes. The answer only ever
+            depends on the node's TYPE, so it is worth looking up once per type."""
+            try:
+                fn = self._route[node.__class__]
+            except KeyError:
+                fn = self._route[node.__class__] = getattr(
+                    self, "visit_" + node.__class__.__name__, self.generic_visit)
+            return fn(node)
+
+        def generic_visit(self, node):
+            """The same fields in the same order as the version in ast, without the two
+            generators it goes through to produce them."""
+            for f in node._fields:
+                v = getattr(node, f, None)
+                if type(v) is list:
+                    for item in v:
+                        if isinstance(item, ast.AST):
+                            self.visit(item)
+                elif isinstance(v, ast.AST):
+                    self.visit(v)
+
         def __init__(self):
+            self._route = {}
             self.scope = [mod]                                  # qualified-name stack: module -> class -> func
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class

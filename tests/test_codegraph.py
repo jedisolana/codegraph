@@ -3860,3 +3860,83 @@ class ASecondBuildIsTheSameBuild(Sandbox):
         expected = ["m.py:4", "m.py:5", "m.py:6"]
         self.assertEqual([loc for loc, _ in codegraph.sites(cold, "m.helper")], expected)
         self.assertEqual([loc for loc, _ in codegraph.sites(warm, "m.helper")], expected)
+
+
+class TheHandWrittenWalkMatchesTheStandardOne(unittest.TestCase):
+    """`ast.iter_child_nodes` is a generator wrapping `iter_fields`, which is another generator
+    with a try/except per field, and five million nodes pay for both. Both walks here read the
+    fields directly instead - which is only safe while they yield exactly what the standard one
+    yields, in exactly the same order. Order matters: two definitions of one name resolve to
+    whichever the walk reaches LAST."""
+
+    def children_the_fast_way(self, node):
+        out = []
+        for f in node._fields:
+            v = getattr(node, f, None)
+            if type(v) is list:
+                out += [x for x in v if isinstance(x, ast.AST)]
+            elif isinstance(v, ast.AST):
+                out.append(v)
+        return out
+
+    def assert_same_walk(self, source, label):
+        tree = ast.parse(source)
+        seen = 0
+        for node in ast.walk(tree):
+            seen += 1
+            self.assertEqual([id(c) for c in self.children_the_fast_way(node)],
+                             [id(c) for c in ast.iter_child_nodes(node)],
+                             f"{label}: {type(node).__name__} yields different children")
+        return seen
+
+    def test_over_this_tools_own_source(self):
+        with open(os.path.join(HERE, "codegraph.py"), encoding="utf-8") as f:
+            n = self.assert_same_walk(f.read(), "codegraph.py")
+        self.assertGreater(n, 5000, "that fixture was too small to mean anything")
+
+    def test_over_its_own_test_suite(self):
+        with open(os.path.abspath(__file__), encoding="utf-8") as f:
+            self.assert_same_walk(f.read(), "the tests")
+
+    def test_over_syntax_this_file_does_not_happen_to_contain(self):
+        exotic = ("async def a(x: int = 1, *args, k: str = 'v', **kw) -> bool:\n"
+                  "    async with open('x') as fh:\n"
+                  "        async for line in fh:\n"
+                  "            yield [i async for i in fh if i]\n"
+                  "    return await b(*args, **kw)\n"
+                  "\n"
+                  "class C(dict, metaclass=type):\n"
+                  "    x: int = 0\n"
+                  "    def m(self):\n"
+                  "        try:\n"
+                  "            del self.x\n"
+                  "        except (KeyError, AttributeError) as e:\n"
+                  "            raise RuntimeError from e\n"
+                  "        finally:\n"
+                  "            pass\n"
+                  "        return {k: v for k, v in ()}, {j for j in ()}, (g for g in ())\n"
+                  "\n"
+                  "f = lambda *a, **k: (n := 1) and a[1:2, ...]\n"
+                  "assert f, 'x'\n"
+                  "global_var: dict = {**{}, 'a': f'{1!r:>{2}}'}\n")
+        if sys.version_info >= (3, 10):
+            exotic += ("def g(v):\n"
+                       "    match v:\n"
+                       "        case [1, *rest] | {'k': _} if rest:\n"
+                       "            return rest\n"
+                       "        case C(x=0) as got:\n"
+                       "            return got\n")
+        self.assert_same_walk(exotic, "exotic syntax")
+
+    def test_a_redefined_name_still_resolves_to_the_last_one(self):
+        """The observable consequence of walk order, checked end to end."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def pick():\n    return 'first'\n"
+                    "def pick():\n    return 'second'\n"
+                    "def use():\n    return pick()\n")
+        g = codegraph.build([d], write=False)
+        node, = [n for n in g["nodes"] if n["id"] == "m.pick"]
+        self.assertEqual(node["line"], 3, "the live definition is the last one")
+        self.assertEqual(node.get("shadows"), [1])
