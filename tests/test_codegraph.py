@@ -1525,5 +1525,63 @@ class ImpactSaysWhatItCouldNotResolve(Sandbox):
         self.assertIn("codegraph deps pkg/lib", r.stderr)
 
 
+class EveryPlaceACallCanHide(Sandbox):
+    """A survey of the language rather than of the code: seventeen syntactic positions a call
+    can sit in, each checked for an edge. Decorators were missed once because the visitor
+    walked selected children of a def instead of all of them, and default values turned out to
+    be the same hole - `def f(x=make_default())` recorded nothing, so changing make_default
+    looked safe."""
+
+    SHAPES = (
+        ("a default value",        "def f(x=target()):\n    return x\n"),
+        ("a keyword-only default", "def f(*, x=target()):\n    return x\n"),
+        ("a return annotation",    "def f() -> type(target()):\n    return 1\n"),
+        ("a parameter annotation", "def f(x: type(target())):\n    return x\n"),
+        ("a class body",           "class C:\n    attr = target()\n"),
+        ("an f-string",            "def f():\n    return f'{target()}'\n"),
+        ("an assert",              "def f():\n    assert target()\n"),
+        ("a raise",                "def f():\n    raise ValueError(target())\n"),
+        ("a ternary",              "def f(c):\n    return target() if c else 0\n"),
+        ("a walrus",               "def f():\n    if (v := target()):\n        return v\n    return 0\n"),
+        ("a yield",                "def f():\n    yield target()\n"),
+        ("a with body",            "def f():\n    with open('x'):\n        return target()\n"),
+        ("a try body",             "def f():\n    try:\n        return target()\n    except ValueError:\n        return 0\n"),
+        ("a comprehension filter", "def f():\n    return [i for i in range(3) if target()]\n"),
+        ("a nested def",           "def f():\n    def inner():\n        return target()\n    return inner\n"),
+        ("star-args",              "def f():\n    return print(*[target()])\n"),
+        ("a keyword argument",     "def f():\n    return dict(k=target())\n"),
+        ("a subscript",            "def f():\n    return [0][target() - 1]\n"),
+    )
+
+    def test_a_call_is_found_wherever_it_sits(self):
+        for label, body in self.SHAPES:
+            with self.subTest(label):
+                d = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+                with open(os.path.join(d, "base.py"), "w", encoding="utf-8") as f:
+                    f.write("def target():\n    return 1\n")
+                with open(os.path.join(d, "s.py"), "w", encoding="utf-8") as f:
+                    f.write("from base import target\n\n\n" + body)
+                g = codegraph.build([d], write=False)
+                hits = [e for e in g["calls"] if e["callee"] == "target"]
+                self.assertTrue(hits, f"no edge for a call in {label}")
+                self.assertEqual(hits[0].get("dst"), "base.target", f"{label} resolved wrongly")
+
+    def test_a_default_value_belongs_to_the_enclosing_scope(self):
+        """It runs once, at import, beside the def - not inside the function."""
+        self.write("base.py", "def target():\n    return 1\n")
+        self.write("s.py", "from base import target\ndef f(x=target()):\n    return x\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["callee"] == "target")
+        self.assertEqual(e["src"], "s", f"attributed to {e['src']}, not the module")
+
+    def test_changing_a_default_factory_has_a_blast_radius(self):
+        """The point of the fix, stated as the question a person actually asks."""
+        self.write("base.py", "def make_default():\n    return []\n")
+        self.write("s.py", "from base import make_default\n"
+                           "def f(x=make_default()):\n    return x\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "base.make_default"), ["s"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

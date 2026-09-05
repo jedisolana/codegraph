@@ -169,8 +169,27 @@ def _defs_and_calls(path, mod):
                                   "recv_root": root.id if isinstance(root, ast.Name) else None,
                                   "kind": "CALL", "line": getattr(d, "lineno", 0)})
 
+        def _signature(self, node):
+            """Default values and annotations run where the def SITS, at definition time.
+
+            The same hole decorators were in: _func walked node.body and nothing else, so
+            `def f(x=make_default())` recorded no call at all - change make_default and the
+            tool said nothing depended on it. Defaults are evaluated once, at import, in the
+            enclosing scope; annotations too, unless postponed by `from __future__ import
+            annotations`, and counting them costs nothing when they are.
+            """
+            args = node.args
+            for d in [*args.defaults, *[k for k in args.kw_defaults if k is not None]]:
+                self.visit(d)
+            for a in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
+                if a is not None and a.annotation is not None:
+                    self.visit(a.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+
         def _func(self, node):
             self._decorators(node)
+            self._signature(node)
             qid = self._qual(node.name)
             defs.append({"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno})
             self.scope.append(node.name); self.owner.append(qid); self.vtypes.append({})   # calls inside this body belong to qid; its own var-type scope

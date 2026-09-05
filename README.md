@@ -147,6 +147,8 @@ Static analysis, honestly labelled:
   named on stderr and left out, never turned into an empty module in silence.
 - **Dynamic dispatch defeats it** — `getattr(obj, name)()`, dispatch tables, monkeypatching,
   plugin registries. These land as `EXTERNAL`, which is the truthful answer.
+- **Definition-time code counts as calls** — a default value, an annotation, a decorator all
+  run beside the `def`, so they are edges from the enclosing scope.
 - **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
   that is where it runs. But a decorator that *replaces* the function with a different one is
   not followed through: calls to the decorated name still point at the original `def`.
@@ -197,7 +199,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 146 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 149 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -207,7 +209,8 @@ byte-order mark, a symlink pointing back into the tree, a graph built
 by an older copy of the tool, two functions that share a name, a misspelled
 name that must not answer "nothing depends on this",
 and every verb crossed with every state the graph can be in,
-plus the graph's own invariants checked against real codebases — and codegraph reading its own source.
+plus the graph's own invariants checked against real codebases,
+and eighteen syntactic positions a call can hide in — and codegraph reading its own source.
 
 ## Licence
 
