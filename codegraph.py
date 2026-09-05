@@ -60,6 +60,42 @@ except Exception:
     _VERSION = "0"
 
 
+def _bound_names(node):
+    """Names this function binds in its OWN scope: parameters, assignments, loop targets,
+    `with ... as`, `except ... as`, walruses, imports, and nested defs.
+
+    Python binds for the whole scope, so a name assigned anywhere in a body shadows an outer
+    one everywhere in it - which is why this is a pre-scan rather than something tracked as
+    the visitor goes. `global` and `nonlocal` take a name back out again.
+
+    Without this, a parameter called `helpers` in a module that also imports `helpers` made
+    `helpers.run()` resolve to the imported module's function and label it QUALIFIED - the
+    tool's highest confidence, on an answer that is simply wrong.
+    """
+    names, freed = set(), set()
+    a = node.args
+    for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
+        if arg is not None:
+            names.add(arg.arg)
+    stack = list(node.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)                     # the NAME binds here; the body is its own scope
+            continue
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.add(n.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for al in n.names:
+                names.add((al.asname or al.name).split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            freed.update(n.names)                 # declared elsewhere; collected and removed last,
+        stack.extend(ast.iter_child_nodes(n))     # because the walk order is not source order
+    return names - freed
+
+
 class Unparseable(Exception):
     """A .py file the parser could not read. Reported, never swallowed."""
 
@@ -88,6 +124,7 @@ def _defs_and_calls(path, mod):
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class
             self.vtypes = [{}]                                  # per-scope var->ClassName from `x = Foo(...)`, so x.method() resolves to Foo.method (local type inference)
+            self.bound = [set()]                                # per-scope names bound locally, which SHADOW an imported module of the same name
 
         def _qual(self, name):
             return ".".join(self.scope + [name])
@@ -193,8 +230,9 @@ def _defs_and_calls(path, mod):
             qid = self._qual(node.name)
             defs.append({"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno})
             self.scope.append(node.name); self.owner.append(qid); self.vtypes.append({})   # calls inside this body belong to qid; its own var-type scope
+            self.bound.append(_bound_names(node))
             for c in node.body: self.visit(c)
-            self.vtypes.pop(); self.owner.pop(); self.scope.pop()
+            self.bound.pop(); self.vtypes.pop(); self.owner.pop(); self.scope.pop()
 
         def visit_FunctionDef(self, node): self._func(node)
         def visit_AsyncFunctionDef(self, node): self._func(node)
@@ -225,6 +263,8 @@ def _defs_and_calls(path, mod):
                 # and `sites` pointed at "my.py", a file that does not exist.
                 edge = {"src": self.owner[-1], "mod": mod, "callee": callee, "recv": recv, "method": method,
                         "recv_root": recv_root if isinstance(fn, ast.Attribute) else None,
+                        # a receiver bound in any enclosing scope is NOT the imported module
+                        "recv_local": bool(recv) and any(recv in b for b in self.bound),
                         "kind": "CALL", "line": getattr(node, "lineno", 0)}
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and recv in self.vtypes[-1]: edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
@@ -425,7 +465,8 @@ def build(dirs=None, write=True):
         if not dst and rt:                                       # x.method() where `x = Foo()` (local type inference) -> Foo.method
             for cid in by_name.get(rt, []):
                 if (cid + "." + callee) in def_ids: dst = cid + "." + callee; conf = "TYPED"; break
-        if not dst and method and recv and recv in mod_alias.get(srcmod, {}):  # memory.recall() where `memory` is an imported module -> resolve to memory.recall
+        if (not dst and method and recv and not e.get("recv_local")
+                and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
             dst = by_modname.get((mod_from[srcmod][callee], callee)); conf = "QUALIFIED" if dst else conf

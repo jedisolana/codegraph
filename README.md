@@ -45,7 +45,7 @@ Every call edge carries a confidence label:
 | `TYPED` | `x = Foo(); x.method()` — resolved by local type inference |
 | `INHERITED` | `self.method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
-| `QUALIFIED` | `thing.load()` where `thing` is a module you imported |
+| `QUALIFIED` | `thing.load()` where `thing` is a module you imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
 | `RESOLVED` | a bare call, and exactly one definition of that name exists |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
@@ -199,7 +199,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 149 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 158 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -210,7 +210,8 @@ by an older copy of the tool, two functions that share a name, a misspelled
 name that must not answer "nothing depends on this",
 and every verb crossed with every state the graph can be in,
 plus the graph's own invariants checked against real codebases,
-and eighteen syntactic positions a call can hide in — and codegraph reading its own source.
+eighteen syntactic positions a call can hide in,
+and a local name shadowing an imported module — and codegraph reading its own source.
 
 ## Licence
 

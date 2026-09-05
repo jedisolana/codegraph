@@ -1583,5 +1583,96 @@ class EveryPlaceACallCanHide(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "base.make_default"), ["s"])
 
 
+class ALocalNameIsNotAnImportedModule(Sandbox):
+    """The worst class of bug this tool can have: confidently wrong. A parameter named after an
+    imported module made `helpers.run()` resolve to that module's function and label it
+    QUALIFIED - the highest confidence there is, on an answer that is simply not true. Follow
+    that blast radius and you edit a file that has nothing to do with the change."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("helpers.py", "def run():\n    return 'the module function'\n")
+
+    def edge(self, body, src):
+        self.write("app.py", "import helpers\n\n\nclass Thing:\n    def run(self):\n"
+                             "        return 1\n\n\ndef make():\n    return Thing()\n\n\n" + body)
+        g = self.graph(write=False)
+        hits = [e for e in g["calls"] if e["src"] == src and e["callee"] == "run"]
+        self.assertEqual(len(hits), 1, f"expected one edge from {src}, got {hits}")
+        return hits[0]
+
+    def test_a_parameter_shadowing_a_module_is_not_that_module(self):
+        e = self.edge("def f(helpers):\n    return helpers.run()\n", "app.f")
+        self.assertIsNone(e.get("dst"), "resolved to the module it was shadowing")
+        self.assertEqual(e["confidence"], "UNTYPED")
+
+    def test_a_call_result_shadowing_a_module_is_not_that_module(self):
+        e = self.edge("def f():\n    helpers = make()\n    return helpers.run()\n", "app.f")
+        self.assertIsNone(e.get("dst"))
+
+    def test_a_loop_variable_shadowing_a_module_is_not_that_module(self):
+        e = self.edge("def f():\n    for helpers in []:\n        return helpers.run()\n"
+                      "    return None\n", "app.f")
+        self.assertIsNone(e.get("dst"))
+
+    def test_a_with_target_and_an_except_target_shadow_too(self):
+        e = self.edge("def f():\n    with make() as helpers:\n        return helpers.run()\n", "app.f")
+        self.assertIsNone(e.get("dst"))
+
+    def test_a_name_bound_LATER_in_the_body_still_shadows(self):
+        """Python binds for the whole scope, so the assignment below the call counts."""
+        e = self.edge("def f():\n    r = helpers.run()\n    helpers = make()\n    return r, helpers\n",
+                      "app.f")
+        self.assertIsNone(e.get("dst"), "a binding later in the body did not shadow")
+
+    def test_the_genuine_module_call_still_resolves(self):
+        """The guard must not cost the case it is protecting."""
+        e = self.edge("def f():\n    return helpers.run()\n", "app.f")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("helpers.run", "QUALIFIED"))
+
+    def test_a_global_declaration_gives_the_name_back(self):
+        """`global helpers` means the assignment is not local, so the module is visible again."""
+        self.write("app.py", "import helpers\ndef f():\n    global helpers\n"
+                             "    return helpers.run()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["callee"] == "run")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("helpers.run", "QUALIFIED"))
+
+    def test_local_type_inference_still_wins_where_it_applies(self):
+        e = self.edge("def f():\n    helpers = Thing()\n    return helpers.run()\n", "app.f")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("app.Thing.run", "TYPED"))
+
+
+class DefinitionsHideInPlacesToo(Sandbox):
+    """The mirror of last round's survey: seventeen positions a def or class can sit in.
+    All of them already worked - pinned so they keep working."""
+
+    def test_a_definition_is_found_wherever_it_sits(self):
+        self.write("d.py",
+                   "import sys\n"
+                   "if sys.version_info:\n    def in_if(): return 1\n"
+                   "else:\n    def in_else(): return 1\n"
+                   "try:\n    def in_try(): return 1\n"
+                   "except ImportError:\n    def in_except(): return 1\n"
+                   "with open(__file__):\n    def in_with(): return 1\n"
+                   "for _i in range(1):\n    def in_for(): return 1\n"
+                   "while False:\n    def in_while(): return 1\n"
+                   "class Outer:\n"
+                   "    if sys.version_info:\n        def method_in_if(self): return 1\n"
+                   "    class Nested:\n        def deep(self): return 1\n"
+                   "def outer_fn():\n"
+                   "    def nested(): return 1\n"
+                   "    class LocalClass:\n        def local_method(self): return 1\n"
+                   "    return nested, LocalClass\n"
+                   "async def amain():\n"
+                   "    async def anested(): return 1\n"
+                   "    return anested\n")
+        got = {n["id"] for n in self.graph(write=False)["nodes"]}
+        for want in ("d.in_if", "d.in_else", "d.in_try", "d.in_except", "d.in_with", "d.in_for",
+                     "d.in_while", "d.Outer.method_in_if", "d.Outer.Nested.deep",
+                     "d.outer_fn.nested", "d.outer_fn.LocalClass.local_method",
+                     "d.amain.anested"):
+            self.assertIn(want, got)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
