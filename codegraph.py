@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         20 ground-truth checks, several of them red-first
+  codegraph --selftest         21 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -157,7 +157,7 @@ def _defs_and_calls(path, mod):
         with open(path, encoding="utf-8-sig", errors="replace") as _fh:   # a context manager, so
             src = _fh.read()                                              # a big tree does not
         tree = ast.parse(src, filename=path)                              # leak a handle per file
-    except (SyntaxError, ValueError) as ex:
+    except (SyntaxError, ValueError, RecursionError) as ex:
         # py2, a template, a half-written file. Skipping is right; skipping in SILENCE is not -
         # an empty module in the graph looks exactly like a file with nothing in it.
         raise Unparseable(f"{os.path.relpath(path)}: could not parse: {ex}") from ex
@@ -360,7 +360,17 @@ def _defs_and_calls(path, mod):
                 edges.append(edge)
             self.generic_visit(node)                            # recurse into args/keywords (which may hold more calls)
 
-    V().visit(tree)
+    try:
+        V().visit(tree)
+    except RecursionError as ex:
+        # Machine-generated Python nests deeper than the interpreter's own stack: a 30,000-term
+        # constant, a giant literal table, a generated parser. ast.parse survives files like
+        # that; WALKING the tree does not. One such file ended the entire build on a traceback
+        # thousands of frames long - every other file in the tree lost its answers to it, which
+        # is the same mistake a dangling symlink and an unreadable file each made once. Named
+        # on stderr and left out, like every other file this cannot read.
+        raise Unparseable(f"{os.path.relpath(path)}: too deeply nested to analyse "
+                          f"(generated code?): {ex}") from ex
     # One EDGE per (caller, receiver, name) - that is one relationship, and it keeps the graph
     # the right size. But it used to keep only the first line and drop the rest, so a function
     # calling helper() on lines 6, 7 and 8 produced a single site: line 6. `sites` promises
@@ -546,7 +556,11 @@ def build(dirs=None, write=True):
     cls_ids = defaultdict(dict)                                  # module -> {ClassName: class id}
     for n in nodes:
         if n["kind"] in ("func", "class"):
-            by_name[n["name"]].append(n["id"]); by_modname[(n["module"], n["name"])] = n["id"]; def_ids.add(n["id"])
+            by_name[n["name"]].append(n["id"]); def_ids.add(n["id"])
+            if n["id"] == n["module"] + "." + n["name"]:         # MODULE-LEVEL only. A (module, name)
+                by_modname[(n["module"], n["name"])] = n["id"]   # dict cannot hold two `inner`s or a
+                                                                 # method and a function sharing a name;
+                                                                 # whichever parsed last silently won.
         if n["kind"] == "class":
             cls_ids[n["module"]][n["name"]] = n["id"]
     bases_of = {}                                                # class id -> base class ids
@@ -560,6 +574,7 @@ def build(dirs=None, write=True):
                     hits = [i for i in by_name.get(b, []) if i.split(".")[-1] == b]
                     if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
             bases_of[n["id"]] = resolved
+    kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
     mro_cache = {}                                                # linearisation is reused across edges
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
@@ -591,6 +606,22 @@ def build(dirs=None, write=True):
             dst = by_modname.get((e["recv_path"], callee)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and e.get("callee_local"):
             conf = "UNTYPED"                                   # a local name holding something
+        if not dst and not method and not conf:
+            # LEGB, the order Python itself uses: a bare call sees its own scope first, then
+            # each ENCLOSING FUNCTION, then the module. Two functions each defining a helper
+            # called `inner` - or `wrapper`, in any two decorators - are different functions,
+            # and the (module, name) lookup below could only hold one of them. outer() was
+            # recorded as calling other()'s inner, labelled LOCAL, and the blast radius of
+            # anything inner touched stopped one hop short of the truth.
+            # Class bodies are skipped climbing out: a bare name inside a method does not see
+            # its sibling methods, which is why `helper()` in a method is a NameError.
+            scope = e["src"]
+            while scope != srcmod and "." in scope:
+                if kind_of.get(scope) != "class":
+                    cand = scope + "." + callee
+                    if cand in def_ids:
+                        dst = cand; conf = "LOCAL"; break
+                scope = scope.rsplit(".", 1)[0]
         if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
             dst = by_modname.get((mod_from[srcmod][callee], callee)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and not conf and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
@@ -757,6 +788,16 @@ def _selftest():
             and [i for i, _ in where(gk, "Base.__init__")] == ["k.Base.__init__"])
     ok20 = sorted({e["src"] for e in gk["calls"] if e["callee"] == "__init__"}) == []
     shutil.rmtree(kd, ignore_errors=True)
+    # SCOPES. Two functions in one module can share a name - `inner`, or `wrapper` inside any
+    # two decorators. Resolution went through a (module, name) dict, which holds one of them.
+    nd = tempfile.mkdtemp()
+    _w(os.path.join(nd, "n.py"),
+        "def outer():\n    def inner():\n        return 1\n    return inner()\n"
+        "def other():\n    def inner():\n        return 2\n    return inner()\n")
+    gn = build([nd], write=False)
+    ok21 = ({e["src"]: e.get("dst") for e in gn["calls"] if e["callee"] == "inner"}
+            == {"n.outer": "n.outer.inner", "n.other": "n.other.inner"})
+    shutil.rmtree(nd, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -778,8 +819,9 @@ def _selftest():
     print(f"  CONSTRUCTOR - Mid(1) is a caller of the Base.__init__ it inherits: {ok18}")
     print(f"  a half-qualified Base.__init__ means that one, for callers and for where: {ok19}")
     print(f"  RED-FIRST - name matching finds NO caller of __init__; nobody writes it: {ok20}")
+    print(f"  SCOPES - two nested helpers both named inner stay two functions: {ok21}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

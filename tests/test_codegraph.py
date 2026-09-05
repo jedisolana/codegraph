@@ -2211,3 +2211,125 @@ class AQualifiedNameMeansTheOneYouNamed(Sandbox):
         self.assertEqual(codegraph._ids_matching(g, "mod.f"), ["pkg/deep/mod.f"])
         self.assertEqual(codegraph._ids_matching(g, "deep/mod.f"), ["pkg/deep/mod.f"])
         self.assertEqual(codegraph._ids_matching(g, "init"), [])
+
+
+class ABareNameObeysPythonsScopeRules(Sandbox):
+    """Bare calls were resolved through a (module, name) dict. Two functions in one module can
+    share a name - two nested helpers both called `inner`, or `wrapper` inside any two
+    decorators - and a dict holds one of them: whichever parsed last, silently. The other's
+    callers were attributed to it, labelled LOCAL, at full confidence."""
+
+    def edge(self, g, src, callee):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_two_nested_helpers_with_one_name_stay_apart(self):
+        self.write("n.py", "def outer():\n"
+                           "    def inner():\n"
+                           "        return 1\n"
+                           "    return inner()\n"
+                           "\n"
+                           "def other():\n"
+                           "    def inner():\n"
+                           "        return 2\n"
+                           "    return inner()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "n.outer", "inner"), ("n.outer.inner", "LOCAL"))
+        self.assertEqual(self.edge(g, "n.other", "inner"), ("n.other.inner", "LOCAL"))
+
+    def test_a_blast_radius_does_not_stop_at_the_collision(self):
+        """The consequence, and the reason it matters: the edge went to the other function, so
+        everything above the real caller dropped out of the answer."""
+        self.write("n.py", "def helper():\n"
+                           "    return 0\n"
+                           "\n"
+                           "def outer():\n"
+                           "    def inner():\n"
+                           "        return helper()\n"
+                           "    return inner()\n"
+                           "\n"
+                           "def other():\n"
+                           "    def inner():\n"
+                           "        return 2\n"
+                           "    return inner()\n"
+                           "\n"
+                           "def main():\n"
+                           "    return outer()\n")
+        g = self.graph(write=False)
+        self.assertEqual(sorted(codegraph.blast_radius(g, "n.helper")),
+                         ["n.main", "n.outer", "n.outer.inner"])
+
+    def test_a_bare_call_never_reaches_a_method(self):
+        """`helper()` written at module level cannot be Box.helper - a bare name does not see
+        a class's contents. The dict happily returned the method when it parsed last."""
+        self.write("m.py", "def helper():\n"
+                           "    return 2\n"
+                           "\n"
+                           "def top():\n"
+                           "    return helper()\n"
+                           "\n"
+                           "class Box:\n"
+                           "    def helper(self):\n"
+                           "        return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "m.top", "helper"), ("m.helper", "LOCAL"))
+        self.assertEqual(codegraph.callers_of(g, "m.Box.helper"), [])
+
+    def test_a_method_still_sees_its_own_class(self):
+        """A guard: self.helper() must keep resolving, and must not be broken by the scope
+        walk skipping class bodies."""
+        self.write("b.py", "class Box:\n"
+                           "    def helper(self):\n"
+                           "        return 1\n"
+                           "    def use(self):\n"
+                           "        return self.helper()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "b.Box.use", "helper"), ("b.Box.helper", "SELF-METHOD"))
+
+    def test_an_inner_function_can_still_call_out_to_the_module(self):
+        """Enclosing scopes are searched in order, and the module is the last of them."""
+        self.write("o.py", "def target():\n"
+                           "    return 1\n"
+                           "\n"
+                           "def outer():\n"
+                           "    def inner():\n"
+                           "        return target()\n"
+                           "    return inner()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "o.outer.inner", "target"), ("o.target", "LOCAL"))
+
+    def test_a_nested_def_shadows_an_imported_name(self):
+        """Python resolves the nearest binding, and a local def is nearer than an import."""
+        self.write("lib.py", "def run():\n    return 'library'\n")
+        self.write("app.py", "from lib import run\n"
+                             "\n"
+                             "def go():\n"
+                             "    def run():\n"
+                             "        return 'the local one'\n"
+                             "    return run()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.go", "run"), ("app.go.run", "LOCAL"))
+        self.assertEqual(codegraph.callers_of(g, "lib.run"), [])
+
+
+class GeneratedPythonIsStillPython(Sandbox):
+    """A machine-written file - a 30,000-term constant, a generated table - nests deeper than
+    the interpreter's own stack. ast.parse survives it; walking the tree does not. One such file
+    ended the WHOLE build on a traceback thousands of frames long, so a tree of perfectly good
+    code got no graph at all because of one file nobody wrote by hand."""
+
+    def test_one_unwalkable_file_does_not_end_the_build(self):
+        self.write("good.py", "def ok():\n    return 1\n")
+        self.write("gen.py", "TABLE = " + "1+" * 30000 + "1\n")
+        g = self.graph(write=False)
+        self.assertIn("good.ok", {n["id"] for n in g["nodes"]})
+        self.assertEqual(len(g["unreadable"]), 1, g["unreadable"])
+        self.assertIn("gen.py", g["unreadable"][0])
+        self.assertNotIn("gen", {n["id"] for n in g["nodes"]})
+
+    def test_the_skip_says_which_file_and_why(self):
+        """Silence would be worse: an absent module looks exactly like an empty one."""
+        self.write("gen.py", "TABLE = " + "1+" * 30000 + "1\n")
+        g = self.graph(write=False)
+        self.assertIn("nested", g["unreadable"][0].lower())

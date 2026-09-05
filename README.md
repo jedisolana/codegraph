@@ -71,13 +71,13 @@ measure how much of the standard library you happen to use:
 
 ```json
 {
-  "call_edges": 2664,
-  "call_sites": 3553,
+  "call_edges": 2663,
+  "call_sites": 3552,
   "edge_confidence": {"UNTYPED": 1002, "QUALIFIED": 484, "EXTERNAL": 420, "BUILTIN": 387,
-                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 56, "RESOLVED": 36,
+                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 55, "RESOLVED": 36,
                       "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 855,
-  "could_have_been_resolved": 1857,
+  "resolved_to_one_def": 854,
+  "could_have_been_resolved": 1856,
   "resolution_rate": 0.46
 }
 ```
@@ -103,7 +103,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         20 ground-truth checks, several of them red-first
+codegraph --selftest         21 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -150,8 +150,9 @@ result, because "nothing depends on this" is the one reply a misspelling must ne
 
 Static analysis, honestly labelled:
 
-- **Python only.** A file it cannot parse — Python 2, a template, something half-written — is
-  named on stderr and left out, never turned into an empty module in silence.
+- **Python only.** A file it cannot parse — Python 2, a template, something half-written, or a
+  generated one nested deeper than the interpreter's own stack — is named on stderr and left
+  out, never turned into an empty module in silence.
 - **Dynamic dispatch defeats it** — `getattr(obj, name)()`, dispatch tables, monkeypatching,
   plugin registries. These land as `EXTERNAL`, which is the truthful answer.
 - **Definition-time code counts as calls** — a default value, an annotation, a decorator all
@@ -198,7 +199,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 20 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 21 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -208,8 +209,10 @@ including **red-first controls** that prove the naive approach fails where this 
   makes a lazy implementation return the wrong function with full confidence
 - `Mid(1)` where `Mid` inherits its `__init__` — and the control showing that matching on the
   name `__init__` finds no caller at all, because no call site contains the word
+- two functions in one module that each define a helper called `inner`, which a lookup keyed on
+  (module, name) can only tell apart by luck
 
-The test suite adds 205 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 213 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -232,7 +235,9 @@ a bare invocation that must not build your home directory,
 every verb checked against the help text that is supposed to list it,
 every shipped file checked for a private origin story,
 a constructor whose callers never write its name,
-and a half-qualified `Class.method` that has to mean the one you named
+a half-qualified `Class.method` that has to mean the one you named,
+two decorators whose `wrapper`s are different functions,
+and a generated file too deeply nested to walk
 — and codegraph reading its own source.
 
 ## Licence
