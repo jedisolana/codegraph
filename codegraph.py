@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         22 ground-truth checks, several of them red-first
+  codegraph --selftest         24 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -208,6 +208,14 @@ def _defs_and_calls(path, mod):
                 # walking up from this module's own package: one dot stays in it, each extra dot
                 # climbs one more.
                 base = mod.split("/")[:-1]
+                if node.level - 1 > len(base):
+                    # More dots than there is tree to climb. Python calls this "attempted
+                    # relative import beyond top-level package" and refuses to import at all.
+                    # The excess used to be discarded silently, so `from ... import thing` in
+                    # pkg/up.py landed on the TOP-LEVEL thing.py and resolved thing.load() to
+                    # it, labelled QUALIFIED. That is the exact wrong answer the relative-import
+                    # work removed, still reachable by writing one dot too many.
+                    return
                 for _ in range(node.level - 1):
                     base = base[:-1]
                 if node.module:                                  # from .thing import load / from ..pkg.mod import x
@@ -425,15 +433,20 @@ class BadPath(Exception):
 def build(dirs=None, write=True):
     dirs = dirs or [HOME]
     # A typo'd path used to build an empty graph and exit 0 - success, zero modules, and no
-    # hint that the answer to every later query would be "(none)". A single file is analysed
-    # as a one-file tree, because `codegraph build app.py` is an obvious thing to type.
+    # hint that the answer to every later query would be "(none)".
     checked = []
     for d in dirs:
         d = os.path.abspath(os.path.expanduser(d))
         if os.path.isdir(d):
             checked.append(d)
         elif os.path.isfile(d) and d.endswith(".py"):
-            checked.append(os.path.dirname(d) or ".")
+            # A call graph of one file is nearly useless, so the file's DIRECTORY is what gets
+            # analysed. That is a bigger scope than was asked for - on a monorepo, much bigger -
+            # and it used to happen in silence, with the comment here claiming a one-file tree.
+            here = os.path.dirname(d) or "."
+            print(f"note: {os.path.basename(d)} is a file - building its directory {here}",
+                  file=sys.stderr)
+            checked.append(here)
         elif os.path.exists(d):
             raise BadPath(f"{d} is not a directory or a .py file")
         else:
@@ -591,6 +604,8 @@ def build(dirs=None, write=True):
                     if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
             bases_of[n["id"]] = resolved
     kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
+    imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
+                   for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
     mro_cache = {}                                                # linearisation is reused across edges
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
@@ -629,7 +644,14 @@ def build(dirs=None, write=True):
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
         if (not dst and method and not e.get("recv_local")
-                and e.get("recv_path") in allmods):             # pkg.mod.func() where pkg/mod is ours
+                and e.get("recv_path") in allmods
+                and e.get("recv_root") in imported_in.get(srcmod, ())):
+            # pkg.mod.func() where pkg/mod is ours - but ONLY if this module imported the name
+            # the chain starts with. Without that test, any dotted call whose receiver happened
+            # to spell an in-tree module id resolved into that module: a file holding
+            # `config = C()` and calling config.load() was recorded as calling load() in a
+            # config.py it never imported, labelled QUALIFIED. In Python a name you did not
+            # import is not that module - it is whatever the name holds, or a NameError.
             dst = by_modname.get((e["recv_path"], callee)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and e.get("callee_local"):
             conf = "UNTYPED"                                   # a local name holding something
@@ -787,6 +809,11 @@ def _selftest():
         "from . import thing\nfrom .thing import load\n"
         "def a():\n    return thing.load()\n"
         "def b():\n    return load()\n")
+    # ...and two ways to reach that same top-level thing.py WRONGLY: a receiver nobody
+    # imported, and one dot more than there is tree to climb.
+    _w(os.path.join(rd, "pkg", "loose.py"), "def d():\n    return thing.load()\n")
+    _w(os.path.join(rd, "pkg", "toofar.py"),
+        "from ... import thing\ndef e():\n    return thing.load()\n")
     _w(os.path.join(rd, "pkg", "deep", "__init__.py"), "")
     _w(os.path.join(rd, "pkg", "deep", "down.py"),
         "from .. import thing\ndef c():\n    return thing.load()\n")     # two dots: climb to pkg
@@ -799,6 +826,8 @@ def _selftest():
     ok15 = _dst("pkg/deep/down.c", "load") == ("pkg/thing.load", "QUALIFIED")  # from .. import thing
     ok16 = all(_dst(src, "load")[0] != "thing.load" for src in ("pkg/user.a", "pkg/user.b", "pkg/deep/down.c"))
     ok17 = ("pkg/user", "pkg/thing") in {(i["src"], i["callee"]) for i in gr["imports"]}
+    ok18a = _dst("pkg/loose.d", "load") == (None, "UNTYPED")       # never imported: not that module
+    ok18b = _dst("pkg/toofar.e", "load") == (None, "UNTYPED")      # one dot too many: no target
     shutil.rmtree(rd, ignore_errors=True)
     # CONSTRUCTORS, and the half-qualified name people use to ask about one. `impact __init__`
     # answered "callers: (none), blast: 0" for a class constructed all over a tree, because
@@ -857,8 +886,10 @@ def _selftest():
     print(f"  RED-FIRST - name matching finds NO caller of __init__; nobody writes it: {ok20}")
     print(f"  SCOPES - two nested helpers both named inner stay two functions: {ok21}")
     print(f"  super().run() is a real caller of the base method it reaches: {ok22}")
+    print(f"  RED-FIRST - thing.load() with no import of thing resolves to NOTHING: {ok18a}")
+    print(f"  RED-FIRST - one dot too many climbs out of the tree, not onto thing.py: {ok18b}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 
@@ -1362,7 +1393,11 @@ def _main(argv=None):
     # first thing a new user sees when they type a command from memory.
     NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
              "impact": 1, "deps": 1, "path": 2}
-    if a and a[0] in NEEDS and len(a) - 1 < NEEDS[a[0]]:
+    if a and a[0] in NEEDS and (len(a) - 1 < NEEDS[a[0]]
+                                or not all(x.strip() for x in a[1:1 + NEEDS[a[0]]])):
+        # A BLANK argument is a missing one. `codegraph find "$NAME"` with NAME unset used to
+        # print every symbol in the codebase and exit 0 - the empty pattern that matches
+        # everything, reported as a successful search.
         what = {"path": "<from> <to>", "deps": "<module>", "find": "<substring>"}.get(a[0], "<name>")
         print(f"usage: codegraph {a[0]} {what}", file=sys.stderr)
         return 2
@@ -1415,7 +1450,14 @@ def _main(argv=None):
         if t is None: return rc
         print("\n".join(blast_radius(g, t)) or "(none)")
     elif a[0] == "where":
-        hits = where(load(), a[1])
+        g = load()
+        hits = where(g, a[1])
+        if not hits and _describe(g, a[1])[0] == "module":
+            # Every other verb explains this; `where` used to answer "(not found)" about a
+            # module sitting right there in the graph.
+            print(f"{a[1]!r} is a module, not a function - try: codegraph deps {a[1]}",
+                  file=sys.stderr)
+            return 1
         print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
         if not hits: return 1                    # a search that matched nothing, like grep
     elif a[0] == "find":

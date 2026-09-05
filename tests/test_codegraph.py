@@ -2473,3 +2473,116 @@ class APathToYourselfIsAPath(Sandbox):
         self.write("a.py", "def f():\n    return 1\n")
         g = self.graph(write=False)
         self.assertEqual(codegraph.path(g, "a.f", "a.f"), ["a.f"])
+
+
+class ADottedCallNeedsAnImport(Sandbox):
+    """`thing.load()` resolved into an in-tree module named `thing` whenever the receiver
+    happened to spell a module id - imported or not. A file holding `config = C()` and calling
+    config.load() was recorded as calling load() in a config.py it had never heard of, labelled
+    QUALIFIED, and the real method showed no callers."""
+
+    def edge(self, g, src, callee):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_global_object_is_not_the_module_of_the_same_name(self):
+        self.write("config.py", "def load():\n    return 'the module function'\n")
+        self.write("app.py", "class C:\n"
+                             "    def load(self):\n"
+                             "        return 'the object method'\n"
+                             "\n"
+                             "config = C()\n"
+                             "\n"
+                             "def go():\n"
+                             "    return config.load()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.go", "load"), (None, "UNTYPED"))
+        self.assertEqual(codegraph.callers_of(g, "config.load"), [])
+
+    def test_a_package_path_still_resolves_when_it_was_imported(self):
+        """The guard: this must not cost the case the branch exists for."""
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "mod.py"), "def work():\n    return 1\n")
+        self.write("user.py", "import pkg.mod\n"
+                              "\n"
+                              "def go():\n"
+                              "    return pkg.mod.work()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "user.go", "work"), ("pkg/mod.work", "QUALIFIED"))
+
+
+class RelativeImportsCannotClimbOutOfTheTree(Sandbox):
+    """`from ... import thing` is an ImportError in Python - "attempted relative import beyond
+    top-level package". The extra dots were discarded silently, so the import landed on a
+    TOP-LEVEL module of the same name: the exact wrong answer the relative-import work removed,
+    still reachable by writing one dot too many."""
+
+    def test_too_many_dots_resolve_to_nothing_rather_than_the_top_level(self):
+        self.write("thing.py", "def load():\n    return 'TOP LEVEL - the wrong one'\n")
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "up.py"), "from ... import thing\n"
+                                                 "def f():\n"
+                                                 "    return thing.load()\n")
+        g = self.graph(write=False)
+        self.assertEqual([(i["src"], i["callee"]) for i in g["imports"]], [])
+        call, = [e for e in g["calls"] if e["callee"] == "load"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(codegraph.callers_of(g, "thing.load"), [])
+
+    def test_the_dots_that_do_fit_still_work(self):
+        """The guard: `from .. import thing` one level up is ordinary package code."""
+        self.write("thing.py", "def load():\n    return 'TOP LEVEL - the wrong one'\n")
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "thing.py"), "def load():\n    return 'the package one'\n")
+        self.write(os.path.join("pkg", "deep", "__init__.py"), "")
+        self.write(os.path.join("pkg", "deep", "down.py"), "from .. import thing\n"
+                                                           "def c():\n"
+                                                           "    return thing.load()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "pkg/deep/down.c"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("pkg/thing.load", "QUALIFIED"))
+
+
+class TheCommandLineSaysWhatItIsDoing(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for name, body in (("a.py", "def one():\n    return 1\n"),
+                           ("b.py", "def two():\n    return 2\n")):
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+                f.write(body)
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def test_a_file_argument_admits_it_is_building_the_directory(self):
+        """`codegraph build a.py` analyses the whole folder - on a monorepo, a much bigger
+        scope than was asked for - and it used to do that in silence."""
+        r = self.run_it("build", "a.py")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("is a file", r.stderr)
+        self.assertIn("directory", r.stderr)
+        with open(os.path.join(self.dir, "codegraph.json"), encoding="utf-8") as f:
+            ids = {n["id"] for n in json.load(f)["nodes"]}
+        self.assertEqual({"a.one", "b.two"} & ids, {"a.one", "b.two"})
+
+    def test_a_blank_argument_is_a_missing_argument(self):
+        """`codegraph find "$NAME"` with NAME unset printed every symbol in the codebase and
+        exited 0 - the empty pattern that matches everything, reported as a search that found
+        something."""
+        self.assertEqual(self.run_it("build", ".").returncode, 0)
+        for verb in ("find", "callers", "where", "impact"):
+            r = self.run_it(verb, "")
+            self.assertEqual(r.returncode, 2, f"{verb}: {r.stdout}{r.stderr}")
+            self.assertIn("usage:", r.stderr, verb)
+        self.assertEqual(self.run_it("path", "one", "  ").returncode, 2)
+
+    def test_where_explains_a_module_like_every_other_verb(self):
+        """It answered "(not found)" about a module sitting in the graph."""
+        self.assertEqual(self.run_it("build", ".").returncode, 0)
+        r = self.run_it("where", "a")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is a module", r.stderr)
+        self.assertIn("deps a", r.stderr)

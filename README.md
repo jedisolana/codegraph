@@ -49,7 +49,7 @@ Every call edge carries a confidence label:
 | `TYPED` | `x = Foo(); x.method()` — resolved by local type inference, and refused when two branches give `x` two types |
 | `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
-| `QUALIFIED` | `thing.load()` where `thing` is a module you imported — and is not shadowed by a local name of its own |
+| `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
 | `RESOLVED` | a bare call, and exactly one definition of that name exists |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
@@ -103,7 +103,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         22 ground-truth checks, several of them red-first
+codegraph --selftest         24 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -205,7 +205,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 22 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 24 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -218,8 +218,10 @@ including **red-first controls** that prove the naive approach fails where this 
 - two functions in one module that each define a helper called `inner`, which a lookup keyed on
   (module, name) can only tell apart by luck
 - `super().run()`, whose caller never writes the name of what it calls
+- `thing.load()` in a file that never imported `thing`, next to a `thing.py` that would have
+  answered — and the same trap reached by writing one dot too many in a relative import
 
-The test suite adds 224 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 231 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -246,7 +248,8 @@ a half-qualified `Class.method` that has to mean the one you named,
 two decorators whose `wrapper`s are different functions,
 a generated file too deeply nested to walk,
 a file restored from a backup with the timestamp it used to have,
-and a dangling symlink that must not make every query rebuild
+a dangling symlink that must not make every query rebuild,
+and a blank argument, which is a missing one rather than a pattern matching everything
 — and codegraph reading its own source.
 
 ## Licence
