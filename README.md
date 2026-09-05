@@ -106,7 +106,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         25 ground-truth checks, several of them red-first
+codegraph --selftest         26 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -159,6 +159,9 @@ Static analysis, honestly labelled:
 - **Python only.** A file it cannot parse — Python 2, a template, something half-written, or a
   generated one nested deeper than the interpreter's own stack — is named on stderr and left
   out, never turned into an empty module in silence.
+- **A conditional import has no single answer.** `try: from fast import parse / except:
+  from slow import parse` binds one name from two modules, and which one runs depends on the
+  machine. Both are listed as candidates; neither is chosen.
 - **Dynamic dispatch defeats it** — `getattr(obj, name)()`, dispatch tables, monkeypatching,
   plugin registries. These land as `EXTERNAL`, which is the truthful answer.
 - **Definition-time code counts as calls** — a default value, an annotation, a decorator all
@@ -208,7 +211,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 25 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 26 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -225,8 +228,10 @@ including **red-first controls** that prove the naive approach fails where this 
   answered — and the same trap reached by writing one dot too many in a relative import
 - two classes called `Client`, one import naming which, and a method call that has to land on
   the one the file imported
+- `try: from fast import parse / except ImportError: from slow import parse` — one name, two
+  sources, and a dict that could only remember the fallback
 
-The test suite adds 237 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 244 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -255,7 +260,8 @@ a generated file too deeply nested to walk,
 a file restored from a backup with the timestamp it used to have,
 a dangling symlink that must not make every query rebuild,
 a blank argument, which is a missing one rather than a pattern matching everything,
-and a class name that two files answer to
+a class name that two files answer to,
+and a repository holding both thing.py and thing/__init__.py
 — and codegraph reading its own source.
 
 ## Licence

@@ -2674,3 +2674,85 @@ class ATypeNameIsResolvedWhereItWasWritten(Sandbox):
         self.assertEqual(got["candidates"], ["a/svc.Client.get", "b/svc.Client.get"])
         self.assertEqual(codegraph.callers_of(g, "a/svc.Client.get"), [])
         self.assertEqual(codegraph.callers_of(g, "b/svc.Client.get"), [])
+
+
+class OneNameImportedFromTwoPlaces(Sandbox):
+    """The try/except ImportError idiom binds one name from two modules. A plain dict keeps the
+    LAST one - which for that idiom is the FALLBACK - so the tool named slow.parse as the
+    definite target while fast.parse, the one that actually runs when the import succeeds,
+    showed no callers at all."""
+
+    TRY = ("try:\n"
+           "    from fast import parse\n"
+           "except ImportError:\n"
+           "    from slow import parse\n"
+           "\n"
+           "def go():\n"
+           "    return parse()\n")
+
+    def setUp(self):
+        super().setUp()
+        self.write("fast.py", "def parse():\n    return 'FAST'\n")
+        self.write("slow.py", "def parse():\n    return 'slow'\n")
+
+    def test_neither_source_is_picked_and_both_are_named(self):
+        self.write("app.py", self.TRY)
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(call["confidence"], "AMBIGUOUS")
+        self.assertEqual(call["candidates"], ["fast.parse", "slow.parse"])
+        self.assertEqual(codegraph.callers_of(g, "fast.parse"), [])
+        self.assertEqual(codegraph.callers_of(g, "slow.parse"), [])
+
+    def test_impact_says_it_could_not_place_the_call(self):
+        """Silence would be the whole problem again: an empty answer must carry the reason."""
+        self.write("app.py", self.TRY)
+        g = self.graph(write=False)
+        self.assertTrue(codegraph.impact(g, "fast.parse")["unresolved"])
+
+    def test_the_cached_parse_remembers_both(self):
+        """A second build reuses the stored parse, and the cache had no room for the second
+        binding until it was given one."""
+        self.write("app.py", self.TRY)
+        codegraph.build([self.dir])
+        g = codegraph.build([self.dir])
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual(call["confidence"], "AMBIGUOUS")
+
+    def test_one_import_still_resolves(self):
+        """The guard: an ordinary from-import is not ambiguous just because it exists."""
+        self.write("app.py", "from fast import parse\n\ndef go():\n    return parse()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("fast.parse", "QUALIFIED"))
+
+    def test_the_same_name_from_the_same_module_twice_is_not_ambiguous(self):
+        """Re-importing the same thing is a duplicate line, not a second source."""
+        self.write("app.py", "from fast import parse\nfrom fast import parse\n"
+                             "\ndef go():\n    return parse()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual(call.get("dst"), "fast.parse")
+
+
+class APackageShadowsAModuleOfTheSameName(Sandbox):
+    """A repo holding both thing.py and thing/__init__.py. Python's finder looks for the
+    package first, so `import thing` is the directory - and the tool answered with the file."""
+
+    def test_import_thing_means_the_package(self):
+        self.write("thing.py", "def f():\n    return 'the file'\n")
+        self.write(os.path.join("thing", "__init__.py"), "def f():\n    return 'the package'\n")
+        self.write("app.py", "import thing\n\ndef go():\n    return thing.f()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual(call.get("dst"), "thing/__init__.f")
+        self.assertEqual(codegraph.callers_of(g, "thing.f"), [])
+
+    def test_a_plain_module_is_still_itself(self):
+        """The guard: with no package of that name, nothing changes."""
+        self.write("thing.py", "def f():\n    return 1\n")
+        self.write("app.py", "import thing\n\ndef go():\n    return thing.f()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual(call.get("dst"), "thing.f")
