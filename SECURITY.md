@@ -17,7 +17,7 @@ Say what you found, how to reproduce it, and what it lets someone do. You will g
   walked as a tree. Nothing is imported, `exec`'d, or evaluated — so a file that would delete
   your home directory when imported is, to this tool, a shape.
 - **It never uses the network.** There is no HTTP client in it, no telemetry, no update check.
-  It imports thirteen standard-library modules and nothing else.
+  It imports fourteen standard-library modules and nothing else.
 - **It writes exactly two files**: `codegraph.json` and `codegraph.cache.json`, in the
   directory you run it from, or wherever `CODEGRAPH_OUT` and `CODEGRAPH_CACHE` point. Both are
   written to a temporary name and renamed into place, so an interrupted build cannot leave a

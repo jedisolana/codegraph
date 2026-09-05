@@ -40,6 +40,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections import defaultdict
 
 _BUILTINS = set(dir(builtins))                              # next()/len()/sorted()/open()/... are builtins, never a same-named in-tree func (discard edges to built-ins; matters most cross-tree where a unique in-tree name shadows a builtin)
@@ -1075,6 +1076,15 @@ def build(dirs=None, write=True):
             try:
                 _jwrite({"_v": _VERSION, "files": newcache} if what == "cache" else graph, target)
             except OSError as ex:
+                if what == "cache":
+                    # The cache is an OPTIMISATION. Losing it costs a second on the next build
+                    # and nothing else, so it must never be the reason an answer does not
+                    # arrive - which is what it was: eight concurrent builds on Windows, and
+                    # the one that lost the race to the cache file exited 1 with no graph.
+                    print(f"note: could not write the cache to {target} "
+                          f"({ex.strerror or ex}) - the next build will be slower",
+                          file=sys.stderr)
+                    continue
                 # A read-only checkout, a container mount, someone else's repository. The
                 # analysis itself worked; only the writing failed, and there is somewhere else
                 # to put it. Name the path that ACTUALLY failed - reporting the graph's
@@ -1418,7 +1428,19 @@ def _jwrite(obj, path):
             json.dump(obj, fh, ensure_ascii=False)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)                                   # POSIX atomic rename
+        # POSIX renames over an open file without complaint. WINDOWS does not: if any other
+        # process has the destination open - a second build, an editor, a reader mid-query -
+        # replace fails with "Access is denied", and the message that reached the user blamed
+        # their permissions on a directory they could plainly write to. It is a moment, not a
+        # refusal, so it is worth waiting out.
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.02)
     except BaseException:
         with contextlib.suppress(OSError):
             os.remove(tmp)                                      # never leave a stray temp behind

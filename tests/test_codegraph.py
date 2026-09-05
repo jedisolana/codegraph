@@ -3728,3 +3728,62 @@ class ASkipMessageMustNotBeAbleToCrash(Sandbox):
         g = self.graph(write=False)
         self.assertEqual(len(g["unreadable"]), 1, g["unreadable"])
         self.assertIn("too deeply nested", g["unreadable"][0])
+
+
+class TheCacheIsAnOptimisationNotARequirement(Sandbox):
+    """Eight builds at once on Windows, and the one that lost the race to the cache file exited
+    1 with no graph at all - reporting "Access is denied" about a directory the user could
+    plainly write to. Two bugs in one line: a rename that Windows refuses while another process
+    holds the file open, and a cache failure treated as a reason to have no answer."""
+
+    def test_a_build_survives_a_cache_it_cannot_write(self):
+        self.write("m.py", "def f():\n    return 1\n")
+        codegraph.CACHE = os.path.join(self.dir, "not-a-directory", "codegraph.cache.json")
+        g = codegraph.build([self.dir])
+        self.assertIn("m.f", {n["id"] for n in g["nodes"]})
+        self.assertTrue(os.path.exists(codegraph.OUT), "the graph itself must still be written")
+
+    def test_the_graph_failing_to_write_is_still_an_error(self):
+        """The guard: the graph is the product. Only the cache is expendable."""
+        self.write("m.py", "def f():\n    return 1\n")
+        codegraph.OUT = os.path.join(self.dir, "not-a-directory", "codegraph.json")
+        with self.assertRaises(codegraph.BadPath):
+            codegraph.build([self.dir])
+
+    def test_a_rename_windows_refuses_for_a_moment_is_waited_out(self):
+        """POSIX renames over an open file. Windows returns "Access is denied" until the other
+        process lets go, which is a moment, not a refusal."""
+        real = os.replace
+        state = {"left": 3}
+
+        def busy(src, dst, *a, **kw):
+            if state["left"] > 0:
+                state["left"] -= 1
+                raise PermissionError(5, "Access is denied")
+            return real(src, dst, *a, **kw)
+
+        self.write("m.py", "def f():\n    return 1\n")
+        os.replace = busy
+        try:
+            g = codegraph.build([self.dir])
+        finally:
+            os.replace = real
+        self.assertEqual(state["left"], 0, "the retry never happened")
+        self.assertIn("m.f", {n["id"] for n in g["nodes"]})
+        self.assertTrue(os.path.exists(codegraph.OUT))
+
+    def test_a_rename_that_never_succeeds_still_reports(self):
+        """The guard on the other side: a retry loop that swallows a real failure is worse
+        than no retry loop."""
+        real = os.replace
+
+        def always_busy(src, dst, *a, **kw):
+            raise PermissionError(5, "Access is denied")
+
+        self.write("m.py", "def f():\n    return 1\n")
+        os.replace = always_busy
+        try:
+            with self.assertRaises(codegraph.BadPath):
+                codegraph.build([self.dir])
+        finally:
+            os.replace = real
