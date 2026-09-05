@@ -1172,5 +1172,47 @@ class TheReadmeExampleRuns(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[-400:])
 
 
+class BothDoorsRefuseToMerge(Sandbox):
+    """The CLI learned to refuse an ambiguous name; the LIBRARY went on quietly unioning the
+    callers of two different functions - and the library is the door the README tells an agent
+    to use. Fixing one door and not the other is not fixing it."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pulse.py", "def digest():\n    return 1\n")
+        self.write("court.py", "def digest():\n    return 2\n")
+        self.write("usera.py", "import pulse\ndef a():\n    return pulse.digest()\n")
+        self.write("userb.py", "import court\ndef b():\n    return court.digest()\n")
+        self.g = self.graph(write=False)
+
+    def test_every_library_entry_point_raises(self):
+        for fn in (codegraph.impact, codegraph.callers_of, codegraph.blast_radius, codegraph.sites):
+            with self.subTest(fn.__name__), self.assertRaises(codegraph.Ambiguous) as cm:
+                fn(self.g, "digest")
+            self.assertEqual(cm.exception.candidates, ["court.digest", "pulse.digest"])
+
+    def test_the_exception_carries_what_a_caller_needs(self):
+        with self.assertRaises(codegraph.Ambiguous) as cm:
+            codegraph.impact(self.g, "digest")
+        self.assertEqual(cm.exception.name, "digest")
+        self.assertIn("court.digest", str(cm.exception))
+
+    def test_a_qualified_id_answers_for_exactly_one(self):
+        self.assertEqual(codegraph.impact(self.g, "pulse.digest")["callers"], ["usera.a"])
+        self.assertEqual(codegraph.callers_of(self.g, "court.digest"), ["userb.b"])
+
+    def test_an_unambiguous_bare_name_is_untouched(self):
+        self.write("solo.py", "def only():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "only"), [])
+
+    def test_blast_radius_still_walks_through_qualified_ids_internally(self):
+        """The guard must not fire on the ids blast_radius generates as it walks."""
+        self.write("chain.py", "def leaf():\n    return 1\ndef mid():\n    return leaf()\n"
+                               "def top():\n    return mid()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.blast_radius(g, "chain.leaf"), ["chain.mid", "chain.top"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

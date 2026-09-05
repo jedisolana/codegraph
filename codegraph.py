@@ -678,6 +678,29 @@ def _by_name(g, name):
     return [n["id"] for n in g["nodes"] if n["name"] == name and n["kind"] in ("func", "class")]
 
 
+class Ambiguous(Exception):
+    """A bare name that several definitions answer to.
+
+    Raised rather than merged. The CLI learned to refuse this first, and the library - which is
+    the door the README tells an agent to use - went on quietly unioning the callers of two
+    different functions. Fixing one door and not the other is not fixing it.
+    """
+
+    def __init__(self, name, candidates):
+        self.name = name
+        self.candidates = sorted(candidates)
+        super().__init__(f"{name!r} names {len(self.candidates)} definitions: "
+                         + ", ".join(self.candidates))
+
+
+def _one(g, target):
+    """The definitions a query may act on, refusing to merge several into one answer."""
+    ids = _targets(g, target)
+    if len(ids) > 1:
+        raise Ambiguous(target, ids)
+    return ids
+
+
 def _targets(g, target):
     return [target] if "." in target else _by_name(g, target)   # a qualified id is itself; a bare name expands to every def of that name
 
@@ -686,7 +709,7 @@ def callers_of(g, target):
     """function ids that call `target`. When `target` resolves to a definition, follow the RESOLVED edges -
     so a query for pulse.digest returns only its real callers, NOT callers of the same-named court.digest.
     Falls back to bare-name matching only for external/unknown targets."""
-    ids = set(_targets(g, target))
+    ids = set(_one(g, target))
     if ids:
         return sorted({e["src"] for e in g["calls"] if e.get("dst") in ids})
     name = target.split(".")[-1]
@@ -753,7 +776,7 @@ def find(g, substr):
 def sites(g, target):
     """every CALL SITE of target as (file:line, caller) - the exact places to edit when you change it (the
     REFACTOR helper). Uses resolved edges when target is a known def; else the bare callee name."""
-    ids = set(_targets(g, target)); name = target.split(".")[-1]
+    ids = set(_one(g, target)); name = target.split(".")[-1]
     mod_of = {n["id"]: n["module"] for n in g["nodes"]}
     out = set()
     for e in g["calls"]:
@@ -879,6 +902,14 @@ def stats(g):
             "func_defs": len(defs), "never_called_in_tree": len(unreachable)}
 
 
+def _explain(g, exc):
+    """Print an Ambiguous the way a person needs to see it: both names, and where they live."""
+    where_ = {n["id"]: f"{n['module']}.py:{n['line']}" for n in g["nodes"]}
+    print(f"{exc.name!r} names {len(exc.candidates)} definitions - say which:", file=sys.stderr)
+    for i in exc.candidates:
+        print(f"    {i}  {where_.get(i, '')}", file=sys.stderr)
+
+
 def _one_target(g, name):
     """The single definition a command should act on, or None once the choice is explained.
 
@@ -889,12 +920,10 @@ def _one_target(g, name):
     apart - reachable by typing the obvious thing, since nobody types a qualified id first.
     Worse than overstating: you go and "fix" a caller of the other function.
     """
-    ids = _targets(g, name)
-    if len(ids) > 1:
-        where_ = {n["id"]: f"{n['module']}.py:{n['line']}" for n in g["nodes"]}
-        print(f"{name!r} names {len(ids)} definitions - say which:", file=sys.stderr)
-        for i in sorted(ids):
-            print(f"    {i}  {where_.get(i, '')}", file=sys.stderr)
+    try:
+        ids = _one(g, name)
+    except Ambiguous as exc:
+        _explain(g, exc)
         return None
     return ids[0] if ids else name
 
