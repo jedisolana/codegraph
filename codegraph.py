@@ -449,7 +449,11 @@ def build(dirs=None, write=True):
     # The source files this graph was built from. Staleness used to be "is any file newer than
     # the graph", which cannot see a DELETION: removing a file changes nobody's mtime, so the
     # graph kept answering about code that was gone - `where` would send you to a deleted file.
-    graph = {"nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
+    # Stamped with codegraph's OWN source hash. The parse cache had this from the start; the
+    # graph did not, so upgrading the tool and querying an unchanged tree served the previous
+    # version's answers - every resolution fix invisible until somebody happened to edit a file.
+    graph = {"version": _VERSION,
+             "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
              "sources": sorted(p for p, _, _ in pairs), "unreadable": sorted(unreadable)}
     if write:
         _jwrite({"_v": _VERSION, "files": newcache}, CACHE)   # cache: RAW per-file parse + code version; atomic write so an interrupted build can't corrupt it
@@ -578,6 +582,9 @@ def _is_stale(g):
     that no longer existed. The set of files is compared too, which catches additions and
     deletions in the same pass.
     """
+    if g.get("version") != _VERSION:
+        return True                            # a different codegraph built this; its answers
+                                               # are that version's, not this one's
     try: built = os.path.getmtime(OUT)
     except OSError: return True
     seen = set()
@@ -928,7 +935,8 @@ def _main(argv=None):
         im = impact(load(), a[1])
         print("callers:", ", ".join(im["callers"]) or "(none)")
         print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
-        print(f"blast:   {len(im['blast'])} functions could be affected")
+        n = len(im["blast"])
+        print(f"blast:   {n} function{'' if n == 1 else 's'} could be affected")
     elif a[0] == "stats": print(json.dumps(stats(load()), indent=2))
     else:
         print(__doc__)

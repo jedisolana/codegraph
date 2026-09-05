@@ -1034,5 +1034,64 @@ class ModuleIdsAreSeparatorAgnostic(Sandbox):
         self.assertTrue(all(os.path.exists(p) for p in g["sources"]), g["sources"])
 
 
+class AGraphBelongsToTheToolThatBuiltIt(Sandbox):
+    """The parse cache was stamped with codegraph's own source hash from the start. The GRAPH
+    was not - so upgrading the tool and querying an unchanged tree served the previous
+    version's answers, and every resolution fix stayed invisible until somebody happened to
+    edit a file. A bot that keeps a graph around would never see an improvement at all."""
+
+    def test_the_graph_records_which_codegraph_built_it(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        self.assertEqual(self.graph()["version"], codegraph._VERSION)
+
+    def test_a_graph_from_another_version_is_stale(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g))
+        g["version"] = "some-other-codegraph"
+        self.assertTrue(codegraph._is_stale(g), "an older tool's graph was accepted as fresh")
+
+    def test_a_graph_with_no_version_at_all_is_stale(self):
+        """Graphs written before this existed must be rebuilt once, not trusted."""
+        self.write("a.py", "def f():\n    return 1\n")
+        g = self.graph()
+        del g["version"]
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_a_changed_tool_actually_rebuilds_through_load(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        self.graph()
+        with open(codegraph.OUT, encoding="utf-8") as f:
+            on_disk = json.load(f)
+        on_disk["version"] = "pretend-this-is-older"
+        on_disk["nodes"] = []                              # an answer only the old graph gives
+        with open(codegraph.OUT, "w", encoding="utf-8") as f:
+            json.dump(on_disk, f)
+        self.assertTrue(codegraph.where(codegraph.load(), "f"), "served the stale graph")
+
+
+class SmallWordsMatter(unittest.TestCase):
+    """A tool people read the output of every day."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "app.py"), "w", encoding="utf-8") as f:
+            f.write("def leaf():\n    return 1\ndef mid():\n    return leaf()\n"
+                    "def top():\n    return mid()\n")
+        subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                       cwd=self.dir, capture_output=True, timeout=180)
+
+    def impact(self, name):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "impact", name],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180).stdout
+
+    def test_one_function_is_singular(self):
+        self.assertIn("1 function could be affected", self.impact("mid"))
+
+    def test_two_functions_are_plural(self):
+        self.assertIn("2 functions could be affected", self.impact("leaf"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

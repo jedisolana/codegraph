@@ -103,7 +103,8 @@ ask from anywhere in the repository. They rebuild automatically when the tree ha
 Deletion is the one people forget: removing a file changes nobody else's timestamp, so a
 graph that only watched timestamps would go on answering about code that is gone. The rebuild is incremental — unchanged files are reused from a cache keyed by
 modification time *and* by codegraph's own source hash, so editing the parser invalidates every
-stale parse instead of silently reusing it.
+stale parse instead of silently reusing it. The graph carries that hash too: upgrade codegraph
+and the next query rebuilds, rather than answering from the version you replaced.
 
 ## For an AI agent
 
@@ -178,13 +179,14 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 103 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 109 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
 directory arguments, two trees whose folders share a name, three calls to one function
 from one place, eight builds racing each other, files with a
-byte-order mark, a symlink pointing back into the tree — and codegraph reading its own source.
+byte-order mark, a symlink pointing back into the tree, a graph built
+by an older copy of the tool — and codegraph reading its own source.
 
 ## Licence
 
