@@ -4045,3 +4045,104 @@ class ResolutionDoesNotDependOnEdgeOrder(Sandbox):
             codegraph._defs_and_calls = real_defs
         got = {(e["src"], e.get("dst")) for e in jumbled["calls"] if e["callee"] == "dumps"}
         self.assertEqual(got, want, "the answer changed with the order the edges arrived in")
+
+
+class CheckedAgainstTheInterpretersOwnSymbolTable(unittest.TestCase):
+    """The pre-scan decides what shadows what, and everything downstream trusts it. Rather than
+    check it against more of my own reasoning, check it against CPython's: `symtable` is the
+    compiler's real scope analysis, written in C, and it answers the same question.
+
+    Skipped from 3.12 on, where PEP 709 inlines comprehensions and the symbol table starts
+    reporting a function's locals differently from the semantics this models. The oracle has to
+    be checked before it can be believed - on 3.14 it reports a scope's locals as `['.format']`.
+    """
+
+    def scope_pairs(self, node, st):
+        kids = list(st.get_children())
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                want = "class" if isinstance(child, ast.ClassDef) else "function"
+                match = [k for k in kids
+                         if k.get_name() == child.name and k.get_type() == want]
+                if len(match) == 1:                  # a name defined twice is not worth guessing
+                    yield child, match[0]
+                    yield from self.scope_pairs(child, match[0])
+
+    def compare(self, source, label):
+        """Returns the names CPython binds in a scope that the pre-scan does not."""
+        import symtable
+        tree = ast.parse(source)
+        st = symtable.symtable(source, label, "exec")
+        holes, scopes = [], 0
+        for node, scope in self.scope_pairs(tree, st):
+            if scope.get_type() == "class":
+                continue                              # class scope follows its own rules
+            scopes += 1
+            values, defs = codegraph._bound_names(node)
+            mine = values | defs
+            for sym in scope.get_symbols():
+                if not (sym.is_local() or sym.is_parameter()):
+                    continue
+                if sym.is_imported() or sym.is_declared_global():
+                    continue                          # bound to a module, or to another scope
+                if sym.get_name() not in mine:
+                    holes.append((label, node.name, sym.get_name()))
+        return holes, scopes
+
+    def sources(self):
+        """This repository, and then as much of the running interpreter's own library as fits
+        in a second - real code nobody wrote for this tool."""
+        import sysconfig
+        yield os.path.join(HERE, "codegraph.py")
+        yield os.path.abspath(__file__)
+        lib = sysconfig.get_paths()["stdlib"]
+        got = 0
+        for name in sorted(os.listdir(lib)):
+            if got >= 120:
+                break
+            full = os.path.join(lib, name)
+            if name.endswith(".py") and os.path.isfile(full):
+                got += 1
+                yield full
+
+    def test_it_misses_nothing_cpython_binds(self):
+        if sys.version_info >= (3, 12):
+            self.skipTest("PEP 709 changed what symtable reports as a function's locals")
+        holes, scopes, files = [], 0, 0
+        for path in self.sources():
+            try:
+                with open(path, encoding="utf-8-sig", errors="replace") as f:
+                    src = f.read()
+                found, n = self.compare(src, os.path.basename(path))
+            except (SyntaxError, ValueError, RecursionError, OSError):
+                continue
+            files += 1
+            holes += found
+            scopes += n
+        self.assertGreater(scopes, 500, f"only {scopes} scopes over {files} files - too few to mean anything")
+        self.assertEqual(holes[:8], [], f"{len(holes)} names CPython binds and the pre-scan does not")
+
+    def test_the_oracle_is_the_one_i_think_it_is(self):
+        """A control. If symtable ever stops reporting an ordinary local, the test above would
+        pass by finding nothing to disagree with."""
+        if sys.version_info >= (3, 12):
+            self.skipTest("PEP 709 changed what symtable reports as a function's locals")
+        import symtable
+        src = "def f(p):\n    loc = 1\n    for tgt in []:\n        pass\n    return p, loc, tgt\n"
+        fn = symtable.symtable(src, "m", "exec").get_children()[0]
+        locals_ = {s.get_name() for s in fn.get_symbols() if s.is_local() or s.is_parameter()}
+        self.assertEqual(locals_, {"p", "loc", "tgt"})
+        holes, scopes = self.compare(src, "m")
+        self.assertEqual((holes, scopes), ([], 1))
+
+    def test_a_name_both_imported_and_reassigned_is_treated_as_local(self):
+        """The only shape the two ever disagreed on, across fifteen thousand scopes. CPython
+        marks it imported; it is also assigned, so within that function the name is a variable
+        and the pre-scan is right to say so."""
+        values, _defs = codegraph._bound_names(ast.parse(
+            "def f(msg):\n"
+            "    import linecache\n"
+            "    line = linecache.getline(msg)\n"
+            "    linecache = None\n"
+            "    return line, linecache\n").body[0])
+        self.assertIn("linecache", values)

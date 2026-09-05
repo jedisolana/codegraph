@@ -217,6 +217,11 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
+Which name shadows which is the question everything else rests on, so it is not only
+checked against fixtures: `symtable` is CPython's own scope analysis, and on the versions
+where its model matches this one, the two are compared scope by scope over the running
+interpreter's standard library. Fifteen thousand scopes, nothing missed.
+
 `python3 codegraph.py --selftest` builds small trees with known answers and checks all 32 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
@@ -248,7 +253,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 335 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 338 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -296,7 +301,8 @@ a rename that Windows refuses while another process is reading the file,
 a second build that has to reach the same graph as the first,
 a hand-written tree walk checked node type by node type against the standard one,
 every way Python has of binding a name, one at a time,
-and a resolution pass that must not depend on the order its edges arrive in
+a resolution pass that must not depend on the order its edges arrive in,
+and the scope analysis checked against the one CPython's own compiler does
 — and codegraph reading its own source.
 
 ## Licence
