@@ -8,6 +8,7 @@ codegraph reading its own source.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import inspect
 import io
@@ -3613,3 +3614,50 @@ class ADottedImportImportsBothOfThem(Sandbox):
         self.write("user.py", "import logging\n\ndef go():\n    return 1\n")
         g = self.graph(write=False)
         self.assertEqual([i["callee"] for i in g["imports"]], ["logging/__init__"])
+
+
+class WhatSecurityMdPromises(unittest.TestCase):
+    """A tool people are told to copy into their own repository makes three promises about what
+    it will do there: no network, no execution, nothing but the standard library. Prose goes
+    stale the moment nothing runs it - the last count in SECURITY.md was already wrong."""
+
+    NETWORK = frozenset({"socket", "ssl", "urllib", "http", "ftplib", "smtplib", "poplib",
+                         "imaplib", "telnetlib", "xmlrpc", "webbrowser", "requests",
+                         "urllib3", "httpx", "asyncio"})
+    EXECUTION = frozenset({"subprocess", "ctypes", "importlib", "runpy", "pty", "multiprocessing"})
+
+    def setUp(self):
+        with open(os.path.join(HERE, "codegraph.py"), encoding="utf-8") as f:
+            self.src = f.read()
+        self.tree = ast.parse(self.src)
+        self.imports = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Import):
+                self.imports.update(a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                self.imports.add(n.module.split(".")[0])
+
+    def test_it_imports_nothing_but_the_standard_library(self):
+        outside = sorted(m for m in self.imports if m not in sys.stdlib_module_names)
+        self.assertEqual(outside, [], "a dependency crept in")
+
+    def test_it_cannot_reach_the_network(self):
+        self.assertEqual(sorted(self.imports & self.NETWORK), [])
+
+    def test_it_cannot_run_anything(self):
+        """It parses your code. A tool that imported the files it analyses would run whatever
+        is at the top of them."""
+        self.assertEqual(sorted(self.imports & self.EXECUTION), [])
+        called = {n.func.id for n in ast.walk(self.tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertEqual(sorted(called & {"exec", "eval", "compile", "__import__"}), [])
+
+    def test_the_module_count_in_security_md_is_the_real_one(self):
+        words = {"nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+                 "fourteen": 14, "fifteen": 15, "sixteen": 16}
+        with open(os.path.join(HERE, "SECURITY.md"), encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r"It imports (\w+) standard-library modules", text)
+        self.assertIsNotNone(m, "SECURITY.md lost the sentence this checks")
+        self.assertEqual(words.get(m.group(1)), len(self.imports),
+                         f"SECURITY.md says {m.group(1)}; the file imports {len(self.imports)}")

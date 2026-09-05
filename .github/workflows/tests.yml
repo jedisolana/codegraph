@@ -8,6 +8,11 @@ on:
 env:
   PYTHONUTF8: "1"
 
+# Without this a workflow inherits whatever the repository default token is, which on many
+# repositories is write. These jobs check out the code and run tests; reading is all they need.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -34,3 +39,29 @@ jobs:
         run: |
           python codegraph.py build .
           python codegraph.py impact build
+
+  # The file is meant to be copied into a repo, and it is also meant to install. Those are two
+  # different things, and only one of them is covered by running the tests from a checkout:
+  # `pip install` has to produce a `codegraph` command that works from a directory that is not
+  # this one.
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build a wheel from a clean tree
+        run: |
+          rm -rf build dist ./*.egg-info
+          pip install build
+          python -m build --wheel
+      - name: install it somewhere else and ask it a question
+        run: |
+          pip install dist/*.whl
+          mkdir -p /tmp/subject && printf 'def leaf():\n    return 1\ndef mid():\n    return leaf()\n' > /tmp/subject/app.py
+          cd /tmp/subject
+          codegraph build .
+          codegraph impact leaf | tee out.txt
+          grep -q "app.mid" out.txt
+          codegraph --help > /dev/null
