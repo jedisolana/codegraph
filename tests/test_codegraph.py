@@ -967,5 +967,72 @@ class TheReadmeDoesNotOversell(unittest.TestCase):
         self.assertEqual(claimed_suite, suite.countTestCases())
 
 
+class OneFileHoweverManyPathsReachIt(Sandbox):
+    """A symlink to a file inside the same tree indexed it twice: two modules with identical
+    function names, so every call to them became AMBIGUOUS and the blast radius of everything
+    in the linked file was empty. One symlink, and the tool quietly stopped answering."""
+
+    def link(self, name, target):
+        try:
+            os.symlink(os.path.join(self.dir, target), os.path.join(self.dir, name))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+
+    def test_a_link_to_a_file_in_the_tree_is_indexed_once(self):
+        self.write("real.py", "def shared():\n    return 1\n")
+        self.write("caller.py", "def use():\n    return shared()\n")
+        self.link("alias.py", "real.py")
+        g = self.graph(write=False)
+        mods = sorted(n["id"] for n in g["nodes"] if n["kind"] == "module")
+        self.assertEqual(mods, ["caller", "real"])
+
+    def test_resolution_is_not_degraded_by_the_link(self):
+        self.write("real.py", "def shared():\n    return 1\n")
+        self.write("caller.py", "def use():\n    return shared()\n")
+        self.link("alias.py", "real.py")
+        g = self.graph(write=False)
+        e = next(x for x in g["calls"] if x["src"] == "caller.use")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("real.shared", "RESOLVED"))
+        self.assertEqual(codegraph.callers_of(g, "real.shared"), ["caller.use"])
+
+    def test_the_real_file_is_the_one_named_not_the_link(self):
+        """Naming the module after the symlink is the same gap in a nicer disguise: ask about
+        the file you actually edit and the answer is empty."""
+        self.write("zzz_real.py", "def shared():\n    return 1\n")
+        self.link("aaa_alias.py", "zzz_real.py")          # sorts FIRST, so order cannot decide it
+        mods = [n["id"] for n in self.graph(write=False)["nodes"] if n["kind"] == "module"]
+        self.assertEqual(mods, ["zzz_real"])
+
+    def test_two_genuine_copies_are_both_indexed(self):
+        """Identical content is not the same file. Only a shared realpath collapses."""
+        self.write("one.py", "def same():\n    return 1\n")
+        self.write("two.py", "def same():\n    return 1\n")
+        mods = sorted(n["id"] for n in self.graph(write=False)["nodes"] if n["kind"] == "module")
+        self.assertEqual(mods, ["one", "two"])
+
+
+class ModuleIdsAreSeparatorAgnostic(Sandbox):
+    """Module ids are the tool's vocabulary and they always use "/". On Windows os.sep is a
+    backslash, and an id built from raw path pieces would differ per platform - so a graph
+    built on one machine would not answer questions asked on another."""
+
+    def test_no_id_ever_contains_a_backslash(self):
+        os.makedirs(os.path.join(self.dir, "pkg", "deep"))
+        self.write("pkg/deep/mod.py", "def f():\n    return 1\n")
+        g = self.graph(write=False)
+        for n in g["nodes"]:
+            self.assertNotIn("\\", n["id"], n)
+            self.assertNotIn("\\", n["module"], n)
+        for e in g["calls"]:
+            self.assertNotIn("\\", e.get("mod", ""), e)
+        self.assertIn("pkg/deep/mod.f", {n["id"] for n in g["nodes"]})
+
+    def test_recorded_sources_are_real_os_paths(self):
+        """The one place that must use the platform separator: they are paths to open."""
+        self.write("a.py", "def f():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertTrue(all(os.path.exists(p) for p in g["sources"]), g["sources"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

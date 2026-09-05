@@ -283,12 +283,36 @@ def build(dirs=None, write=True):
     # hanging off it. Take as many trailing segments as it takes to tell the roots apart.
     labels = _root_labels(dirs) if multiroot else {}
     pairs = []                                                  # (path, rootdir, rootname) - RECURSIVE + noise-pruned; module ids are path-relative so nested same-named files don't collide either
+    # One FILE, however many paths reach it. A symlink to a file inside the same tree used to
+    # index it twice - two modules with identical function names - which made every call to
+    # them AMBIGUOUS and emptied the blast radius of everything in the linked file. Nothing is
+    # lost by indexing once: it is the same content, reachable under the first path walked.
+    seen_files = {}                                             # realpath -> the entry we keep
     for d in dirs:
         root = labels.get(d) or os.path.basename(d.rstrip(os.sep)) or "root"
         for dp, dns, fns in os.walk(d):
             dns[:] = [x for x in dns if not _prune_dir(dp, x)]   # single pruned walk: skip noise, hidden, embedded interpreters, venv roots
             for fn in sorted(fns):
-                if fn.endswith(".py"): pairs.append((os.path.join(dp, fn), d, root))
+                if not fn.endswith(".py"): continue
+                full = os.path.join(dp, fn)
+                try:
+                    real = os.path.realpath(full)
+                except OSError:
+                    real = full
+                if real in seen_files:
+                    # A second path to a file already indexed. Keep the REAL one: naming the
+                    # module after the symlink instead made `callers_of(real.shared)` empty,
+                    # which is the same silent gap in a nicer disguise.
+                    #
+                    # Ask whether THIS path is a link - do not compare abspath to realpath. On
+                    # macOS a temp dir sits under /var, which is itself a link to /private/var,
+                    # so the two never match and the test would silently never fire. Comparing
+                    # a resolved path against an unresolved one is the trap; this sidesteps it.
+                    if not os.path.islink(full):
+                        seen_files[real] = (full, d, root)
+                    continue
+                seen_files[real] = (full, d, root)
+    pairs = list(seen_files.values())                           # walk order, one entry per file
     cache = {}                                                  # INCREMENTAL: reuse a file's parse when its mtime is unchanged (single-tree only; multiroot ids differ by mode so it parses fresh)
     if write and not multiroot:
         try:
