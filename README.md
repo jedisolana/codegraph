@@ -152,8 +152,9 @@ Static analysis, honestly labelled:
 - **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
   that is where it runs. But a decorator that *replaces* the function with a different one is
   not followed through: calls to the decorated name still point at the original `def`.
-- **Inheritance is resolved by name, not by import.** `self.method()` walks the base chain when
-  the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
+- **Inheritance is resolved by name, not by import.** `self.method()` follows Python's own
+  method order — C3 linearisation, so a diamond resolves where the interpreter resolves it —
+  when the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
   A base imported under an alias, or built by a metaclass, is not followed.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`. Nothing beyond that.
 
@@ -199,7 +200,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 164 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 170 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -212,7 +213,8 @@ and every verb crossed with every state the graph can be in,
 plus the graph's own invariants checked against real codebases,
 eighteen syntactic positions a call can hide in,
 and a local name shadowing an imported module,
-a class, or a function of the same name — and codegraph reading its own source.
+a class, or a function of the same name,
+and a diamond hierarchy checked against the interpreter's own MRO — and codegraph reading its own source.
 
 ## Licence
 

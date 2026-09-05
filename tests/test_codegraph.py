@@ -1733,5 +1733,65 @@ class ThreeMoreWaysToBeCertainAndWrong(Sandbox):
         self.assertGreater(codegraph.stats(g)["resolved_to_one_def"], 300)
 
 
+class MethodLookupFollowsPython(Sandbox):
+    """A depth-first walk of the bases is right for a chain and wrong for a diamond. With
+    `class D(B, C)` where both derive from A, and both A and C define m, depth-first reaches A
+    through B and stops - but Python's order is D, B, C, A, so C.m is what runs. The tool said
+    A.m, labelled INHERITED. Ground truth here is the interpreter, not my reading of the rules."""
+
+    HIERARCHY = (
+        "class A:\n    def m(self):\n        return 'A'\n\n\n"
+        "class B(A):\n    pass\n\n\n"
+        "class C(A):\n    def m(self):\n        return 'C'\n\n\n"
+        "class D(B, C):\n    def go(self):\n        return self.m()\n\n\n"
+        "class Chain(A):\n    def go(self):\n        return self.m()\n"
+    )
+
+    def test_the_diamond_resolves_the_way_python_resolves_it(self):
+        self.write("app.py", self.HIERARCHY)
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "app.D.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("app.C.m", "INHERITED"))
+
+    def test_the_interpreter_agrees(self):
+        """The strongest form of this test: import the fixture and ask Python."""
+        self.write("app.py", self.HIERARCHY)
+        sys.path.insert(0, self.dir)
+        self.addCleanup(sys.path.remove, self.dir)
+        self.addCleanup(sys.modules.pop, "app", None)
+        import importlib
+        app = importlib.import_module("app")
+        self.assertEqual([c.__name__ for c in app.D.__mro__][:4], ["D", "B", "C", "A"])
+        self.assertEqual(app.D().go(), "C")             # what actually runs
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "app.D.go")
+        self.assertEqual(e["dst"], "app.C.m")           # what the tool says runs
+
+    def test_a_plain_chain_is_unaffected(self):
+        self.write("app.py", self.HIERARCHY)
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "app.Chain.go")
+        self.assertEqual(e.get("dst"), "app.A.m")
+
+    def test_an_override_still_beats_every_base(self):
+        self.write("o.py", "class A:\n    def m(self):\n        return 1\n"
+                           "class B(A):\n    def m(self):\n        return 2\n"
+                           "    def go(self):\n        return self.m()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "o.B.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("o.B.m", "SELF-METHOD"))
+
+    def test_a_cyclic_hierarchy_terminates(self):
+        """Illegal in Python, trivially expressible in a half-written file."""
+        self.write("z.py", "class A(B):\n    def go(self):\n        return self.gone()\n"
+                           "class B(A):\n    pass\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "z.A.go")
+        self.assertIsNone(e.get("dst"))
+
+    def test_an_unlinearisable_hierarchy_does_not_hang_or_lie(self):
+        """C3 fails on this one - Python refuses to create the class at all."""
+        self.write("bad.py", "class X:\n    def m(self):\n        return 1\n"
+                             "class Y(X):\n    pass\n"
+                             "class Z(X, Y):\n    def go(self):\n        return self.m()\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "bad.Z.go")
+        self.assertIn(e.get("dst"), (None, "bad.X.m"))   # partial or nothing, never invented
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

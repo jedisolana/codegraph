@@ -98,6 +98,45 @@ def _bound_names(node):
     return names - freed, defined - freed
 
 
+def _mro(cid, bases_of, cache, busy=None):
+    """The order Python itself looks a method up in: C3 linearisation.
+
+    A depth-first walk of the bases is right for a chain and wrong for a diamond. With
+    `class D(B, C)` where B and C both derive from A, and both A and C define m, depth-first
+    reaches A through B and stops - but Python's order is D, B, C, A, so C.m is what actually
+    runs. The tool said A.m, labelled INHERITED, which is the confident kind of wrong.
+
+    A cyclic hierarchy is illegal in Python and trivially expressible in a half-written file,
+    so `busy` stops the recursion rather than the interpreter stopping it for us. An
+    inconsistent hierarchy that C3 cannot linearise yields what has been ordered so far, which
+    is better than nothing and honest about being partial.
+    """
+    if cid in cache:
+        return cache[cid]
+    busy = busy or set()
+    if cid in busy:
+        return [cid]
+    busy = busy | {cid}
+    bases = list(bases_of.get(cid, ()))
+    seqs = [list(_mro(b, bases_of, cache, busy)) for b in bases]
+    seqs = [s for s in seqs if s] + ([list(bases)] if bases else [])
+    out = [cid]
+    while seqs:
+        for seq in seqs:
+            head = seq[0]
+            if not any(head in rest[1:] for rest in seqs):
+                break
+        else:
+            break                                  # no good head: inconsistent, stop here
+        out.append(head)
+        for seq in seqs:
+            if seq and seq[0] == head:
+                del seq[0]
+        seqs = [s for s in seqs if s]
+    cache[cid] = out
+    return out
+
+
 class Unparseable(Exception):
     """A .py file the parser could not read. Reported, never swallowed."""
 
@@ -454,24 +493,19 @@ def build(dirs=None, write=True):
                     hits = [i for i in by_name.get(b, []) if i.split(".")[-1] == b]
                     if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
             bases_of[n["id"]] = resolved
+    mro_cache = {}                                                # linearisation is reused across edges
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         ec = e.get("encl_class")
         if ec and (ec + "." + callee) in def_ids:                # self.method()/cls.method() -> the method in the ENCLOSING class (exact scope)
             dst = ec + "." + callee; conf = "SELF-METHOD"
         elif ec:
-            # INHERITED: self.method() where the method lives on a base class. Walk the chain,
-            # depth-first and left-to-right - Python's own order - and stop at the first class
-            # that defines it. `seen` guards a cyclic hierarchy, which is illegal in Python but
-            # trivially expressible in a half-written file.
-            stack, walked = list(bases_of.get(ec, ())), {ec}
-            while stack:
-                b = stack.pop(0)
-                if b in walked: continue
-                walked.add(b)
+            # INHERITED: self.method() where the method lives on a base class. Looked up in
+            # Python's own order - C3, not depth-first - because those differ exactly where a
+            # diamond makes the answer interesting.
+            for b in _mro(ec, bases_of, mro_cache)[1:]:          # [0] is ec itself, handled above
                 if (b + "." + callee) in def_ids:
                     dst = b + "." + callee; conf = "INHERITED"; break
-                stack = list(bases_of.get(b, ())) + stack
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in cls_ids.get(srcmod, {})):
             # ClassName.method() written out in full - a classmethod call, or an explicit
