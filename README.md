@@ -51,7 +51,7 @@ Every call edge carries a confidence label:
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
-| `RESOLVED` | a bare call, and exactly one definition of that name exists at module level — a helper nested inside some other function is not a candidate, because a bare name cannot reach it |
+| `RESOLVED` | a bare call, and exactly one definition of that name exists at module level — a helper nested inside some other function is not a candidate, because a bare name cannot reach it, and neither is anything when the file imported that name from outside the tree |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
 | `TYPED` (again) | `c(1)` where `c` is a known `Client` — calling an instance runs its `__call__`, and the call site never writes that name |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
@@ -107,7 +107,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         30 ground-truth checks, several of them red-first
+codegraph --selftest         31 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -217,7 +217,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 30 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 31 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -244,8 +244,10 @@ including **red-first controls** that prove the naive approach fails where this 
   deferred `import config` inside a function, which is the same name meaning the opposite thing
 - `[config.dumps(r) for config in rows]` on one line and `config.dumps(2)` on the next, where
   the same name is the loop variable and then the module again
+- `from time import sleep` in a tree that happens to contain a `sleep` of its own, and
+  `from ops import index as _index`, where the module holds `index` and the file says `_index`
 
-The test suite adds 293 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 301 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -283,7 +285,8 @@ a module that imports itself,
 a codegraph.json that is valid JSON and not a graph,
 a class attribute with the same name as an import,
 two trees whose call sites have to name files that exist,
-and an instance that is called rather than a method on it
+an instance that is called rather than a method on it,
+and a package that has to be able to name its own importers
 — and codegraph reading its own source.
 
 ## Licence

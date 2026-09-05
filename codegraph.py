@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         30 ground-truth checks, several of them red-first
+  codegraph --selftest         31 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -196,7 +196,7 @@ def _defs_and_calls(path, mod):
         # a single awkward file is not a reason to refuse to analyse a codebase.
         raise Unparseable(f"{os.path.relpath(path)}: could not read: {ex.strerror or ex}") from ex
     defs, edges, imports = [], [], []
-    aliases, fromimp = {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
+    aliases, fromimp, fromorig = {}, {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
     # One name imported from two different modules - the try/except ImportError idiom. A plain
     # dict keeps the LAST binding, which for that idiom is the FALLBACK: the tool named
     # slow.parse as the definite target of parse() while fast.parse, the one that actually runs
@@ -264,15 +264,20 @@ def _defs_and_calls(path, mod):
                     imports.append({"src": mod, "callee": target, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                     for a in node.names:
                         _bind(fromimp, fromalt, a.asname or a.name, target)
+                        if a.asname: fromorig[a.asname] = a.name
                         # the name may be a SUBMODULE, same as the absolute form - the two
                         # branches have to learn the same things or one of them lags behind
                         submodules[a.asname or a.name] = f"{target}/{a.name}"
+                        imports.append({"src": mod, "callee": f"{target}/{a.name}",
+                                        "kind": "IMPORT", "line": node.lineno,
+                                        "module_level": ml, "maybe": True})
                 else:                                            # from . import thing - each NAME is itself a module
                     for a in node.names:
                         target = "/".join([*base, a.name])
                         imports.append({"src": mod, "callee": target, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                         aliases[a.asname or a.name] = target
                         _bind(fromimp, fromalt, a.asname or a.name, target)   # `from . import thing` also allows a bare thing() if it is a func
+                        if a.asname: fromorig[a.asname] = a.name
                 return
             if node.module:
                 top = node.module.split(".")[0]
@@ -287,10 +292,21 @@ def _defs_and_calls(path, mod):
                     # elsewhere and answered AMBIGUOUS, in a file that had said which one it
                     # meant. The relative branch has always recorded the full path.
                     _bind(fromimp, fromalt, a.asname or a.name, full)   # `from memory import recall` -> bare recall() resolves into module memory
+                    # `from operator import index as _index`: the module holds `index`, and the
+                    # lookup was made with the LOCAL name. It found nothing, fell through to the
+                    # tree-wide "one definition of that name" rule, and answered with an
+                    # unrelated function in another package.
+                    if a.asname: fromorig[a.asname] = a.name
                     # ...but the name might be a SUBMODULE rather than a function, and
                     # `from pkg import mod` then mod.func() is ordinary package code. Recorded
                     # as a candidate; build() keeps it only if that module really exists.
                     submodules[a.asname or a.name] = f"{node.module.replace('.', '/')}/{a.name}"
+                    # `from ctypes import util` really does import ctypes.util. Recorded as a
+                    # MAYBE, because the name is just as likely to be a function; build() keeps
+                    # it only if a module of that id turns out to exist. Without it,
+                    # `deps ctypes/util` could not name the files that import it.
+                    imports.append({"src": mod, "callee": f"{full}/{a.name}", "kind": "IMPORT",
+                                    "line": node.lineno, "module_level": ml, "maybe": True})
 
         def visit_ClassDef(self, node):
             self._decorators(node)
@@ -550,7 +566,7 @@ def _defs_and_calls(path, mod):
         e["lines"] = sorted(set(e["lines"]))
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
     return (defs, list(seen.values()), imports, aliases, fromimp,
-            {k: v for k, v in fromalt.items() if len(v) > 1}, submodules)
+            {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules)
 
 
 def _annotated_class(ann):
@@ -693,7 +709,9 @@ def build(dirs=None, write=True):
         except Exception: cache = {}
     nodes, calls, imports, unreadable = [], [], [], []
     stamps = {}                                                  # path -> [mtime, size], the graph's own record of what it read
-    mod_alias, mod_from, mod_root, mod_sub, mod_alt = {}, {}, {}, {}, {}; newcache = {}
+    mod_alias, mod_from, mod_root, mod_sub, mod_alt = {}, {}, {}, {}, {}
+    mod_orig = {}                                                # local alias -> the name the module actually defines
+    newcache = {}
     for path, d, root in pairs:
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
         base = os.path.basename(rel)
@@ -719,19 +737,21 @@ def build(dirs=None, write=True):
         if c and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
             sub = c.get("submodules", {}); alt = c.get("fromalt", {})
+            orig = c.get("fromorig", {})
         else:
             try:
-                d, e, im, al, fi, alt, sub = _defs_and_calls(path, mid)
+                d, e, im, al, fi, alt, orig, sub = _defs_and_calls(path, mid)
             except Unparseable as ex:
                 unreadable.append(str(ex))
                 nodes.pop()                                      # not a module we can describe
                 continue
         if not multiroot:
             newcache[path] = {"stamp": stamp, "defs": d, "calls": [dict(x) for x in e], "imports": im,
-                              "aliases": al, "fromimp": fi, "fromalt": alt, "submodules": sub}
+                              "aliases": al, "fromimp": fi, "fromalt": alt,
+                              "fromorig": orig, "submodules": sub}
         nodes += d; calls += e; imports += im
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
-        mod_alt[mid] = alt
+        mod_alt[mid] = alt; mod_orig[mid] = orig
     if multiroot:                                              # remap import aliases to the SAME-ROOT module id, so within-tree imports resolve to the right tree
         allmods = {n["id"] for n in nodes if n["kind"] == "module"}   # the ids known at this point
         qual = lambda r, b: (f"{r}/{b}" if f"{r}/{b}" in allmods else b)
@@ -757,6 +777,15 @@ def build(dirs=None, write=True):
     for table in (mod_alias, mod_from):
         for mid in table:
             table[mid] = {k: _real_module(v) for k, v in table[mid].items()}
+    imports = [i for i in imports if not i.get("maybe") or i["callee"] in allmods]
+    for i in imports:
+        i.pop("maybe", None)
+        # `import sysconfig` records "sysconfig"; the module's id is "sysconfig/__init__". The
+        # resolver normalised that and the IMPORT TABLE did not, so the edge pointed at a name
+        # no node has - and `deps sysconfig/__init__` answered "importers: (none)" for a package
+        # half the tree imports, while `cycles` could not see a loop that runs through any
+        # package's __init__.
+        i["callee"] = _real_module(i["callee"])
     for mid in mod_alt:
         mod_alt[mid] = {k: [_real_module(x) for x in v] for k, v in mod_alt[mid].items()}
     # `from pkg import mod` where pkg/mod is a real module: the name is a MODULE alias, so
@@ -819,9 +848,10 @@ def build(dirs=None, write=True):
             where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
             cid = by_modname.get((where_, cname)) if where_ else None
             return [cid] if cid and kind_of.get(cid) == "class" else []
+        real = mod_orig.get(srcmod, {}).get(rt, rt)              # from svc import Client as C
         scoped = (cls_ids.get(srcmod, {}).get(rt)
-                  or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
-                  or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
+                  or by_modname.get((mod_from.get(srcmod, {}).get(rt), real))
+                  or by_modname.get((mod_sub.get(srcmod, {}).get(rt), real)))
         return [scoped] if scoped else [i for i in public.get(rt, []) if kind_of.get(i) == "class"]
 
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
@@ -911,17 +941,26 @@ def build(dirs=None, write=True):
                         dst = cand; conf = "LOCAL"; break
                 scope = scope.rsplit(".", 1)[0]
         if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
+            real = mod_orig.get(srcmod, {}).get(callee, callee)      # `as` renames it here only
             alts = mod_alt.get(srcmod, {}).get(callee)
-            hits = ([by_modname[(m, callee)] for m in alts if (m, callee) in by_modname]
+            hits = ([by_modname[(m, real)] for m in alts if (m, real) in by_modname]
                     if alts else [])
             if len(hits) > 1:
                 # Imported from two places under one name. Which one runs depends on the
                 # machine, so neither is the answer - the candidates are.
                 conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
             else:
-                dst = by_modname.get((mod_from[srcmod][callee], callee)); conf = "QUALIFIED" if dst else conf
+                dst = by_modname.get((mod_from[srcmod][callee], real)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and not conf and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
             dst = by_modname[(srcmod, callee)]; conf = "LOCAL"
+        if (not dst and not method and not conf
+                and mod_from.get(srcmod, {}).get(callee) not in (None, *allmods)):
+            # `from time import sleep` - the file says exactly where the name came from, and it
+            # is not here. The tree-wide "exactly one definition of that name" rule then fired
+            # anyway and answered asyncio/tasks.sleep, labelled RESOLVED. Across the standard
+            # library that shape was thousands of edges into modules nobody imported. Knowing
+            # the source is out of tree is knowledge, not a blind spot.
+            conf = "EXTERNAL"
         if not dst and not method and not conf:                  # a BARE call
             if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
             else:
@@ -1194,6 +1233,21 @@ def _selftest():
     _ce = {e["src"]: e.get("dst") for e in gc4["calls"] if e["callee"] == "dumps"}
     ok28 = _ce.get("app") is None and _ce.get("app.after") == "config.dumps"
     shutil.rmtree(cd4, ignore_errors=True)
+    # WHERE A NAME CAME FROM. `from time import sleep` says it outright and the answer is "not
+    # here" - the tree-wide "one definition of that name" rule used to fire anyway. And
+    # `from ops import index as _index` asks the module for the name IT defines, not the local
+    # alias, which is the same mistake pointing the other way.
+    fd = tempfile.mkdtemp()
+    _w(os.path.join(fd, "sched.py"), "def sleep(n):\n    return 'the wrong answer'\n")
+    _w(os.path.join(fd, "ops.py"), "def index(x):\n    return 1\n")
+    _w(os.path.join(fd, "far.py"), "def _index(x):\n    return 'the other wrong answer'\n")
+    _w(os.path.join(fd, "app.py"),
+        "from time import sleep\nfrom ops import index as _index\n"
+        "def go():\n    return sleep(1) + _index(2)\n")
+    gf = build([fd], write=False)
+    _fe = {e["callee"]: e.get("dst") for e in gf["calls"] if e["src"] == "app.go"}
+    ok29 = _fe.get("sleep") is None and _fe.get("_index") == "ops.index"
+    shutil.rmtree(fd, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -1225,8 +1279,9 @@ def _selftest():
     print(f"  RED-FIRST - a class nested in a function is not offered to the tree: {ok26}")
     print(f"  a lambda parameter shadows, and a deferred import still resolves: {ok27}")
     print(f"  a comprehension variable shadows inside it and nowhere else: {ok28}")
+    print(f"  RED-FIRST - an out-of-tree import stays out, and `as` keeps the real name: {ok29}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27 and ok28)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27 and ok28 and ok29)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

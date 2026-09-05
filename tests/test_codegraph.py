@@ -2612,7 +2612,9 @@ class AnImportNamesTheModuleNotJustItsPackage(Sandbox):
         g = self.graph(write=False)
         edges = {(i["src"], i["callee"]) for i in g["imports"]}
         self.assertIn(("app", "b/svc"), edges)
-        self.assertIn(("app", "b"), edges)
+        # The package, named the way the GRAPH names it: a package's module id is its
+        # __init__, and an import edge that said "b" pointed at no node at all.
+        self.assertIn(("app", "b/__init__"), edges)
         self.assertIn("b/svc", codegraph.module_deps(g, "app")[0])
 
     def test_an_out_of_tree_import_invents_no_module(self):
@@ -3435,3 +3437,92 @@ class CallingAnInstanceRunsItsCall(Sandbox):
         g = self.graph(write=False)
         call, = [e for e in g["calls"] if e["src"] == "m.uses"]
         self.assertIsNone(call.get("dst"))
+
+
+class AnImportEdgeNamesTheModuleTheGraphKnows(Sandbox):
+    """`import sysconfig` was recorded as "sysconfig"; the module's id is "sysconfig/__init__".
+    The resolver normalised that and the import table did not, so the edge pointed at a name no
+    node has - and `deps` answered "importers: (none)" for a package half the tree imports."""
+
+    def test_a_package_can_name_its_importers(self):
+        self.write(os.path.join("pkg", "__init__.py"), "def helper():\n    return 1\n")
+        self.write("app.py", "import pkg\n\ndef go():\n    return pkg.helper()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.module_deps(g, "pkg/__init__")[1], ["app"])
+        self.assertIn("pkg/__init__", codegraph.module_deps(g, "app")[0])
+
+    def test_a_cycle_through_a_package_init_is_visible(self):
+        self.write(os.path.join("pkg", "__init__.py"), "import app\ndef helper():\n    return 1\n")
+        self.write("app.py", "import pkg\ndef go():\n    return pkg.helper()\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [("app", "pkg/__init__")])
+
+    def test_from_package_import_submodule_is_recorded(self):
+        """`from pkg import sub` really does import pkg.sub - and `deps pkg/sub` could not name
+        the files that import it."""
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "sub.py"), "def work():\n    return 1\n")
+        self.write("app.py", "from pkg import sub\n\ndef go():\n    return sub.work()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.module_deps(g, "pkg/sub")[1], ["app"])
+
+    def test_a_name_that_is_not_a_module_records_no_import(self):
+        """The guard: `from pkg import helper` imports a FUNCTION, and there is no pkg/helper."""
+        self.write(os.path.join("pkg", "__init__.py"), "def helper():\n    return 1\n")
+        self.write("app.py", "from pkg import helper\n\ndef go():\n    return helper()\n")
+        g = self.graph(write=False)
+        self.assertEqual({i["callee"] for i in g["imports"]}, {"pkg/__init__"})
+
+
+class ANameImportedFromOutsideIsOutside(Sandbox):
+    """`from time import sleep` says exactly where the name came from, and it is not here. The
+    tree-wide "exactly one definition of that name" rule fired anyway: across the standard
+    library that answered thousands of calls with functions in unrelated packages."""
+
+    def test_a_bare_call_to_an_out_of_tree_name_stays_external(self):
+        self.write("sched.py", "def sleep(n):\n    return 'the in-tree one - the wrong answer'\n")
+        self.write("app.py", "from time import sleep\n"
+                             "\n"
+                             "def go():\n"
+                             "    return sleep(1)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(call["confidence"], "EXTERNAL")
+        self.assertEqual(codegraph.callers_of(g, "sched.sleep"), [])
+
+    def test_an_in_tree_import_still_resolves(self):
+        """The guard: the rule is about where the name came FROM, not about giving up."""
+        self.write("sched.py", "def sleep(n):\n    return 1\n")
+        self.write("app.py", "from sched import sleep\n\ndef go():\n    return sleep(1)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("sched.sleep", "QUALIFIED"))
+
+
+class AnAliasedImportKeepsItsRealName(Sandbox):
+    """`from operator import index as _index` - the module holds `index`, and the lookup was
+    made with the LOCAL name. It found nothing, fell through to the tree-wide rule, and answered
+    with an unrelated function that happened to be the only other `_index` in the tree."""
+
+    def test_the_module_is_asked_for_the_name_it_defines(self):
+        self.write("ops.py", "def index(x):\n    return 1\n")
+        self.write("far.py", "def _index(x):\n    return 'the wrong answer'\n")
+        self.write("app.py", "from ops import index as _index\n"
+                             "\n"
+                             "def go():\n"
+                             "    return _index(1)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("ops.index", "QUALIFIED"))
+        self.assertEqual(codegraph.callers_of(g, "far._index"), [])
+
+    def test_an_aliased_class_types_its_variable(self):
+        self.write("svc.py", "class Client:\n    def get(self):\n        return 1\n")
+        self.write("app.py", "from svc import Client as C\n"
+                             "\n"
+                             "def go():\n"
+                             "    c = C()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go" and e["callee"] == "get"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("svc.Client.get", "TYPED"))
