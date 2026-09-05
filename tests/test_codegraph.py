@@ -4146,3 +4146,119 @@ class CheckedAgainstTheInterpretersOwnSymbolTable(unittest.TestCase):
             "    linecache = None\n"
             "    return line, linecache\n").body[0])
         self.assertIn("linecache", values)
+
+
+class ABaseClassIsANameLikeAnyOther(Sandbox):
+    """Every other class name goes through one rule: the class this file defines or imported,
+    before any tree-wide search. A BASE was matched by name across the whole tree with no test
+    of whether the file had heard of it - so pandas' `class _BytesTarFile(io.BytesIO)` was given
+    pip's vendored msgpack BytesIO as a parent, and `class CMakeExtension(Extension)` inherited
+    from cryptography's x509 Extension. Wrong, confident, and then feeding the method lookup,
+    super() and the constructor edges."""
+
+    def dst(self, g, src, callee):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst")
+
+    def test_a_base_from_outside_the_tree_is_not_a_class_inside_it(self):
+        self.write("vendored.py", "class BytesIO:\n"
+                                  "    def getvalue(self):\n        return 'the wrong parent'\n")
+        self.write("app.py", "from io import BytesIO\n"
+                             "\n"
+                             "class Buffer(BytesIO):\n"
+                             "    def use(self):\n"
+                             "        return self.getvalue()\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.dst(g, "app.Buffer.use", "getvalue"))
+        self.assertEqual(codegraph.callers_of(g, "vendored.BytesIO.getvalue"), [])
+
+    def test_an_imported_base_wins_even_when_the_name_is_ambiguous(self):
+        """Two classes called Backend, and a relative import that says which. The tree-wide
+        rule gave up here, because it only ever fired on a unique name."""
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "_backend.py"),
+                   "class Backend:\n    def run(self):\n        return 'the right one'\n")
+        self.write("other.py", "class Backend:\n    def run(self):\n        return 'a decoy'\n")
+        self.write(os.path.join("pkg", "impl.py"),
+                   "from ._backend import Backend\n"
+                   "\n"
+                   "class Meson(Backend):\n"
+                   "    def go(self):\n"
+                   "        return self.run()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.dst(g, "pkg/impl.Meson.go", "run"), "pkg/_backend.Backend.run")
+        self.assertEqual(codegraph.callers_of(g, "other.Backend.run"), [])
+
+    def test_a_base_in_the_same_module_still_resolves(self):
+        self.write("m.py", "class Parent:\n    def run(self):\n        return 1\n"
+                           "class Child(Parent):\n    def go(self):\n        return self.run()\n")
+        self.assertEqual(self.dst(self.graph(write=False), "m.Child.go", "run"), "m.Parent.run")
+
+    def test_a_unique_name_nobody_imported_still_resolves(self):
+        """The guard: the tree-wide fallback is still there for a file that names a base it
+        never imported - which is what a package's own __init__ re-export looks like from
+        here. It only stops being used when the file said where the name came from."""
+        self.write("base.py", "class Solo:\n    def run(self):\n        return 1\n")
+        self.write("app.py", "class Child(Solo):\n    def go(self):\n        return self.run()\n")
+        self.assertEqual(self.dst(self.graph(write=False), "app.Child.go", "run"), "base.Solo.run")
+
+    def test_super_and_the_constructor_edge_follow_the_corrected_parent(self):
+        """The reason a wrong base matters: three other answers are built on top of it."""
+        self.write("vendored.py", "class Handler:\n"
+                                  "    def __init__(self):\n        pass\n")
+        self.write("app.py", "from logging import Handler\n"
+                             "\n"
+                             "class Mine(Handler):\n"
+                             "    def __init__(self):\n"
+                             "        super().__init__()\n"
+                             "\n"
+                             "def make():\n"
+                             "    return Mine()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "vendored.Handler.__init__"), [])
+        self.assertEqual(sorted(codegraph.callers_of(g, "app.Mine.__init__")), ["app.make"])
+
+
+class AQualifiedBaseIsStillABase(Sandbox):
+    """`class Mine(logging.Handler)` is as ordinary as the bare form, and only bare Names were
+    collected - so a qualified base produced no parent at all, and every method inherited
+    through it went unresolved."""
+
+    def test_a_dotted_base_gives_the_class_its_parent(self):
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "core.py"),
+                   "class Handler:\n    def emit(self):\n        return 1\n")
+        self.write("app.py", "from pkg import core\n"
+                             "\n"
+                             "class Mine(core.Handler):\n"
+                             "    def go(self):\n"
+                             "        return self.emit()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.Mine.go" and e["callee"] == "emit"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("pkg/core.Handler.emit", "INHERITED"))
+
+    def test_a_dotted_base_from_outside_the_tree_invents_nothing(self):
+        self.write("decoy.py", "class Handler:\n    def emit(self):\n        return 'wrong'\n")
+        self.write("app.py", "import logging\n"
+                             "\n"
+                             "class Mine(logging.Handler):\n"
+                             "    def go(self):\n"
+                             "        return self.emit()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.Mine.go"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(codegraph.callers_of(g, "decoy.Handler.emit"), [])
+
+    def test_a_subscripted_base_is_not_mistaken_for_a_class(self):
+        """`class Mine(Generic[T])` names Generic, not T, and a Subscript is not a name at
+        all - the same reason `Dict[str, Client]` is not a Client."""
+        self.write("app.py", "from typing import Generic, TypeVar\n"
+                             "T = TypeVar('T')\n"
+                             "\n"
+                             "class Mine(Generic[T]):\n"
+                             "    def go(self):\n"
+                             "        return 1\n")
+        g = self.graph(write=False)
+        node, = [n for n in g["nodes"] if n["id"] == "app.Mine"]
+        self.assertEqual(node.get("bases"), [])

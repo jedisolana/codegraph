@@ -402,7 +402,11 @@ def _defs_and_calls(path, mod):
             # Base classes by NAME. Resolved to ids in build(), where the whole tree is known, so
             # `self.method()` can be found on a parent instead of giving up - which is the single
             # most common shape this used to miss.
-            bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            # `class Mine(logging.Handler)` is as ordinary as the bare form and was invisible:
+            # only Names were collected, so a qualified base produced no parent at all and
+            # every method inherited through it went unresolved. The dotted string is what the
+            # class-name rule already understands.
+            bases = [b for b in (_annotated_class(b) for b in node.bases) if b]
             defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
                          "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
@@ -920,21 +924,8 @@ def build(dirs=None, write=True):
                 public[n["name"]].append(n["id"])                # method and a function sharing a name;
                 if n["kind"] == "class":                         # whichever parsed last silently won.
                     cls_ids[n["module"]][n["name"]] = n["id"]
-    bases_of = {}                                                # class id -> base class ids
-    for n in nodes:
-        if n["kind"] == "class" and n.get("bases"):
-            here = cls_ids.get(n["module"], {})
-            resolved = []
-            for b in n["bases"]:
-                if b in here: resolved.append(here[b])           # a base in the same module
-                else:
-                    hits = [i for i in public.get(b, []) if i.split(".")[-1] == b]
-                    if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
-            bases_of[n["id"]] = resolved
     kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
-    imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
-                   for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
-    mro_cache = {}                                                # linearisation is reused across edges
+
     def _classes_named(rt, srcmod):
         """Which class a type name means HERE: the one this module defines or imported, before
         any tree-wide search. A qualified `svc.Client` says outright where to look."""
@@ -956,6 +947,24 @@ def build(dirs=None, write=True):
                                          # pure-Python twin, not the class that actually runs.
         return [i for i in public.get(rt, []) if kind_of.get(i) == "class"]
 
+    bases_of = {}                                                # class id -> base class ids
+    for n in nodes:
+        if n["kind"] == "class" and n.get("bases"):
+            resolved = []
+            for b in n["bases"]:
+                # The SAME rule every other class name goes through. A base used to be matched
+                # by name across the whole tree with no test of whether this file had ever
+                # heard of it - so pandas' `class _BytesTarFile(io.BytesIO)` was given pip's
+                # vendored msgpack BytesIO as a parent, and `class CMakeExtension(Extension)`
+                # inherited from cryptography's x509 Extension. Both wrong, both confident, and
+                # both then feeding the method lookup, super() and the constructor edges.
+                want = b.rsplit(".", 1)[-1]              # `core.Handler` is named Handler
+                hits = [c for c in _classes_named(b, n["module"]) if c.split(".")[-1] == want]
+                if len(hits) == 1: resolved.append(hits[0])
+            bases_of[n["id"]] = resolved
+    imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
+                   for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
+    mro_cache = {}                                                # linearisation is reused across edges
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         ec = e.get("encl_class")
