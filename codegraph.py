@@ -858,7 +858,14 @@ def build(dirs=None, write=True):
         scoped = (cls_ids.get(srcmod, {}).get(rt)
                   or by_modname.get((mod_from.get(srcmod, {}).get(rt), real))
                   or by_modname.get((mod_sub.get(srcmod, {}).get(rt), real)))
-        return [scoped] if scoped else [i for i in public.get(rt, []) if kind_of.get(i) == "class"]
+        if scoped:
+            return [scoped]
+        if rt in mod_from.get(srcmod, ()) or "*" in mod_from.get(srcmod, ()):
+            return []                    # imported from somewhere named, and not found there:
+                                         # the same rule bare calls follow. `from io import
+                                         # BytesIO` was answered with _pyio.BytesIO - the
+                                         # pure-Python twin, not the class that actually runs.
+        return [i for i in public.get(rt, []) if kind_of.get(i) == "class"]
 
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
@@ -969,13 +976,19 @@ def build(dirs=None, write=True):
                 dst = by_modname.get((mod_from[srcmod][callee], real)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and not conf and by_modname.get((srcmod, callee)):       # a BARE call to a function in the SAME module
             dst = by_modname[(srcmod, callee)]; conf = "LOCAL"
-        if (not dst and not method and not conf
-                and mod_from.get(srcmod, {}).get(callee) not in (None, *allmods)):
-            # `from time import sleep` - the file says exactly where the name came from, and it
-            # is not here. The tree-wide "exactly one definition of that name" rule then fired
-            # anyway and answered asyncio/tasks.sleep, labelled RESOLVED. Across the standard
-            # library that shape was thousands of edges into modules nobody imported. Knowing
-            # the source is out of tree is knowledge, not a blind spot.
+        if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):
+            # The file said where this name came from and the module does not appear to define
+            # it - an out-of-tree module, a C accelerator behind a pure-Python twin, a re-export
+            # this could not follow. Whatever the reason, the answer is not "some other module
+            # in the tree that happens to have one function of that name": that rule used to
+            # fire here and answer `from time import sleep` with asyncio/tasks.sleep.
+            conf = "EXTERNAL"
+        if not dst and not method and not conf and "*" in mod_from.get(srcmod, {}):
+            # A file that star-imports has named where its loose names come from. turtledemo
+            # does `from turtle import *` and calls up(), mode(), mainloop() - none of which
+            # turtle defines statically, because it builds them at import time - and the
+            # tree-wide rule answered with _pyrepl.commands.up and statistics.mode. A star is a
+            # statement about provenance even when the tool cannot see through it.
             conf = "EXTERNAL"
         if not dst and not method and not conf:                  # a BARE call
             if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
