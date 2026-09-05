@@ -21,6 +21,13 @@ resolution rate is reported over what was *winnable* — resolved, plus ambiguou
 method calls it could not type — because a rate that leaves the hard cases out of the sum is a
 measure of how easy the questions were.
 
+### How the tests are checked
+
+`tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
+change — a suite that never fails is not evidence of anything. 208 mutations, all caught. It
+edits the file in place, so it refuses to start on a dirty tree and verifies the file byte for
+byte before it exits.
+
 ### Correctness work before release
 
 Every fix below carries a test that fails without it. These are the ones worth naming, because

@@ -221,6 +221,12 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
+A suite that never fails is not evidence of anything, so it is checked the other way round.
+`tools/mutation.py` breaks the tool one small way at a time — flips a comparison, swaps an
+`and` for an `or`, drops a `not`, moves a number by one — and runs the suite against each
+change. Every one of them should make something go red. **208 mutations, 208 caught, none
+survived.**
+
 Which name shadows which is the question everything else rests on, so it is not only
 checked against fixtures: `symtable` is CPython's own scope analysis, and on the versions
 where its model matches this one, the two are compared scope by scope over the running

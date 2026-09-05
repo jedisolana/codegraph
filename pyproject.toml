@@ -50,3 +50,6 @@ ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005", "SIM108"]
 # The tests drive the CLI as a subprocess on purpose - that is the point of testing a command
 # line - and two of them exec and chmod fixtures they wrote themselves a line earlier.
 "tests/*" = ["S102", "S103", "S603", "S607"]
+# The mutation harness runs the suite as a subprocess and swallows the parse failures of
+# mutations that do not unparse; both are the job, not an oversight.
+"tools/*" = ["S112", "S603"]
