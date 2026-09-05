@@ -328,7 +328,11 @@ def build(dirs=None, write=True):
     nodes.sort(key=lambda n: (n["kind"], n["id"]))              # DETERMINISTIC output: byte-reproducible across runs regardless of os.walk order -> two builds are diffable
     calls.sort(key=lambda e: (e["src"], e.get("recv") or "", e["callee"], e.get("line", 0)))
     imports.sort(key=lambda e: (e["src"], e["callee"], e.get("line", 0)))
-    graph = {"nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs)}
+    # The source files this graph was built from. Staleness used to be "is any file newer than
+    # the graph", which cannot see a DELETION: removing a file changes nobody's mtime, so the
+    # graph kept answering about code that was gone - `where` would send you to a deleted file.
+    graph = {"nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
+             "sources": sorted(p for p, _, _ in pairs)}
     if write:
         _jwrite({"_v": _VERSION, "files": newcache}, CACHE)   # cache: RAW per-file parse + code version; atomic write so an interrupted build can't corrupt it
         _jwrite(graph, OUT)                                    # atomic: a crash mid-write leaves the previous good graph, not a truncated one
@@ -449,18 +453,30 @@ def _prune_dir(parent, name):
 
 
 def _is_stale(g):
-    """True if any source .py (recursive, pruned) is newer than the built graph - the graph would be stale."""
+    """True if the graph no longer describes what is on disk.
+
+    Newer files are only half of it. A file that was DELETED leaves every remaining mtime
+    untouched, so the mtime test alone said "fresh" and the graph went on answering about code
+    that no longer existed. The set of files is compared too, which catches additions and
+    deletions in the same pass.
+    """
     try: built = os.path.getmtime(OUT)
     except OSError: return True
+    seen = set()
     for d in g.get("dirs", [HOME]):
         for dp, dns, fns in os.walk(d):
             dns[:] = [x for x in dns if not _prune_dir(dp, x)]
             for fn in fns:
-                if fn.endswith(".py"):
-                    try:
-                        if os.path.getmtime(os.path.join(dp, fn)) > built: return True
-                    except OSError: return True
-    return False
+                if not fn.endswith(".py"): continue
+                full = os.path.join(dp, fn)
+                seen.add(full)
+                try:
+                    if os.path.getmtime(full) > built: return True
+                except OSError:
+                    return True
+    known = g.get("sources")
+    if known is None: return True          # a graph from before this was recorded: rebuild once
+    return seen != set(known)
 
 
 def _jwrite(obj, path):                                         # atomic UTF-8 write: an interrupted/crashed write can't leave a half-written (corrupt) json
@@ -598,15 +614,50 @@ def module_deps(g, mod):
 
 
 def cycles(g):
-    """MUTUAL MODULE-LEVEL import cycles among in-tree modules (A imports B and B imports A, both at top level) -
-    real refactor smells. A deferred/local import (inside a function) is the deliberate cycle-break, so it does
-    NOT count - flagging it would call the fix a smell."""
+    """Module-level import cycles among in-tree modules, of ANY length.
+
+    It used to look only for MUTUAL pairs - A imports B and B imports A - and report nothing
+    for a -> b -> c -> a. That is the cycle that actually survives in a codebase, because a
+    mutual pair is obvious the moment you write it and a three-way loop is not. Reporting
+    "(none)" for a real cycle is the failure this tool is supposed to avoid.
+
+    Each group returned is a set of modules that can all reach each other: a strongly connected
+    component. A deferred import (inside a function) is the deliberate cycle-break, so it is not
+    counted - flagging it would call the fix a smell.
+    """
     intree = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
     imp = defaultdict(set)
     for e in g["imports"]:
         if e.get("module_level", True) and e["src"] in intree and e["callee"] in intree and e["src"] != e["callee"]:
             imp[e["src"]].add(e["callee"])
-    return sorted({tuple(sorted((a, b))) for a in imp for b in imp[a] if a in imp.get(b, ())})
+    # Tarjan, iterative: a recursive walk blows the stack on a deep import chain, and a big
+    # repo is exactly where you want this to work.
+    index, low, on, stack, out = {}, {}, set(), [], []
+    counter = [0]
+    for root in sorted(imp):
+        if root in index: continue
+        work = [(root, iter(sorted(imp.get(root, ()))))]
+        index[root] = low[root] = counter[0]; counter[0] += 1
+        stack.append(root); on.add(root)
+        while work:
+            node, it = work[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                work.pop()
+                if work: low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    comp = []
+                    while True:
+                        w = stack.pop(); on.discard(w); comp.append(w)
+                        if w == node: break
+                    if len(comp) > 1: out.append(tuple(sorted(comp)))
+            elif nxt not in index:
+                index[nxt] = low[nxt] = counter[0]; counter[0] += 1
+                stack.append(nxt); on.add(nxt)
+                work.append((nxt, iter(sorted(imp.get(nxt, ())))))
+            elif nxt in on:
+                low[node] = min(low[node], index[nxt])
+    return sorted(out)
 
 
 def impact(g, name):
@@ -675,7 +726,8 @@ def _main(argv=None):
     elif a[0] == "deps":
         im, imp = module_deps(load(), a[1]); print("imports:   " + (", ".join(im) or "(none)")); print("importers: " + (", ".join(imp) or "(none)"))
     elif a[0] == "cycles":
-        cy = cycles(load()); print("\n".join(f"{x} <-> {y}" for x, y in cy) or "(none)")
+        cy = cycles(load())
+        print("\n".join(" <-> ".join(group) for group in cy) or "(none)")
     elif a[0] == "impact":
         im = impact(load(), a[1])
         print("callers:", ", ".join(im["callers"]) or "(none)")

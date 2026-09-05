@@ -498,5 +498,72 @@ class AtScale(Sandbox):
         self.assertGreater(len(radius), 100, "the radius across a wide graph looks truncated")
 
 
+class TheGraphNoticesDeletion(Sandbox):
+    """Staleness was "is any file newer than the graph". Deleting a file changes nobody's
+    mtime, so the graph stayed "fresh" and went on answering about code that was gone."""
+
+    def test_a_deleted_file_stops_answering(self):
+        self.write("doomed.py", "def gone():\n    return 1\n")
+        self.write("keeper.py", "def stays():\n    return 1\n")
+        self.graph()
+        os.remove(os.path.join(self.dir, "doomed.py"))
+        g = codegraph.load()                                     # rebuilds if stale
+        self.assertEqual(codegraph.where(g, "gone"), [], "it named a file that no longer exists")
+        self.assertTrue(codegraph.where(g, "stays"))
+
+    def test_an_added_file_is_picked_up(self):
+        self.write("one.py", "def a():\n    return 1\n")
+        self.graph()
+        self.write("two.py", "def b():\n    return 1\n")
+        self.assertTrue(codegraph.where(codegraph.load(), "b"))
+
+    def test_an_untouched_tree_is_not_rebuilt(self):
+        """The other half: staleness must not fire on a tree nobody touched."""
+        self.write("x.py", "def f():\n    return 1\n")
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g))
+
+    def test_the_graph_records_what_it_was_built_from(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        self.write("sub/b.py", "def g():\n    return 1\n")
+        g = self.graph()
+        self.assertEqual(len(g["sources"]), 2, g.get("sources"))
+
+
+class CyclesOfAnyLength(Sandbox):
+    """It looked only for mutual pairs. a -> b -> c -> a went unreported - and that is the
+    cycle that survives in a codebase, because a mutual pair is obvious as you type it."""
+
+    def test_a_three_way_cycle_is_found(self):
+        self.write("a.py", "import b\ndef f(): return 1\n")
+        self.write("b.py", "import c\ndef g(): return 1\n")
+        self.write("c.py", "import a\ndef h(): return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [("a", "b", "c")])
+
+    def test_a_mutual_pair_is_still_found(self):
+        self.write("d.py", "import e\ndef i(): return 1\n")
+        self.write("e.py", "import d\ndef j(): return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [("d", "e")])
+
+    def test_a_long_chain_that_does_not_close_is_not_a_cycle(self):
+        for i, nxt in enumerate(["m1", "m2", "m3", None]):
+            imp = f"import {nxt}\n" if nxt else ""
+            self.write(f"m{i}.py", f"{imp}def f{i}(): return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [])
+
+    def test_a_deferred_import_is_still_the_cycle_break_not_a_smell(self):
+        self.write("p.py", "import q\ndef f(): return 1\n")
+        self.write("q.py", "def g():\n    import p\n    return p.f()\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [])
+
+    def test_a_deep_import_chain_does_not_blow_the_stack(self):
+        """Tarjan recursively would die on a long chain; a big repo is where you need it."""
+        depth = 1200
+        for i in range(depth):
+            imp = f"import c{i+1}\n" if i < depth - 1 else ""
+            self.write(f"c{i}.py", f"{imp}def f{i}(): return 1\n")
+        self.assertEqual(codegraph.cycles(self.graph(write=False)), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
