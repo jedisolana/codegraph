@@ -235,5 +235,108 @@ class ItLeaksNothing(unittest.TestCase):
         self.assertNotIn("ResourceWarning", r.stderr)
 
 
+class HostileTrees(Sandbox):
+    """What a tool that walks arbitrary directories meets in real repositories."""
+
+    def test_a_dangling_symlink_does_not_kill_the_build(self):
+        """A link left behind after a move. os.walk lists it, stat() raises, and the whole
+        analysis used to die on a traceback - one broken link is not a reason to refuse."""
+        self.write("real.py", "def f():\n    return 1\n")
+        try:
+            os.symlink(os.path.join(self.dir, "gone.py"), os.path.join(self.dir, "broken.py"))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        ids = {n["id"] for n in self.graph(write=False)["nodes"]}
+        self.assertIn("real.f", ids)
+        self.assertNotIn("broken", ids)
+
+    def test_a_symlinked_directory_is_not_followed(self):
+        """Otherwise a link to /usr/lib turns a small repo into an unbounded walk."""
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        with open(os.path.join(outside, "far.py"), "w", encoding="utf-8") as f:
+            f.write("def far():\n    return 1\n")
+        self.write("near.py", "def near():\n    return 1\n")
+        try:
+            os.symlink(outside, os.path.join(self.dir, "linkdir"))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        ids = {n["id"] for n in self.graph(write=False)["nodes"]}
+        self.assertIn("near.near", ids)
+        self.assertNotIn("far.far", ids)
+
+    def test_a_directory_symlinked_to_itself_does_not_loop(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        try:
+            os.symlink(self.dir, os.path.join(self.dir, "selfloop"))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        self.assertIn("a.f", {n["id"] for n in self.graph(write=False)["nodes"]})
+
+    def test_deeply_nested_and_non_utf8_sources_are_survivable(self):
+        self.write("deep.py", "x = " + "(" * 180 + "1" + ")" * 180 + "\n")
+        with open(os.path.join(self.dir, "latin.py"), "wb") as f:
+            f.write(b"# -*- coding: latin-1 -*-\ndef caf\xe9():\n    return 1\n")
+        self.write("ok.py", "def g():\n    return 1\n")
+        self.assertIn("ok.g", {n["id"] for n in self.graph(write=False)["nodes"]})
+
+    def test_the_cache_forgets_files_that_are_gone(self):
+        for i in range(5):
+            self.write(f"m{i}.py", f"def f{i}():\n    return {i}\n")
+        self.graph()
+        for i in range(5):
+            os.remove(os.path.join(self.dir, f"m{i}.py"))
+        self.write("only.py", "def z():\n    return 1\n")
+        self.graph()
+        with open(codegraph.CACHE, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["files"]), 1, "the cache kept dead entries forever")
+
+
+class BadInputIsAMessageNotATraceback(unittest.TestCase):
+    """The first thing a new user does is type a command slightly wrong."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "app.py"), "w", encoding="utf-8") as f:
+            f.write("def leaf():\n    return 1\n")
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=120)
+
+    def test_a_verb_without_its_name_prints_usage(self):
+        for verb in ("callers", "calls", "blast", "where", "find", "sites", "impact", "deps"):
+            with self.subTest(verb):
+                r = self.run_it(verb)
+                self.assertEqual(r.returncode, 2)
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn(f"usage: codegraph {verb}", r.stderr)
+
+    def test_path_needs_two_names(self):
+        r = self.run_it("path", "a")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("<from> <to>", r.stderr)
+
+    def test_a_path_that_does_not_exist_is_an_error_not_an_empty_graph(self):
+        """It used to exit 0 with zero modules: a typo looked like a clean build, and every
+        query afterwards answered '(none)' perfectly convincingly."""
+        r = self.run_it("build", os.path.join(self.dir, "nope"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("does not exist", r.stderr)
+
+    def test_a_directory_with_no_python_says_so(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        r = self.run_it("build", empty)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no .py files", r.stderr)
+
+    def test_a_single_file_argument_is_accepted(self):
+        r = self.run_it("build", "app.py")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("app.leaf", self.run_it("where", "leaf").stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

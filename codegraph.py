@@ -166,8 +166,27 @@ def _defs_and_calls(path, mod):
     return defs, list(seen.values()), imports, aliases, fromimp
 
 
+class BadPath(Exception):
+    """A path that cannot be analysed. Raised rather than quietly producing an empty graph."""
+
+
 def build(dirs=None, write=True):
     dirs = dirs or [HOME]
+    # A typo'd path used to build an empty graph and exit 0 - success, zero modules, and no
+    # hint that the answer to every later query would be "(none)". A single file is analysed
+    # as a one-file tree, because `codegraph build app.py` is an obvious thing to type.
+    checked = []
+    for d in dirs:
+        d = os.path.abspath(os.path.expanduser(d))
+        if os.path.isdir(d):
+            checked.append(d)
+        elif os.path.isfile(d) and d.endswith(".py"):
+            checked.append(os.path.dirname(d) or ".")
+        elif os.path.exists(d):
+            raise BadPath(f"{d} is not a directory or a .py file")
+        else:
+            raise BadPath(f"{d} does not exist")
+    dirs = checked
     multiroot = len(dirs) > 1                                   # several trees at once -> qualify module ids by root so same-named modules (api/models vs worker/models) don't collide
     pairs = []                                                  # (path, rootdir, rootname) - RECURSIVE + noise-pruned; module ids are path-relative so nested same-named files don't collide either
     for d in dirs:
@@ -190,7 +209,16 @@ def build(dirs=None, write=True):
         base = os.path.basename(rel)
         mid = f"{root}/{rel}" if multiroot else rel             # SINGLE flat tree: bare 'memory' (unchanged). Nested: 'sub/mod'. Multi-tree: 'root/...'
         nodes.append({"id": mid, "kind": "module", "name": base, "module": mid, "line": 0})
-        mt = os.path.getmtime(path); c = cache.get(path)
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            # A DANGLING SYMLINK - a link left behind after a move, which every real repo
+            # eventually has. os.walk lists it as a file and stat() then raises, which used to
+            # kill the whole build with a traceback. One broken link is not a reason to refuse
+            # to analyse a codebase; skip it and carry on.
+            nodes.pop()                                          # drop the module node just added
+            continue
+        c = cache.get(path)
         if c and c.get("mtime") == mt:                          # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
         else:
@@ -519,9 +547,25 @@ def _main(argv=None):
     """The CLI, as a function so `pip install` can expose it as a console script -- and so the
     tests can drive it in-process instead of shelling out."""
     a = list(sys.argv[1:] if argv is None else argv)
+    # Every query verb takes a name. Forgetting it used to be an IndexError traceback - the
+    # first thing a new user sees when they type a command from memory.
+    NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
+             "impact": 1, "deps": 1, "path": 2}
+    if a and a[0] in NEEDS and len(a) - 1 < NEEDS[a[0]]:
+        what = {"path": "<from> <to>", "deps": "<module>", "find": "<substring>"}.get(a[0], "<name>")
+        print(f"usage: codegraph {a[0]} {what}", file=sys.stderr)
+        return 2
     if a and a[0] == "--selftest": return _selftest()
     if not a or a[0] == "build":
-        g = build(a[1:] or None); print(json.dumps(stats(g), indent=2))
+        try:
+            g = build(a[1:] or None)
+        except BadPath as e:
+            print(f"cannot build: {e}", file=sys.stderr)
+            return 1
+        if not [n for n in g["nodes"] if n["kind"] == "module"]:
+            print(f"no .py files found under {', '.join(g['dirs'])}", file=sys.stderr)
+            return 1
+        print(json.dumps(stats(g), indent=2))
     elif a[0] == "callers": print("\n".join(callers_of(load(), a[1])) or "(none)")
     elif a[0] == "calls":
         g = load(); [print("\n".join(calls_from(g, i)) or "(none)") for i in _by_name(g, a[1])]
