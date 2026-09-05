@@ -3526,3 +3526,90 @@ class AnAliasedImportKeepsItsRealName(Sandbox):
         g = self.graph(write=False)
         call, = [e for e in g["calls"] if e["src"] == "app.go" and e["callee"] == "get"]
         self.assertEqual((call.get("dst"), call["confidence"]), ("svc.Client.get", "TYPED"))
+
+
+class AStarImportIsARealBinding(Sandbox):
+    """`from turtle import *` was bound as a name spelled "*", which nothing ever calls. So a
+    bare home() fell through to the tree-wide "one definition of that name" rule: "say which",
+    to a file that had said which - or, where the tree held exactly one other candidate, that
+    other candidate, with confidence. Across the standard library it accounted for 289 edges."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("turtle.py", "def home():\n    return 'the right one'\n")
+        self.write("commands.py", "def home():\n    return 'a different module'\n")
+
+    def edge(self, g, src="dance.main"):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "home"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_bare_name_comes_from_the_module_that_was_starred(self):
+        self.write("dance.py", "from turtle import *\n\ndef main():\n    return home()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g), ("turtle.home", "QUALIFIED"))
+        self.assertEqual(codegraph.callers_of(g, "commands.home"), [])
+
+    def test_two_stars_that_both_define_it_are_ambiguous(self):
+        """Which one wins depends on the order of the imports, which is not something to
+        answer with confidence."""
+        self.write("dance.py", "from turtle import *\n"
+                               "from commands import *\n"
+                               "\n"
+                               "def main():\n"
+                               "    return home()\n")
+        g = self.graph(write=False)
+        got = self.edge(g)
+        self.assertEqual(got, (None, "AMBIGUOUS"))
+        call, = [e for e in g["calls"] if e["src"] == "dance.main"]
+        self.assertEqual(call["candidates"], ["commands.home", "turtle.home"])
+
+    def test_an_explicit_import_still_wins(self):
+        """The guard: a name imported by hand is not a guess about a star."""
+        self.write("dance.py", "from turtle import *\n"
+                               "from commands import home\n"
+                               "\n"
+                               "def main():\n"
+                               "    return home()\n")
+        self.assertEqual(self.edge(self.graph(write=False)), ("commands.home", "QUALIFIED"))
+
+    def test_a_star_from_outside_the_tree_invents_nothing(self):
+        self.write("dance.py", "from tkinter import *\n\ndef main():\n    return home()\n")
+        g = self.graph(write=False)
+        dst, _ = self.edge(g)
+        self.assertIsNone(dst)
+
+
+class ADottedImportImportsBothOfThem(Sandbox):
+    """`import logging.handlers` imports the package and the module inside it. Only the package
+    was recorded, so `deps logging/handlers` could not name the files that import it - the same
+    hole `from pkg import sub` had, in the other import statement."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(os.path.join("logging", "__init__.py"), "")
+        self.write(os.path.join("logging", "handlers.py"), "class MemoryHandler:\n    pass\n")
+
+    def test_both_the_package_and_the_module_are_importers(self):
+        self.write("user.py", "import logging.handlers\n"
+                              "\n"
+                              "def go():\n"
+                              "    return logging.handlers.MemoryHandler()\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.module_deps(g, "logging/handlers")[1], ["user"])
+        self.assertEqual(codegraph.module_deps(g, "logging/__init__")[1], ["user"])
+
+    def test_the_call_through_it_still_resolves(self):
+        self.write("user.py", "import logging.handlers\n"
+                              "\n"
+                              "def go():\n"
+                              "    return logging.handlers.MemoryHandler()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "user.go"]
+        self.assertEqual(call.get("dst"), "logging/handlers.MemoryHandler")
+
+    def test_a_plain_import_records_one_edge(self):
+        """The guard: `import logging` has no submodule to add."""
+        self.write("user.py", "import logging\n\ndef go():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual([i["callee"] for i in g["imports"]], ["logging/__init__"])

@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         31 ground-truth checks, several of them red-first
+  codegraph --selftest         32 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -228,6 +228,12 @@ def _defs_and_calls(path, mod):
             for a in node.names:
                 top = a.name.split(".")[0]
                 imports.append({"src": mod, "callee": top, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
+                if "." in a.name:
+                    # `import logging.handlers` imports BOTH. Only the package was recorded, so
+                    # `deps logging/handlers` could not name the files that import it - the same
+                    # hole `from pkg import sub` had, in the other import statement.
+                    imports.append({"src": mod, "callee": a.name.replace(".", "/"),
+                                    "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                 # `import pkg.mod as m` binds m to pkg/mod - NOT to pkg. Mapping it to the top
                 # level meant m.func() looked for func in the package's __init__ and missed the
                 # submodule entirely, which is how most package code is written.
@@ -940,6 +946,16 @@ def build(dirs=None, write=True):
                     if cand in def_ids:
                         dst = cand; conf = "LOCAL"; break
                 scope = scope.rsplit(".", 1)[0]
+        if (not dst and not method and not conf and callee not in mod_from.get(srcmod, {})
+                and "*" in mod_from.get(srcmod, {})):
+            # `from turtle import *` and then a bare home(). The star was bound as a name
+            # spelled "*", which nothing ever calls, so the name fell through to the tree-wide
+            # "one definition of that name" rule - which across the standard library answered
+            # turtledemo's home() with a function in _pyrepl. The star names a module; ask it.
+            stars = mod_alt.get(srcmod, {}).get("*") or [mod_from[srcmod]["*"]]
+            hits = [by_modname[(m, callee)] for m in stars if (m, callee) in by_modname]
+            if len(hits) == 1: dst = hits[0]; conf = "QUALIFIED"
+            elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
         if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`
             real = mod_orig.get(srcmod, {}).get(callee, callee)      # `as` renames it here only
             alts = mod_alt.get(srcmod, {}).get(callee)
@@ -1248,6 +1264,15 @@ def _selftest():
     _fe = {e["callee"]: e.get("dst") for e in gf["calls"] if e["src"] == "app.go"}
     ok29 = _fe.get("sleep") is None and _fe.get("_index") == "ops.index"
     shutil.rmtree(fd, ignore_errors=True)
+    # A STAR import is a real binding. Bound as a name spelled "*" - which nothing ever calls -
+    # a bare home() fell through to the tree-wide "one definition of that name" rule instead.
+    sd2 = tempfile.mkdtemp()
+    _w(os.path.join(sd2, "turtle.py"), "def home():\n    return 'the right one'\n")
+    _w(os.path.join(sd2, "commands.py"), "def home():\n    return 'a different module'\n")
+    _w(os.path.join(sd2, "dance.py"), "from turtle import *\ndef main():\n    return home()\n")
+    gs2 = build([sd2], write=False)
+    ok30 = callers_of(gs2, "turtle.home") == ["dance.main"] and callers_of(gs2, "commands.home") == []
+    shutil.rmtree(sd2, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -1280,8 +1305,9 @@ def _selftest():
     print(f"  a lambda parameter shadows, and a deferred import still resolves: {ok27}")
     print(f"  a comprehension variable shadows inside it and nowhere else: {ok28}")
     print(f"  RED-FIRST - an out-of-tree import stays out, and `as` keeps the real name: {ok29}")
+    print(f"  `from turtle import *` then home() is turtle's home, not some other: {ok30}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27 and ok28 and ok29)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27 and ok28 and ok29 and ok30)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

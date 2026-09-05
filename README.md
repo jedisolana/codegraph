@@ -107,7 +107,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         31 ground-truth checks, several of them red-first
+codegraph --selftest         32 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -217,7 +217,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 31 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 32 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -246,8 +246,9 @@ including **red-first controls** that prove the naive approach fails where this 
   the same name is the loop variable and then the module again
 - `from time import sleep` in a tree that happens to contain a `sleep` of its own, and
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
+- `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 301 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 308 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -286,7 +287,8 @@ a codegraph.json that is valid JSON and not a graph,
 a class attribute with the same name as an import,
 two trees whose call sites have to name files that exist,
 an instance that is called rather than a method on it,
-and a package that has to be able to name its own importers
+a package that has to be able to name its own importers,
+and a star import, which is a binding and not a name spelled "*"
 — and codegraph reading its own source.
 
 ## Licence
