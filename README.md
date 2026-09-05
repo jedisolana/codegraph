@@ -46,7 +46,7 @@ Every call edge carries a confidence label:
 | label | meaning |
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
-| `TYPED` | `x = Foo()`, `x = svc.Foo()`, or an annotation that names the class outright — `def send(c: Client)`, `def send(c: svc.Client)`. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
+| `TYPED` | `x = Foo()`, `x = svc.Foo()`, or an annotation that names the class outright — `def send(c: Client)`, `def send(c: svc.Client)`. The method is looked for up the inheritance order, so an inherited one is found and an override wins. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
 | `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
@@ -253,7 +253,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 346 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 352 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -303,7 +303,8 @@ a hand-written tree walk checked node type by node type against the standard one
 every way Python has of binding a name, one at a time,
 a resolution pass that must not depend on the order its edges arrive in,
 the scope analysis checked against the one CPython's own compiler does,
-and a base class named the two ways Python lets you name one
+a base class named the two ways Python lets you name one,
+and a class defined inside the very function that builds one
 — and codegraph reading its own source.
 
 ## Licence

@@ -926,9 +926,23 @@ def build(dirs=None, write=True):
                     cls_ids[n["module"]][n["name"]] = n["id"]
     kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
 
-    def _classes_named(rt, srcmod):
-        """Which class a type name means HERE: the one this module defines or imported, before
-        any tree-wide search. A qualified `svc.Client` says outright where to look."""
+    def _classes_named(rt, srcmod, scope=None):
+        """Which class a type name means HERE: the one this scope defines, then the one this
+        module defines or imported, before any tree-wide search. A qualified `svc.Client` says
+        outright where to look."""
+        if scope:
+            # A class defined INSIDE the function doing the calling. Round thirty-three stopped
+            # OTHER functions reaching a nested class and never taught the owning one that it
+            # could - so pdfminer, which defines `class Parser` inside main() and builds one two
+            # lines later, had that variable typed as Pillow's Parser. Class bodies are skipped
+            # climbing out, the same way a bare name skips them.
+            s_ = scope
+            while s_ != srcmod and "." in s_:
+                if kind_of.get(s_) != "class":
+                    cand = s_ + "." + rt
+                    if kind_of.get(cand) == "class":
+                        return [cand]
+                s_ = s_.rsplit(".", 1)[0]
         if "." in rt:
             who, cname = rt.rsplit(".", 1)
             where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
@@ -959,7 +973,8 @@ def build(dirs=None, write=True):
                 # inherited from cryptography's x509 Extension. Both wrong, both confident, and
                 # both then feeding the method lookup, super() and the constructor edges.
                 want = b.rsplit(".", 1)[-1]              # `core.Handler` is named Handler
-                hits = [c for c in _classes_named(b, n["module"]) if c.split(".")[-1] == want]
+                hits = [c for c in _classes_named(b, n["module"], n["id"].rsplit(".", 1)[0])
+                        if c.split(".")[-1] == want]
                 if len(hits) == 1: resolved.append(hits[0])
             bases_of[n["id"]] = resolved
     imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
@@ -997,7 +1012,7 @@ def build(dirs=None, write=True):
         it = e.get("invoke_type")
         if not dst and it:
             hits = []
-            for c in _classes_named(it, srcmod):
+            for c in _classes_named(it, srcmod, e["src"]):
                 for b in _mro(c, bases_of, mro_cache):           # inherited __call__ counts,
                     if (b + ".__call__") in def_ids:             # the same way an inherited
                         hits.append(b + ".__call__"); break      # __init__ does
@@ -1010,16 +1025,20 @@ def build(dirs=None, write=True):
             # with no ambiguity test at all: a file writing `from b.svc import Client` had
             # c.get() resolved into a/svc.Client, one line after the Client() call itself was
             # labelled AMBIGUOUS. The tool contradicted itself inside a single function.
-            cands = _classes_named(rt, srcmod)
-            if len(cands) == 1:
-                if (cands[0] + "." + callee) in def_ids:
-                    dst = cands[0] + "." + callee; conf = "TYPED"
-            elif len(cands) > 1:
+            # Through the MRO, the way `Client()` already finds an inherited __init__ and
+            # `c(1)` an inherited __call__. Only the exact class was looked at here, so
+            # `x = Sub(); x.method()` found nothing whenever the method lived on the parent -
+            # which in ordinary class hierarchies is most of them.
+            hits = []
+            for c in _classes_named(rt, srcmod, e["src"]):
+                for b in _mro(c, bases_of, mro_cache):
+                    if (b + "." + callee) in def_ids:
+                        hits.append(b + "." + callee); break
+            if len(hits) == 1: dst = hits[0]; conf = "TYPED"
+            elif len(hits) > 1:
                 # Several classes answer to that name and nothing here says which. Same rule
                 # as a bare call: list them, pick none.
-                hits = [c + "." + callee for c in cands if (c + "." + callee) in def_ids]
-                if len(hits) == 1: dst = hits[0]; conf = "TYPED"
-                elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
+                conf = "AMBIGUOUS"; e["candidates"] = sorted(set(hits))
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf

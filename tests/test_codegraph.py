@@ -4262,3 +4262,98 @@ class AQualifiedBaseIsStillABase(Sandbox):
         g = self.graph(write=False)
         node, = [n for n in g["nodes"] if n["id"] == "app.Mine"]
         self.assertEqual(node.get("bases"), [])
+
+
+class AVariableKnowsTheClassBesideIt(Sandbox):
+    """Two holes in local type inference, both found on a corpus of installed packages.
+
+    pdfminer defines `class Parser` inside main() and builds one two lines later; the variable
+    was typed as PILLOW's Parser, because an earlier round stopped OTHER functions reaching a
+    nested class and never taught the owning one that it could. And `x = Sub(); x.method()`
+    found nothing whenever the method lived on the parent - which in ordinary hierarchies is
+    most of them - although the constructor edge had walked the MRO for six rounds."""
+
+    def dst(self, g, src, callee):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst")
+
+    def test_a_class_defined_in_this_function_is_the_one_meant(self):
+        self.write("far.py", "class Parser:\n    def close(self):\n        return 'the wrong one'\n")
+        self.write("app.py", "def main():\n"
+                             "    class Parser:\n"
+                             "        def close(self):\n"
+                             "            return 'the right one'\n"
+                             "    p = Parser()\n"
+                             "    return p.close()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.dst(g, "app.main", "close"), "app.main.Parser.close")
+        self.assertEqual(codegraph.callers_of(g, "far.Parser.close"), [])
+
+    def test_another_function_still_cannot_reach_it(self):
+        """The guard, and the rule this sits beside: nested means nested."""
+        self.write("app.py", "def main():\n"
+                             "    class Parser:\n"
+                             "        def close(self):\n"
+                             "            return 1\n"
+                             "    return Parser()\n"
+                             "\n"
+                             "def elsewhere():\n"
+                             "    p = Parser()\n"
+                             "    return p.close()\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.dst(g, "app.elsewhere", "close"))
+        self.assertEqual(codegraph.callers_of(g, "app.main.Parser.close"), [])
+
+    def test_a_method_does_not_have_to_be_on_the_class_itself(self):
+        self.write("m.py", "class Base:\n"
+                           "    def feed(self, x):\n        return x\n"
+                           "\n"
+                           "class Sub(Base):\n"
+                           "    pass\n"
+                           "\n"
+                           "def use():\n"
+                           "    s = Sub()\n"
+                           "    return s.feed(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.dst(g, "m.use", "feed"), "m.Base.feed")
+        self.assertEqual(codegraph.callers_of(g, "m.Base.feed"), ["m.use"])
+
+    def test_an_override_wins_over_what_it_overrides(self):
+        """The MRO, not merely "somewhere up the chain"."""
+        self.write("m.py", "class Base:\n"
+                           "    def feed(self, x):\n        return 'base'\n"
+                           "\n"
+                           "class Sub(Base):\n"
+                           "    def feed(self, x):\n        return 'sub'\n"
+                           "\n"
+                           "def use():\n"
+                           "    s = Sub()\n"
+                           "    return s.feed(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.dst(g, "m.use", "feed"), "m.Sub.feed")
+        self.assertEqual(codegraph.callers_of(g, "m.Base.feed"), [])
+
+    def test_a_method_on_no_parent_at_all_stays_unresolved(self):
+        """The guard: walking the parents must not turn into inventing one."""
+        self.write("m.py", "class Lonely:\n"
+                           "    pass\n"
+                           "\n"
+                           "def use():\n"
+                           "    s = Lonely()\n"
+                           "    return s.feed(1)\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.dst(g, "m.use", "feed"))
+
+    def test_two_classes_of_one_name_are_still_refused(self):
+        self.write(os.path.join("a", "__init__.py"), "")
+        self.write(os.path.join("b", "__init__.py"), "")
+        self.write(os.path.join("a", "svc.py"), "class Base:\n    def feed(self):\n        return 1\n"
+                                                "class Client(Base):\n    pass\n")
+        self.write(os.path.join("b", "svc.py"), "class Base:\n    def feed(self):\n        return 2\n"
+                                                "class Client(Base):\n    pass\n")
+        self.write("app.py", "def use():\n    c = Client()\n    return c.feed()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.use" and e["callee"] == "feed"]
+        self.assertEqual(call["confidence"], "AMBIGUOUS")
+        self.assertEqual(call["candidates"], ["a/svc.Base.feed", "b/svc.Base.feed"])
