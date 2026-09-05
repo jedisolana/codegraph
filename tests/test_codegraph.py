@@ -4009,3 +4009,39 @@ class EveryWayPythonBindsAName(unittest.TestCase):
 
     def test_global_takes_a_name_back_out(self):
         self.assertNotIn("bound", self.bindings("def f():\n    global bound\n    bound = 1\n"))
+
+
+class ResolutionDoesNotDependOnEdgeOrder(Sandbox):
+    """The per-file lookups are refreshed only when the module changes, which is fast because
+    edges arrive grouped by the file they came from. If they ever stop arriving that way - a
+    parallel build, a different append order - the cheap version must still be the correct one,
+    not merely the fast one."""
+
+    def tree(self):
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+        self.write("other.py", "def dumps(x):\n    return 2\n")
+        self.write("a.py", "import config\n\ndef ga():\n    return config.dumps(1)\n")
+        self.write("b.py", "import other\n\ndef gb():\n    return other.dumps(2)\n")
+        self.write("c.py", "import config\n\ndef gc():\n    return config.dumps(3)\n")
+
+    def test_interleaved_edges_resolve_the_same_way(self):
+        self.tree()
+        grouped = codegraph.build([self.dir], write=False)
+        want = {(e["src"], e.get("dst")) for e in grouped["calls"] if e["callee"] == "dumps"}
+        self.assertEqual(want, {("a.ga", "config.dumps"), ("b.gb", "other.dumps"),
+                                ("c.gc", "config.dumps")})
+
+        real_defs = codegraph._defs_and_calls
+
+        def shuffled(path, mid):
+            out = list(real_defs(path, mid))
+            out[1] = list(reversed(out[1]))          # edges out of one file, back to front
+            return tuple(out)
+
+        codegraph._defs_and_calls = shuffled
+        try:
+            jumbled = codegraph.build([self.dir], write=False)
+        finally:
+            codegraph._defs_and_calls = real_defs
+        got = {(e["src"], e.get("dst")) for e in jumbled["calls"] if e["callee"] == "dumps"}
+        self.assertEqual(got, want, "the answer changed with the order the edges arrived in")
