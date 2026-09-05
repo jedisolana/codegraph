@@ -161,7 +161,12 @@ def _defs_and_calls(path, mod):
                 recv_root = root.id if isinstance(root, ast.Name) else None
             else: callee = None
             if callee:                                          # attribute this call to its NEAREST enclosing owner (a def, or the module if top-level)
-                edge = {"src": self.owner[-1], "callee": callee, "recv": recv, "method": method,
+                # The module is carried, not re-derived. It used to be recovered by splitting
+                # the qualified id on its first dot - which is wrong the moment a DIRECTORY has
+                # a dot in its name (my.pkg, v1.2, django-3.2): "my.pkg/user.go" read as "my".
+                # Import-aware resolution then failed silently for every file in such a folder,
+                # and `sites` pointed at "my.py", a file that does not exist.
+                edge = {"src": self.owner[-1], "mod": mod, "callee": callee, "recv": recv, "method": method,
                         "recv_root": recv_root if isinstance(fn, ast.Attribute) else None,
                         "kind": "CALL", "line": getattr(node, "lineno", 0)}
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
@@ -172,7 +177,7 @@ def _defs_and_calls(path, mod):
     V().visit(tree)
     seen = {}                                                   # dedup: one edge per (src, recv, callee) triple, keep first line
     for e in edges:
-        k = (e["src"], e.get("recv"), e["callee"])
+        k = (e["src"], e.get("recv"), e["callee"])   # one edge per (caller, receiver, name)
         if k not in seen: seen[k] = e
     return defs, list(seen.values()), imports, aliases, fromimp
 
@@ -268,7 +273,7 @@ def build(dirs=None, write=True):
                     if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
             bases_of[n["id"]] = resolved
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
-        srcmod = e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
+        srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         ec = e.get("encl_class")
         if ec and (ec + "." + callee) in def_ids:                # self.method()/cls.method() -> the method in the ENCLOSING class (exact scope)
             dst = ec + "." + callee; conf = "SELF-METHOD"
@@ -552,8 +557,12 @@ def sites(g, target):
     """every CALL SITE of target as (file:line, caller) - the exact places to edit when you change it (the
     REFACTOR helper). Uses resolved edges when target is a known def; else the bare callee name."""
     ids = set(_targets(g, target)); name = target.split(".")[-1]
-    out = {(f"{e['src'].split('.')[0]}.py:{e['line']}", e["src"])
-           for e in g["calls"] if (e.get("dst") in ids if ids else e["callee"] == name)}
+    mod_of = {n["id"]: n["module"] for n in g["nodes"]}
+    out = set()
+    for e in g["calls"]:
+        if (e.get("dst") in ids) if ids else (e["callee"] == name):
+            m = e.get("mod") or mod_of.get(e["src"]) or e["src"].split(".")[0]
+            out.add((f"{m}.py:{e['line']}", e["src"]))
     return sorted(out)
 
 

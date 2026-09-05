@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -437,6 +438,64 @@ class TheResolutionRateMeansSomething(Sandbox):
                          (1, 1, 1, 1), c)
         self.assertEqual(s["could_have_been_resolved"], 2, "builtins or library calls got counted")
         self.assertEqual(s["resolution_rate"], 0.5)
+
+
+class DirectoriesWithDotsInTheirNames(Sandbox):
+    """`my.pkg`, `v1.2`, `django-3.2`. The module used to be recovered by splitting the
+    qualified id on its first dot, so "my.pkg/user.go" was read as module "my" - and every
+    answer derived from it was quietly wrong."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "my.pkg"))
+        self.write("my.pkg/thing.py", "def load():\n    return 1\n")
+        self.write("my.pkg/user.py", "import thing\ndef go():\n    return thing.load()\n")
+        self.write("thing.py", "def load():\n    return 2\n")
+        self.g = self.graph(write=False)
+
+    def test_import_aware_resolution_still_works_inside_one(self):
+        e = next(x for x in self.g["calls"] if x["src"] == "my.pkg/user.go")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("thing.load", "QUALIFIED"))
+
+    def test_every_file_a_query_names_actually_exists(self):
+        """The bug that mattered: `sites` said to open my.py:2, which was never a file."""
+        found = codegraph.sites(self.g, "thing.load")
+        self.assertTrue(found, "no sites at all - an empty list would pass this vacuously")
+        places = codegraph.where(self.g, "load")
+        self.assertEqual(len(places), 2, places)
+        for loc in [l for l, _ in found] + [l for _, l in places]:
+            path = loc.rsplit(":", 1)[0]
+            self.assertTrue(os.path.exists(os.path.join(self.dir, path)), f"no such file: {path}")
+
+    def test_the_module_is_carried_not_re_derived(self):
+        """The general guard: an edge must know its own module, whatever the folder is called."""
+        for e in self.g["calls"]:
+            self.assertIn("mod", e)
+            self.assertTrue(e["src"] == e["mod"] or e["src"].startswith(e["mod"] + "."),
+                            f"{e['src']} does not live in {e['mod']}")
+
+
+class AtScale(Sandbox):
+    """600 modules and 12,000 functions - measured, not assumed."""
+
+    def test_a_large_tree_builds_and_answers_quickly(self):
+        for i in range(120):                                    # a tenth of the measured tree,
+            d = f"pkg{i // 20}"                                 # enough to catch quadratic work
+            os.makedirs(os.path.join(self.dir, d), exist_ok=True)
+            lines = []
+            for j in range(20):
+                nxt = f"f{i}_{j + 1}()" if j < 19 else f"f{(i + 1) % 120}_0()"
+                lines += [f"def f{i}_{j}():", f"    return {nxt}"]
+            self.write(f"{d}/m{i:03d}.py", "\n".join(lines) + "\n")
+        t = time.time()
+        g = self.graph(write=False)
+        build = time.time() - t
+        self.assertEqual(len([n for n in g["nodes"] if n["kind"] == "func"]), 2400)
+        self.assertLess(build, 30, f"build took {build:.1f}s")
+        t = time.time()
+        radius = codegraph.blast_radius(g, "f0_0")
+        self.assertLess(time.time() - t, 20, "blast radius is doing quadratic work")
+        self.assertGreater(len(radius), 100, "the radius across a wide graph looks truncated")
 
 
 if __name__ == "__main__":
