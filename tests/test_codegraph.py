@@ -645,5 +645,86 @@ class ARedefinedFunctionIsOneDefinition(Sandbox):
         self.assertEqual(codegraph.where(self.graph(write=False), "only"), [("s.only", "s.py:1")])
 
 
+class RootLabelsMustBeUnique(Sandbox):
+    """The root label was the last path segment, so `build /a/proj /b/proj` gave both trees the
+    label "proj" and every file the same id - two unrelated codebases merged into one module,
+    with functions from both hanging off it. The old selftest used roots named differently, so
+    it never met the case the feature exists for."""
+
+    def two_trees(self, name_a, name_b):
+        a = os.path.join(self.dir, "a", name_a)
+        b = os.path.join(self.dir, "b", name_b)
+        os.makedirs(a); os.makedirs(b)
+        with open(os.path.join(a, "mod.py"), "w", encoding="utf-8") as f:
+            f.write("def only_a():\n    return 1\n")
+        with open(os.path.join(b, "mod.py"), "w", encoding="utf-8") as f:
+            f.write("def only_b():\n    return 2\n")
+        return codegraph.build([a, b], write=False)
+
+    def test_roots_with_the_same_last_segment_do_not_merge(self):
+        g = self.two_trees("proj", "proj")
+        mods = [n["id"] for n in g["nodes"] if n["kind"] == "module"]
+        self.assertEqual(len(mods), 2, f"the two trees collapsed into {mods}")
+        self.assertEqual(len(set(mods)), 2, f"colliding ids: {mods}")
+        owners = {n["id"].rsplit(".", 1)[0] for n in g["nodes"] if n["kind"] == "func"}
+        self.assertEqual(len(owners), 2, "both functions ended up on one module")
+
+    def test_roots_with_different_names_keep_the_short_label(self):
+        """Widening the label must only happen when it is needed."""
+        g = self.two_trees("alpha", "beta")
+        mods = sorted(n["id"] for n in g["nodes"] if n["kind"] == "module")
+        self.assertEqual(mods, ["alpha/mod", "beta/mod"])
+
+    def test_the_labeller_widens_only_as_far_as_it_must(self):
+        sep = os.sep
+        self.assertEqual(codegraph._root_labels([f"{sep}x{sep}proj", f"{sep}y{sep}proj"]),
+                         {f"{sep}x{sep}proj": "x/proj", f"{sep}y{sep}proj": "y/proj"})
+        self.assertEqual(codegraph._root_labels([f"{sep}x{sep}one", f"{sep}y{sep}two"]),
+                         {f"{sep}x{sep}one": "one", f"{sep}y{sep}two": "two"})
+
+
+class AnUnknownNameSaysSo(unittest.TestCase):
+    """Every verb answered a nonsense name somehow. `calls` printed nothing at all - no name, no
+    "(none)", no error, just an empty line and exit 0 - and `deps` on a module that does not
+    exist read exactly like a module with no dependencies, which is a far more reassuring fact
+    than the truth."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def real():\n    return helper()\ndef helper():\n    return 1\n")
+        self.run_it("build", ".")
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=120)
+
+    def test_calls_on_an_unknown_name_says_not_found(self):
+        r = self.run_it("calls", "nosuchname")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not found", r.stdout + r.stderr)
+
+    def test_calls_on_a_real_name_still_works(self):
+        r = self.run_it("calls", "real")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("m.helper", r.stdout)
+
+    def test_calls_accepts_a_fully_qualified_id(self):
+        r = self.run_it("calls", "m.real")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("m.helper", r.stdout)
+
+    def test_deps_on_an_unknown_module_is_an_error(self):
+        r = self.run_it("deps", "nosuchmodule")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no module", r.stderr)
+
+    def test_deps_on_a_real_module_with_no_imports_says_none(self):
+        r = self.run_it("deps", "m")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("(none)", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -208,6 +208,21 @@ def _defs_and_calls(path, mod):
     return defs, list(seen.values()), imports, aliases, fromimp
 
 
+def _root_labels(dirs):
+    """A SHORT but unique label for each root, used to prefix module ids in a multi-tree build.
+
+    One trailing segment is enough almost always, and catastrophic when it is not: two roots
+    ending in the same name collapse into one namespace. Widen the label until the set is
+    unique, and fall back to the full path if even that is not enough.
+    """
+    parts = [d.rstrip(os.sep).split(os.sep) for d in dirs]
+    for n in range(1, max((len(p) for p in parts), default=1) + 1):
+        labels = ["/".join([x for x in p[-n:] if x]) for p in parts]
+        if len(set(labels)) == len(labels) and all(labels):
+            return dict(zip(dirs, labels))
+    return {d: d.strip(os.sep).replace(os.sep, "/") for d in dirs}
+
+
 class BadPath(Exception):
     """A path that cannot be analysed. Raised rather than quietly producing an empty graph."""
 
@@ -237,9 +252,14 @@ def build(dirs=None, write=True):
             unique.append(d)
     dirs = unique
     multiroot = len(dirs) > 1                                   # several trees at once -> qualify module ids by root so same-named modules (api/models vs worker/models) don't collide
+    # The root label has to be UNIQUE, not merely short. It was the last path segment, so
+    # `build /a/proj /b/proj` gave both trees the label "proj" and every file in them the same
+    # id - two unrelated codebases silently merged into one module, with functions from both
+    # hanging off it. Take as many trailing segments as it takes to tell the roots apart.
+    labels = _root_labels(dirs) if multiroot else {}
     pairs = []                                                  # (path, rootdir, rootname) - RECURSIVE + noise-pruned; module ids are path-relative so nested same-named files don't collide either
     for d in dirs:
-        root = os.path.basename(d.rstrip("/")) or "root"
+        root = labels.get(d) or os.path.basename(d.rstrip(os.sep)) or "root"
         for dp, dns, fns in os.walk(d):
             dns[:] = [x for x in dns if not _prune_dir(dp, x)]   # single pruned walk: skip noise, hidden, embedded interpreters, venv roots
             for fn in sorted(fns):
@@ -767,14 +787,28 @@ def _main(argv=None):
         print(json.dumps(stats(g), indent=2))
     elif a[0] == "callers": print("\n".join(callers_of(load(), a[1])) or "(none)")
     elif a[0] == "calls":
-        g = load(); [print("\n".join(calls_from(g, i)) or "(none)") for i in _by_name(g, a[1])]
+        g = load()
+        targets = _targets(g, a[1])
+        if not targets:
+            print("(not found)")            # it used to print nothing whatsoever - no name, no
+            return 1                        # "(none)", no error: an empty line and exit 0
+        for i in targets:
+            print("\n".join(calls_from(g, i)) or "(none)")
     elif a[0] == "blast": print("\n".join(blast_radius(load(), a[1])) or "(none)")
     elif a[0] == "where": print("\n".join(f"{i}  {loc}" for i, loc in where(load(), a[1])) or "(not found)")
     elif a[0] == "find": print("\n".join(f"{i}  {loc}" for i, loc in find(load(), a[1])) or "(none)")
     elif a[0] == "sites": print("\n".join(f"{loc}  {c}" for loc, c in sites(load(), a[1])) or "(none)")
     elif a[0] == "path": p = path(load(), a[1], a[2]); print(" -> ".join(p) if p else "(no path)")
     elif a[0] == "deps":
-        im, imp = module_deps(load(), a[1]); print("imports:   " + (", ".join(im) or "(none)")); print("importers: " + (", ".join(imp) or "(none)"))
+        g = load()
+        if not any(n["kind"] == "module" and n["id"] == a[1] for n in g["nodes"]):
+            # "(none)/(none)" for a module that does not exist reads exactly like a module
+            # with no dependencies, which is a different and much more reassuring fact.
+            print(f"no module {a[1]!r} in the graph", file=sys.stderr)
+            return 1
+        im, imp = module_deps(g, a[1])
+        print("imports:   " + (", ".join(im) or "(none)"))
+        print("importers: " + (", ".join(imp) or "(none)"))
     elif a[0] == "cycles":
         cy = cycles(load())
         print("\n".join(" <-> ".join(group) for group in cy) or "(none)")

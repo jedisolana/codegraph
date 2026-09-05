@@ -175,11 +175,11 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 64 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 72 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
-directory arguments — and codegraph reading its own source.
+directory arguments, two trees whose folders share a name — and codegraph reading its own source.
 
 ## Licence
 
