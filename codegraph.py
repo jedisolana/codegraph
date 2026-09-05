@@ -6,8 +6,8 @@ language server, no model. Nodes are modules, functions, classes and methods; ed
 defines, imports and calls.
 
 Every call edge carries a CONFIDENCE, because the useful part is knowing when the answer is
-solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL and RESOLVED each pin a call to
-exactly one definition. AMBIGUOUS lists the candidates instead of choosing between them.
+solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL, RESOLVED and CONSTRUCTOR each
+pin a call to exactly one definition. AMBIGUOUS lists the candidates instead of choosing.
 BUILTIN, EXTERNAL and UNTYPED say the target is not here, or cannot be determined. Nothing is
 guessed: a blast radius that quietly picked one of two same-named functions would be worse
 than no blast radius at all.
@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         17 ground-truth checks, several of them red-first
+  codegraph --selftest         20 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -615,6 +615,21 @@ def build(dirs=None, write=True):
                 # resolution rate mean something: it is the denominator of what was winnable.
                 conf = "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
+    # Constructing an object RUNS its __init__, and that edge was missing. `impact __init__`
+    # on a class built in twenty places answered "callers: (none), blast: 0" with exit code 0 -
+    # the tool's one unforgivable answer, given to the single most commonly edited method in
+    # Python. The class edge stays (Client() does construct a Client); this adds the second,
+    # equally real edge to the code that actually runs, found through the same C3 order the
+    # interpreter uses, so a subclass without its own __init__ points at the one it inherits.
+    class_ids = {n["id"] for n in nodes if n["kind"] == "class"}
+    ctor = []
+    for e in calls:
+        if e.get("dst") in class_ids:
+            for c in _mro(e["dst"], bases_of, mro_cache):
+                if (c + ".__init__") in def_ids:
+                    ctor.append({**e, "dst": c + ".__init__", "confidence": "CONSTRUCTOR"})
+                    break
+    calls.extend(ctor)
     # A function defined twice in one module - the `try: from fast import x / except: def x`
     # pattern - produced TWO nodes sharing one id. Python binds the last one, so that is the
     # definition; the earlier lines are recorded as shadowed rather than thrown away, because
@@ -727,6 +742,21 @@ def _selftest():
     ok16 = all(_dst(src, "load")[0] != "thing.load" for src in ("pkg/user.a", "pkg/user.b", "pkg/deep/down.c"))
     ok17 = ("pkg/user", "pkg/thing") in {(i["src"], i["callee"]) for i in gr["imports"]}
     shutil.rmtree(rd, ignore_errors=True)
+    # CONSTRUCTORS, and the half-qualified name people use to ask about one. `impact __init__`
+    # answered "callers: (none), blast: 0" for a class constructed all over a tree, because
+    # nobody writes the word __init__ at a call site - they write Client(). Mid() runs the
+    # __init__ it inherits, so the edge follows the same C3 order the interpreter does.
+    kd = tempfile.mkdtemp()
+    _w(os.path.join(kd, "k.py"),
+        "class Base:\n    def __init__(self, a):\n        self.a = a\n"
+        "class Mid(Base):\n    pass\n"
+        "def build():\n    return Mid(1)\n")
+    gk = build([kd], write=False)
+    ok18 = callers_of(gk, "k.Base.__init__") == ["k.build"]
+    ok19 = (callers_of(gk, "Base.__init__") == ["k.build"]
+            and [i for i, _ in where(gk, "Base.__init__")] == ["k.Base.__init__"])
+    ok20 = sorted({e["src"] for e in gk["calls"] if e["callee"] == "__init__"}) == []
+    shutil.rmtree(kd, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -745,8 +775,11 @@ def _selftest():
     print(f"  RELATIVE `from .. import thing` climbs one level correctly: {ok15}")
     print(f"  RED-FIRST - none of them resolve to the same-named TOP-LEVEL module (the old wrong answer): {ok16}")
     print(f"  a relative import produces a real IMPORT edge, so deps/cycles see packages: {ok17}")
+    print(f"  CONSTRUCTOR - Mid(1) is a caller of the Base.__init__ it inherits: {ok18}")
+    print(f"  a half-qualified Base.__init__ means that one, for callers and for where: {ok19}")
+    print(f"  RED-FIRST - name matching finds NO caller of __init__; nobody writes it: {ok20}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 
@@ -876,6 +909,30 @@ def _by_name(g, name):
     return [n["id"] for n in g["nodes"] if n["name"] == name and n["kind"] in ("func", "class")]
 
 
+def _ids_matching(g, name):
+    """The definitions a query name refers to: an exact id, else every id it is a dotted TAIL of.
+
+    `Base.__init__` is the natural way to say which __init__ you mean, and it used to match
+    nothing: only whole ids (`pkg.mod.Base.__init__`) and bare names counted. Matching nothing
+    was not the bug - the bug is what happened next. The name fell through to "called here but
+    not defined here" and the answer was assembled from every edge whose callee was `__init__`,
+    so asking about Base's constructor returned the caller of a different class's, under a note
+    saying Base.__init__ is not defined in a graph that defines it. Exit code 0.
+
+    An exact id wins outright, so a tree containing both `a.b.f` and `x.a.b.f` still answers
+    `a.b.f` with the one you named rather than calling it ambiguous.
+    """
+    defs = [n for n in g["nodes"] if n["kind"] in ("func", "class")]
+    exact = [n["id"] for n in defs if n["id"] == name]
+    if exact:
+        return exact
+    # Both separators count as a boundary: ids nest directories with "/" and symbols with ".",
+    # so `mod.f` has to reach `pkg/deep/mod.f` the same way `Base.__init__` reaches
+    # `h.Base.__init__`. Never a bare endswith - that would let `init` match `__init__`.
+    tails = ("." + name, "/" + name)
+    return [n["id"] for n in defs if n["id"].endswith(tails)]
+
+
 class Unknown(Exception):
     """A name this graph has never seen: not defined here, and not called here either.
 
@@ -923,9 +980,7 @@ def _targets(g, target):
     answered "no callers" with a success code - and a caller cannot tell that from a function
     nothing calls. A qualified id has to exist to count.
     """
-    if "." in target:
-        return [target] if any(n["id"] == target for n in g["nodes"]) else []
-    return _by_name(g, target)
+    return _ids_matching(g, target)
 
 
 def _describe(g, name):
@@ -998,10 +1053,13 @@ def blast_radius(g, target, max_hops=None):
 
 def where(g, name):
     """where a symbol is DEFINED: (id, file:line) for each def matching name exactly or by its bare name."""
-    tgt = name.split(".")[-1]
+    # The same matcher every other verb uses, so `where` and `callers` cannot disagree about
+    # what a name means. It used to strip to the bare name, so `where Base.__init__` listed
+    # Own.__init__ as well - a definition that is not the one you asked about.
+    want = set(_ids_matching(g, name))
     out = []
     for n in g["nodes"]:
-        if n["kind"] in ("func", "class") and (n["id"] == name or n["name"] == tgt):
+        if n["id"] in want:
             where_ = f"{n['module']}.py:{n['line']}"
             if n.get("shadows"):     # the live definition, plus the lines it overrides
                 where_ += " (shadows " + ", ".join(f"line {ln}" for ln in n["shadows"]) + ")"

@@ -1439,7 +1439,7 @@ class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
     codebases rather than fixtures. Nothing had ever asserted them."""
 
     LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "LOCAL", "RESOLVED", "INHERITED",
-                        "CLASS", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
+                        "CLASS", "CONSTRUCTOR", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
     UNRESOLVED = frozenset({"AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
 
     def assert_sound(self, g):
@@ -2093,3 +2093,121 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
         for bad in self.FORBIDDEN:
             self.assertNotIn(bad.lower(), low, f"the help text contains {bad!r}")
         self.assertIn("codegraph - ask a Python codebase", codegraph.__doc__)
+
+
+class ChangingAConstructorBreaksEveryoneWhoBuildsIt(Sandbox):
+    """`impact __init__` answered "callers: (none), blast: 0 functions" for a class constructed
+    all over the tree, and exited 0. Constructing an object runs its __init__; the edge simply
+    was not there. Of every method in Python this is the one most often edited and the one whose
+    callers are hardest to grep for, because none of them mention it by name."""
+
+    TREE = ("class Client:\n"
+            "    def __init__(self, url):\n"
+            "        self.url = url\n"
+            "    def get(self):\n"
+            "        return self.url\n"
+            "\n"
+            "def make():\n"
+            "    return Client('a')\n"
+            "\n"
+            "def make_two():\n"
+            "    return Client('b')\n")
+
+    def test_impact_names_the_places_that_construct_the_class(self):
+        self.write("svc.py", self.TREE)
+        g = self.graph(write=False)
+        im = codegraph.impact(g, "svc.Client.__init__")
+        self.assertEqual(sorted(im["callers"]), ["svc.make", "svc.make_two"])
+        self.assertEqual({loc for loc, _ in im["sites"]}, {"svc.py:8", "svc.py:11"})
+        self.assertEqual(len(im["blast"]), 2)
+
+    def test_the_edge_to_the_class_itself_survives(self):
+        """The constructor edge is added BESIDE the class edge, not instead of it - `Client()`
+        both constructs a Client and runs its __init__, and both questions have askers."""
+        self.write("svc.py", self.TREE)
+        g = self.graph(write=False)
+        self.assertEqual(sorted(codegraph.callers_of(g, "svc.Client")),
+                         ["svc.make", "svc.make_two"])
+
+    def test_a_subclass_points_at_the_init_it_inherits(self):
+        """Mid() runs Base.__init__ - resolved through the same C3 order the interpreter uses."""
+        self.write("h.py", "class Base:\n"
+                           "    def __init__(self, a):\n"
+                           "        self.a = a\n"
+                           "\n"
+                           "class Mid(Base):\n"
+                           "    pass\n"
+                           "\n"
+                           "def build():\n"
+                           "    return Mid(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "h.Base.__init__"), ["h.build"])
+
+    def test_a_class_with_no_init_gains_no_edge(self):
+        """A guard: the fix must invent nothing where there is no __init__ to run."""
+        self.write("p.py", "class Plain:\n    pass\n\ndef make():\n    return Plain()\n")
+        g = self.graph(write=False)
+        self.assertEqual([e for e in g["calls"] if e["confidence"] == "CONSTRUCTOR"], [])
+        self.assertEqual(codegraph.callers_of(g, "p.Plain"), ["p.make"])
+
+
+class AQualifiedNameMeansTheOneYouNamed(Sandbox):
+    """`Base.__init__` is how a person says which __init__ they mean. It matched no id, fell
+    through to "called here but not defined here", and the answer was then assembled from every
+    edge whose callee was `__init__` - so the question about Base returned a caller of Own, in a
+    graph that defines Base.__init__, with exit code 0."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("h.py", "class Base:\n"
+                           "    def __init__(self, a):\n"
+                           "        self.a = a\n"
+                           "\n"
+                           "class Own(Base):\n"
+                           "    def __init__(self, a, b):\n"
+                           "        super().__init__(a)\n"
+                           "        self.b = b\n"
+                           "\n"
+                           "def build_base():\n"
+                           "    return Base(1)\n"
+                           "\n"
+                           "def build_own():\n"
+                           "    return Own(1, 2)\n")
+        self.g = self.graph(write=False)
+
+    def test_class_dot_method_is_the_definition_it_names(self):
+        self.assertEqual(codegraph.callers_of(self.g, "Base.__init__"), ["h.build_base"])
+        self.assertEqual(codegraph.callers_of(self.g, "Own.__init__"), ["h.build_own"])
+
+    def test_where_agrees_with_the_other_verbs(self):
+        """where used to strip the qualification and list every __init__ in the tree."""
+        self.assertEqual([i for i, _ in codegraph.where(self.g, "Base.__init__")],
+                         ["h.Base.__init__"])
+        self.assertEqual([i for i, _ in codegraph.where(self.g, "__init__")],
+                         ["h.Base.__init__", "h.Own.__init__"])
+
+    def test_the_bare_name_is_still_ambiguous(self):
+        """Two definitions answer to `__init__`, and neither may be picked for you."""
+        with self.assertRaises(codegraph.Ambiguous):
+            codegraph.callers_of(self.g, "__init__")
+
+    def test_a_qualified_name_that_matches_nothing_is_still_unknown(self):
+        """The protection the old exact-id rule was there for: a typo must not answer 0."""
+        with self.assertRaises(codegraph.Unknown):
+            codegraph.callers_of(self.g, "typo.name")
+
+    def test_an_exact_id_beats_a_longer_one_that_ends_with_it(self):
+        self.write(os.path.join("pkg", "h.py"), "def only():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertIn("pkg/h.only", {n["id"] for n in g["nodes"]})
+        self.assertEqual(codegraph._ids_matching(g, "pkg/h.only"), ["pkg/h.only"])
+        self.assertEqual(codegraph._ids_matching(g, "h.only"), ["pkg/h.only"])
+
+    def test_a_directory_boundary_counts_as_a_boundary(self):
+        """Ids nest directories with "/" and symbols with "." - `mod.f` has to reach
+        `pkg/deep/mod.f`, and `init` must never reach `__init__`."""
+        self.write(os.path.join("pkg", "deep", "mod.py"), "def f():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph._ids_matching(g, "mod.f"), ["pkg/deep/mod.f"])
+        self.assertEqual(codegraph._ids_matching(g, "deep/mod.f"), ["pkg/deep/mod.f"])
+        self.assertEqual(codegraph._ids_matching(g, "init"), [])

@@ -14,12 +14,16 @@ python3 codegraph.py impact _paid_ok
 callers: boardofdirectors/server.Handler.do_POST, boardofdirectors/server._board,
          boardofdirectors/server._single, boardofdirectors/server._tier
 sites:   boardofdirectors/server.py:201, boardofdirectors/server.py:250,
-         boardofdirectors/server.py:279, boardofdirectors/server.py:632
-blast:   5 functions could be affected
+         boardofdirectors/server.py:279, boardofdirectors/server.py:632,
+         boardofdirectors/server.py:635, boardofdirectors/server.py:665,
+         boardofdirectors/server.py:679, boardofdirectors/server.py:697,
+         boardofdirectors/server.py:712
+blast:   19 functions could be affected
 ```
 
-That is a real answer from a real codebase, not a mock-up. Four callers, the exact four lines
-to open, and the transitive radius — before you touch anything.
+That is a real answer from a real codebase, not a mock-up. Four callers, the nine exact lines
+to open — a caller that checks a gate five times is five places to edit — and the transitive
+radius, before you touch anything.
 
 ## Why
 
@@ -48,6 +52,7 @@ Every call edge carries a confidence label:
 | `QUALIFIED` | `thing.load()` where `thing` is a module you imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
 | `RESOLVED` | a bare call, and exactly one definition of that name exists |
+| `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
 | `EXTERNAL` | a builtin, the stdlib, a library, or a method on an object it cannot type |
 
@@ -66,21 +71,22 @@ measure how much of the standard library you happen to use:
 
 ```json
 {
-  "call_edges": 2580,
-  "call_sites": 3129,
-  "edge_confidence": {"UNTYPED": 1261, "EXTERNAL": 421, "BUILTIN": 379, "QUALIFIED": 201,
-                      "LOCAL": 197, "SELF-METHOD": 78, "RESOLVED": 39, "TYPED": 3,
-                      "CLASS": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 519,
-  "could_have_been_resolved": 1780,
-  "resolution_rate": 0.292
+  "call_edges": 2664,
+  "call_sites": 3553,
+  "edge_confidence": {"UNTYPED": 1002, "QUALIFIED": 484, "EXTERNAL": 420, "BUILTIN": 387,
+                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 56, "RESOLVED": 36,
+                      "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 855,
+  "could_have_been_resolved": 1857,
+  "resolution_rate": 0.46
 }
 ```
 
-That 0.29 is a real number on a real codebase, and it is not flattering. Most of what it cannot
+That 0.46 is a real number on a real codebase, measured the hard way. Most of what it cannot
 place are method calls on objects it has no type for — the honest ceiling of static analysis
 this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
-which is how a metric ends up meaning nothing.
+which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
+every point since came from a resolution bug fixed with a test, not from a change to the sum.
 
 ## The commands
 
@@ -97,7 +103,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         17 ground-truth checks, several of them red-first
+codegraph --selftest         20 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -192,7 +198,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 17 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 20 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -200,8 +206,10 @@ including **red-first controls** that prove the naive approach fails where this 
   function in your tree
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
+- `Mid(1)` where `Mid` inherits its `__init__` — and the control showing that matching on the
+  name `__init__` finds no caller at all, because no call site contains the word
 
-The test suite adds 195 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 205 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -222,7 +230,10 @@ an unreadable file and a read-only directory,
 a help request that must not exit non-zero,
 a bare invocation that must not build your home directory,
 every verb checked against the help text that is supposed to list it,
-and every shipped file checked for a private origin story — and codegraph reading its own source.
+every shipped file checked for a private origin story,
+a constructor whose callers never write its name,
+and a half-qualified `Class.method` that has to mean the one you named
+— and codegraph reading its own source.
 
 ## Licence
 
