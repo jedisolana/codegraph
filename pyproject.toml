@@ -34,7 +34,9 @@ py-modules = ["codegraph"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# S is flake8-bandit: the security ruleset. A tool people copy into their own repository is
+# worth running it against, and it is the cheap half of what a scanner like CodeQL would say.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "S"]
 # E701/E702: this file is written in a deliberately dense one-line style ("if x: return y"),
 # which keeps the AST visitor readable as a table of cases rather than a page of stubs. A
 # linter that fights the author on eighty-five lines is a linter that gets switched off.
@@ -43,3 +45,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # here the two branches carry the comments explaining why a call is external rather than
 # merely untypeable - which is the distinction the whole resolution rate rests on.
 ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005", "SIM108"]
+
+[tool.ruff.lint.per-file-ignores]
+# The tests drive the CLI as a subprocess on purpose - that is the point of testing a command
+# line - and two of them exec and chmod fixtures they wrote themselves a line earlier.
+"tests/*" = ["S102", "S103", "S603", "S607"]

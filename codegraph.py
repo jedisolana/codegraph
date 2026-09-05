@@ -60,7 +60,7 @@ CACHE = (os.environ.get("CODEGRAPH_CACHE")
 # is invalidated, so a change here can never silently reuse yesterday's extraction.
 try:
     with open(os.path.abspath(__file__), "rb") as _fh:
-        _VERSION = hashlib.sha1(_fh.read()).hexdigest()[:12]
+        _VERSION = hashlib.sha256(_fh.read()).hexdigest()[:12]
 except Exception:
     _VERSION = "0"
 
