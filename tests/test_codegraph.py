@@ -565,5 +565,85 @@ class CyclesOfAnyLength(Sandbox):
         self.assertEqual(codegraph.cycles(self.graph(write=False)), [])
 
 
+class DecoratorsAreCalls(Sandbox):
+    """`@register` above a def produced no edge at all, so callers_of("register") was empty and
+    a decorator's blast radius was nothing: change it, and the tool said nothing depended on it.
+    Python decorators are everywhere, so this was a hole the size of the language."""
+
+    def test_a_bare_decorator_is_a_call(self):
+        self.write("d.py", "def register(fn):\n    return fn\n\n@register\ndef thing():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.callers_of(g, "d.register"), ["d"])
+
+    def test_a_decorator_with_arguments_is_walked(self):
+        """@app.route('/x') - the inner call was never visited either."""
+        self.write("app.py", "class App:\n    def route(self, p):\n        return lambda f: f\n"
+                             "app = App()\n"
+                             "@app.route('/x')\ndef view():\n    return 1\n")
+        edges = [e for e in self.graph(write=False)["calls"] if e["callee"] == "route"]
+        self.assertTrue(edges, "the decorator expression was never visited")
+
+    def test_the_call_belongs_to_the_enclosing_scope_not_the_decorated_function(self):
+        """A decorator runs where the def sits, at import time - not inside the function."""
+        self.write("e.py", "def deco(fn):\n    return fn\n\n@deco\ndef inner():\n    return 1\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["callee"] == "deco")
+        self.assertEqual(e["src"], "e", f"attributed to {e['src']}, not the module")
+
+    def test_a_decorated_class_counts_too(self):
+        self.write("f.py", "def seal(c):\n    return c\n\n@seal\nclass Box:\n    pass\n")
+        self.assertEqual(codegraph.callers_of(self.graph(write=False), "f.seal"), ["f"])
+
+
+class OverlappingArguments(Sandbox):
+    """`build . .` indexed everything twice; `build . ./sub` counted the nested file under two
+    different ids. Both silently inflate the graph and double-count in stats."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "sub"))
+        self.write("top.py", "def a():\n    return 1\n")
+        self.write("sub/deep.py", "def b():\n    return 1\n")
+
+    def ids(self, *dirs):
+        return [n["id"] for n in codegraph.build(list(dirs), write=False)["nodes"]
+                if n["kind"] == "module"]
+
+    def test_the_same_directory_twice_is_indexed_once(self):
+        got = self.ids(self.dir, self.dir)
+        self.assertEqual(sorted(got), sorted(set(got)), f"duplicated: {got}")
+
+    def test_a_nested_directory_is_not_indexed_separately(self):
+        got = self.ids(self.dir, os.path.join(self.dir, "sub"))
+        self.assertEqual(len(got), 2, f"the nested file was counted twice: {got}")
+
+    def test_two_genuinely_separate_trees_are_both_kept(self):
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        with open(os.path.join(other, "far.py"), "w", encoding="utf-8") as f:
+            f.write("def c():\n    return 1\n")
+        self.assertEqual(len(self.ids(self.dir, other)), 3)
+
+
+class ARedefinedFunctionIsOneDefinition(Sandbox):
+    """The `try: from fast import x / except: def x` pattern produced TWO nodes sharing one id.
+    Python binds the last one, so that is the definition - and the shadowed line is worth
+    saying out loud rather than discarding."""
+
+    def test_the_last_definition_wins_and_the_id_is_unique(self):
+        self.write("r.py", "def loads(s):\n    return 1\n\ndef loads(s):\n    return 2\n"
+                           "\ndef use():\n    return loads('x')\n")
+        g = self.graph(write=False)
+        ids = [n["id"] for n in g["nodes"] if n["kind"] == "func"]
+        self.assertEqual(sorted(ids), sorted(set(ids)), f"duplicate node ids: {ids}")
+        places = codegraph.where(g, "loads")
+        self.assertEqual(len(places), 1, places)
+        self.assertIn("r.py:4", places[0][1])            # the live one
+        self.assertIn("shadows line 1", places[0][1])    # and what it overrides
+
+    def test_a_name_defined_once_says_nothing_about_shadowing(self):
+        self.write("s.py", "def only():\n    return 1\n")
+        self.assertEqual(codegraph.where(self.graph(write=False), "only"), [("s.only", "s.py:1")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

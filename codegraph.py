@@ -121,6 +121,7 @@ def _defs_and_calls(path, mod):
                     fromimp[a.asname or a.name] = top           # `from memory import recall` -> bare recall() resolves into module memory
 
         def visit_ClassDef(self, node):
+            self._decorators(node)
             qid = self._qual(node.name)
             # Base classes by NAME. Resolved to ids in build(), where the whole tree is known, so
             # `self.method()` can be found on a parent instead of giving up - which is the single
@@ -132,7 +133,32 @@ def _defs_and_calls(path, mod):
             for c in node.body: self.visit(c)
             self.classes.pop(); self.scope.pop()
 
+        def _decorators(self, node):
+            """A decorator is a call, made where the def sits, not inside it.
+
+            `@register` above a function produced no edge at all, so callers_of("register")
+            was empty and a decorator's blast radius was nothing - change it and the tool said
+            nothing depended on it. Python decorators are everywhere, so this was a hole the
+            size of the language. `@app.route("/x")` was half-visible: the inner route() call
+            was never walked either, because decorator_list was simply not visited.
+            """
+            for d in node.decorator_list:
+                self.visit(d)                        # any calls written INSIDE the expression
+                if isinstance(d, ast.Name):          # @register -> register(fn)
+                    edges.append({"src": self.owner[-1], "mod": mod, "callee": d.id, "recv": None,
+                                  "method": False, "recv_root": None, "kind": "CALL",
+                                  "line": getattr(d, "lineno", 0)})
+                elif isinstance(d, ast.Attribute):   # @mod.thing -> mod.thing(fn)
+                    root = d.value
+                    while isinstance(root, ast.Attribute): root = root.value
+                    edges.append({"src": self.owner[-1], "mod": mod, "callee": d.attr,
+                                  "recv": d.value.id if isinstance(d.value, ast.Name) else None,
+                                  "method": True,
+                                  "recv_root": root.id if isinstance(root, ast.Name) else None,
+                                  "kind": "CALL", "line": getattr(d, "lineno", 0)})
+
         def _func(self, node):
+            self._decorators(node)
             qid = self._qual(node.name)
             defs.append({"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno})
             self.scope.append(node.name); self.owner.append(qid); self.vtypes.append({})   # calls inside this body belong to qid; its own var-type scope
@@ -202,7 +228,14 @@ def build(dirs=None, write=True):
             raise BadPath(f"{d} is not a directory or a .py file")
         else:
             raise BadPath(f"{d} does not exist")
-    dirs = checked
+    # `build . .` indexed everything twice, and `build . ./sub` counted the nested file under
+    # two different ids - both silently inflating the graph and double-counting in stats.
+    # Shortest path first, then drop anything already inside a kept root.
+    unique = []
+    for d in sorted(dict.fromkeys(checked), key=len):
+        if not any(d == u or d.startswith(u + os.sep) for u in unique):
+            unique.append(d)
+    dirs = unique
     multiroot = len(dirs) > 1                                   # several trees at once -> qualify module ids by root so same-named modules (api/models vs worker/models) don't collide
     pairs = []                                                  # (path, rootdir, rootname) - RECURSIVE + noise-pruned; module ids are path-relative so nested same-named files don't collide either
     for d in dirs:
@@ -325,6 +358,17 @@ def build(dirs=None, write=True):
                 # resolution rate mean something: it is the denominator of what was winnable.
                 conf = "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
+    # A function defined twice in one module - the `try: from fast import x / except: def x`
+    # pattern - produced TWO nodes sharing one id. Python binds the last one, so that is the
+    # definition; the earlier lines are recorded as shadowed rather than thrown away, because
+    # "this name is defined three times" is worth knowing.
+    live = {}
+    for n in nodes:
+        prev = live.get(n["id"])
+        if prev is not None and prev.get("line") != n.get("line"):
+            n = {**n, "shadows": [*prev.get("shadows", []), prev["line"]]}
+        live[n["id"]] = n
+    nodes = list(live.values())
     nodes.sort(key=lambda n: (n["kind"], n["id"]))              # DETERMINISTIC output: byte-reproducible across runs regardless of os.walk order -> two builds are diffable
     calls.sort(key=lambda e: (e["src"], e.get("recv") or "", e["callee"], e.get("line", 0)))
     imports.sort(key=lambda e: (e["src"], e["callee"], e.get("line", 0)))
@@ -558,8 +602,14 @@ def blast_radius(g, target, max_hops=None):
 def where(g, name):
     """where a symbol is DEFINED: (id, file:line) for each def matching name exactly or by its bare name."""
     tgt = name.split(".")[-1]
-    return sorted((n["id"], f"{n['module']}.py:{n['line']}") for n in g["nodes"]
-                  if n["kind"] in ("func", "class") and (n["id"] == name or n["name"] == tgt))
+    out = []
+    for n in g["nodes"]:
+        if n["kind"] in ("func", "class") and (n["id"] == name or n["name"] == tgt):
+            where_ = f"{n['module']}.py:{n['line']}"
+            if n.get("shadows"):     # the live definition, plus the lines it overrides
+                where_ += " (shadows " + ", ".join(f"line {ln}" for ln in n["shadows"]) + ")"
+            out.append((n["id"], where_))
+    return sorted(out)
 
 
 def find(g, substr):

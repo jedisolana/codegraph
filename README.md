@@ -125,7 +125,9 @@ Static analysis, honestly labelled:
 - **Python only.**
 - **Dynamic dispatch defeats it** — `getattr(obj, name)()`, dispatch tables, monkeypatching,
   plugin registries. These land as `EXTERNAL`, which is the truthful answer.
-- **Decorators that replace a function** are not followed.
+- **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
+  that is where it runs. But a decorator that *replaces* the function with a different one is
+  not followed through: calls to the decorated name still point at the original `def`.
 - **Inheritance is resolved by name, not by import.** `self.method()` walks the base chain when
   the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
   A base imported under an alias, or built by a metaclass, is not followed.
@@ -173,10 +175,11 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 55 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 64 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
-long, a 1,200-deep import chain — and codegraph reading its own source.
+long, a 1,200-deep import chain, decorators, redefined functions, overlapping
+directory arguments — and codegraph reading its own source.
 
 ## Licence
 
