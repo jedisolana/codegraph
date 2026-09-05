@@ -47,7 +47,7 @@ Every call edge carries a confidence label:
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
 | `TYPED` | `x = Foo(); x.method()` — resolved by local type inference, and refused when two branches give `x` two types |
-| `INHERITED` | `self.method()` where the method lives on a base class |
+| `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module you imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
@@ -73,16 +73,16 @@ measure how much of the standard library you happen to use:
 {
   "call_edges": 2663,
   "call_sites": 3552,
-  "edge_confidence": {"UNTYPED": 1002, "QUALIFIED": 484, "EXTERNAL": 420, "BUILTIN": 387,
+  "edge_confidence": {"UNTYPED": 992, "QUALIFIED": 484, "EXTERNAL": 420, "BUILTIN": 387,
                       "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 55, "RESOLVED": 36,
-                      "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 854,
+                      "INHERITED": 10, "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 864,
   "could_have_been_resolved": 1856,
-  "resolution_rate": 0.46
+  "resolution_rate": 0.466
 }
 ```
 
-That 0.46 is a real number on a real codebase, measured the hard way. Most of what it cannot
+That 0.466 is a real number on a real codebase, measured the hard way. Most of what it cannot
 place are method calls on objects it has no type for — the honest ceiling of static analysis
 this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
 which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
@@ -103,7 +103,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         21 ground-truth checks, several of them red-first
+codegraph --selftest         22 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -120,6 +120,9 @@ misspelling that returns success is how an agent talks itself into an unsafe edi
 
 Queries find the graph by walking up from where you are, the way git finds `.git`, so you can
 ask from anywhere in the repository. They rebuild automatically when the tree has changed — a file edited, added, **or deleted**.
+The graph records the size and timestamp of every file it read and compares them exactly, rather
+than asking whether anything is newer than itself: a file restored from a backup, a checkout or a
+container layer arrives *older* than the graph while holding different code.
 Deletion is the one people forget: removing a file changes nobody else's timestamp, so a
 graph that only watched timestamps would go on answering about code that is gone. The rebuild is incremental — unchanged files are reused from a cache keyed by
 modification time *and* by codegraph's own source hash, so editing the parser invalidates every
@@ -160,6 +163,9 @@ Static analysis, honestly labelled:
 - **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
   that is where it runs. But a decorator that *replaces* the function with a different one is
   not followed through: calls to the decorated name still point at the original `def`.
+- **`super()` resolves against the class it is written in.** Python's own order for that
+  class - so a diamond lands where the interpreter lands. What static analysis cannot know is
+  that `B.m`'s `super()` goes to `C` when `B` is reached through a `D(B, C)` instance.
 - **Inheritance is resolved by name, not by import.** `self.method()` follows Python's own
   method order — C3 linearisation, so a diamond resolves where the interpreter resolves it —
   when the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
@@ -199,7 +205,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 21 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 22 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -211,8 +217,9 @@ including **red-first controls** that prove the naive approach fails where this 
   name `__init__` finds no caller at all, because no call site contains the word
 - two functions in one module that each define a helper called `inner`, which a lookup keyed on
   (module, name) can only tell apart by luck
+- `super().run()`, whose caller never writes the name of what it calls
 
-The test suite adds 213 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 224 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -237,7 +244,9 @@ every shipped file checked for a private origin story,
 a constructor whose callers never write its name,
 a half-qualified `Class.method` that has to mean the one you named,
 two decorators whose `wrapper`s are different functions,
-and a generated file too deeply nested to walk
+a generated file too deeply nested to walk,
+a file restored from a backup with the timestamp it used to have,
+and a dangling symlink that must not make every query rebuild
 — and codegraph reading its own source.
 
 ## Licence

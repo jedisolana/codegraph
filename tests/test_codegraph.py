@@ -2176,7 +2176,9 @@ class AQualifiedNameMeansTheOneYouNamed(Sandbox):
         self.g = self.graph(write=False)
 
     def test_class_dot_method_is_the_definition_it_names(self):
-        self.assertEqual(codegraph.callers_of(self.g, "Base.__init__"), ["h.build_base"])
+        # Own.__init__ is a real caller of Base.__init__ - it writes super().__init__(a).
+        self.assertEqual(codegraph.callers_of(self.g, "Base.__init__"),
+                         ["h.Own.__init__", "h.build_base"])
         self.assertEqual(codegraph.callers_of(self.g, "Own.__init__"), ["h.build_own"])
 
     def test_where_agrees_with_the_other_verbs(self):
@@ -2333,3 +2335,141 @@ class GeneratedPythonIsStillPython(Sandbox):
         self.write("gen.py", "TABLE = " + "1+" * 30000 + "1\n")
         g = self.graph(write=False)
         self.assertIn("nested", g["unreadable"][0].lower())
+
+
+class SuperNamesNoTargetAndHasExactlyOne(Sandbox):
+    """`super().run()` is the one call shape where the caller cannot mention the callee by
+    name - and the target is not a guess: it is the next class in the interpreter's own order.
+    It landed as UNTYPED, so `impact Base.run` reported no callers for a method that every
+    subclass overrides and then calls."""
+
+    def edge(self, g, src, callee):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_super_reaches_the_base_method(self):
+        self.write("s.py", "class Base:\n"
+                           "    def run(self):\n"
+                           "        return 1\n"
+                           "\n"
+                           "class Kid(Base):\n"
+                           "    def run(self):\n"
+                           "        return super().run() + 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "s.Kid.run", "run"), ("s.Base.run", "INHERITED"))
+        self.assertEqual(codegraph.callers_of(g, "s.Base.run"), ["s.Kid.run"])
+
+    def test_super_init_is_a_caller_of_the_base_constructor(self):
+        self.write("s.py", "class Base:\n"
+                           "    def __init__(self, a):\n"
+                           "        self.a = a\n"
+                           "\n"
+                           "class Kid(Base):\n"
+                           "    def __init__(self, a):\n"
+                           "        super().__init__(a)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "s.Kid.__init__", "__init__"),
+                         ("s.Base.__init__", "INHERITED"))
+
+    def test_a_diamond_follows_the_interpreters_order(self):
+        """D's super() is B, not A - C3, checked against what Python itself reports."""
+        self.write("d.py", "class A:\n    def m(self):\n        return 1\n"
+                           "class B(A):\n    def m(self):\n        return super().m()\n"
+                           "class C(A):\n    def m(self):\n        return super().m()\n"
+                           "class D(B, C):\n    def m(self):\n        return super().m()\n")
+        g = self.graph(write=False)
+        ns = {}
+        exec("class A:\n def m(self): pass\n"
+             "class B(A):\n def m(self): pass\n"
+             "class C(A):\n def m(self): pass\n"
+             "class D(B, C):\n def m(self): pass\n", ns)
+        self.assertEqual([c.__name__ for c in ns["D"].__mro__][:4], ["D", "B", "C", "A"])
+        self.assertEqual(self.edge(g, "d.D.m", "m"), ("d.B.m", "INHERITED"))
+
+    def test_an_explicit_super_starts_after_the_class_it_names(self):
+        self.write("e.py", "class A:\n    def m(self):\n        return 1\n"
+                           "class B(A):\n    def m(self):\n        return 2\n"
+                           "class C(B):\n    def m(self):\n        return super(B, self).m()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "e.C.m", "m"), ("e.A.m", "INHERITED"))
+
+    def test_super_to_a_base_outside_the_tree_stays_unresolved(self):
+        """A guard: nothing may be invented when the base is not something this graph can see."""
+        self.write("x.py", "import json\n"
+                           "class Enc(json.JSONEncoder):\n"
+                           "    def default(self, o):\n"
+                           "        return super().default(o)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "x.Enc.default", "default"), (None, "UNTYPED"))
+
+
+class AGraphKnowsExactlyWhatItRead(Sandbox):
+    """Freshness was "is any file newer than the graph". A file restored from a backup, a
+    checkout, cp -p, rsync -t or a container layer keeps the timestamp it had, so it lands OLDER
+    than the graph while holding different code - and that test called it fresh."""
+
+    def test_a_file_restored_with_its_old_timestamp_is_not_fresh(self):
+        self.write("m.py", "def alpha():\n    return 1\n")
+        codegraph.build([self.dir])                       # written, so a query can find it
+        st = os.stat(os.path.join(self.dir, "m.py"))
+        self.write("m.py", "def beta():\n    return 2\n")
+        os.utime(os.path.join(self.dir, "m.py"), (st.st_atime, st.st_mtime))
+        g = codegraph.load()
+        self.assertEqual([i for i, _ in codegraph.where(g, "beta")], ["m.beta"])
+        with self.assertRaises(codegraph.Unknown):
+            codegraph.callers_of(g, "alpha")
+
+    def raw(self):
+        """The graph exactly as it sits on disk. `load()` rebuilds a stale graph before it
+        returns, so asking _is_stale about ITS result can only ever say False - a check that
+        passes for the wrong reason."""
+        with open(codegraph.OUT, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_the_graph_records_a_stamp_for_every_file_it_read(self):
+        self.write("a.py", "def f():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertIsInstance(g["sources"], dict)
+        (path, stamp), = g["sources"].items()
+        st = os.stat(path)
+        self.assertEqual(stamp, [st.st_mtime, st.st_size])
+
+    def test_the_cache_is_keyed_on_size_as_well_as_time(self):
+        """Same timestamp, different content: the incremental cache must not serve the old
+        parse back."""
+        self.write("m.py", "def alpha():\n    return 1\n")
+        codegraph.build([self.dir])
+        st = os.stat(os.path.join(self.dir, "m.py"))
+        self.write("m.py", "def beta():\n    return 2\n")
+        os.utime(os.path.join(self.dir, "m.py"), (st.st_atime, st.st_mtime))
+        g = codegraph.build([self.dir])
+        self.assertIn("m.beta", {n["id"] for n in g["nodes"]})
+        self.assertNotIn("m.alpha", {n["id"] for n in g["nodes"]})
+
+    def test_a_dangling_symlink_does_not_make_every_query_rebuild(self):
+        """The build has skipped these since round three. The freshness check called one
+        "something changed" - so every query rebuilt the whole graph, for ever, in silence."""
+        self.write("a.py", "def f():\n    return 1\n")
+        try:
+            os.symlink(os.path.join(self.dir, "gone.py"), os.path.join(self.dir, "broken.py"))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        codegraph.build([self.dir])
+        self.assertFalse(codegraph._is_stale(self.raw()))
+
+    def test_a_real_edit_is_still_seen(self):
+        """The guard on the other side: exact stamps must not make it blind."""
+        self.write("m.py", "def alpha():\n    return 1\n")
+        codegraph.build([self.dir])
+        self.assertFalse(codegraph._is_stale(self.raw()))
+        self.write("m.py", "def alpha():\n    return 1\ndef added():\n    return 2\n")
+        self.assertTrue(codegraph._is_stale(self.raw()))
+
+
+class APathToYourselfIsAPath(Sandbox):
+    def test_the_path_from_a_function_to_itself_is_that_function(self):
+        """It answered "(no path)", which reads as "these two are unconnected"."""
+        self.write("a.py", "def f():\n    return 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.path(g, "a.f", "a.f"), ["a.f"])

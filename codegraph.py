@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         21 ground-truth checks, several of them red-first
+  codegraph --selftest         22 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -355,6 +355,18 @@ def _defs_and_calls(path, mod):
                         "callee_local": (not isinstance(fn, ast.Attribute)
                                          and any(callee in v for v, _ in self.bound)),
                         "kind": "CALL", "line": getattr(node, "lineno", 0)}
+                if (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Call)
+                        and isinstance(fn.value.func, ast.Name) and fn.value.func.id == "super"
+                        and self.classes):
+                    # super().run() names no target and yet has exactly one: the next class
+                    # after this one in the interpreter's own order. It used to land as
+                    # UNTYPED, so `impact Base.run` reported no callers for a method every
+                    # subclass overrides and then calls - the one shape where the caller
+                    # cannot mention the callee by name.
+                    edge["super_of"] = self.classes[-1]
+                    a0 = fn.value.args[0] if fn.value.args else None
+                    if isinstance(a0, ast.Name):                 # super(Base, self).run()
+                        edge["super_from"] = a0.id
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
                 edges.append(edge)
@@ -479,6 +491,7 @@ def build(dirs=None, write=True):
             cache = _c.get("files", {}) if _c.get("_v") == _VERSION else {}   # discard the whole cache if codegraph's code changed (versioned namespace)
         except Exception: cache = {}
     nodes, calls, imports, unreadable = [], [], [], []
+    stamps = {}                                                  # path -> [mtime, size], the graph's own record of what it read
     mod_alias, mod_from, mod_root, mod_sub = {}, {}, {}, {}; newcache = {}
     for path, d, root in pairs:
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
@@ -486,7 +499,9 @@ def build(dirs=None, write=True):
         mid = f"{root}/{rel}" if multiroot else rel             # SINGLE flat tree: bare 'memory' (unchanged). Nested: 'sub/mod'. Multi-tree: 'root/...'
         nodes.append({"id": mid, "kind": "module", "name": base, "module": mid, "line": 0})
         try:
-            mt = os.path.getmtime(path)
+            _st = os.stat(path)
+            stamp = [_st.st_mtime, _st.st_size]        # SIZE as well as time: a restored file can
+                                                       # carry the timestamp it had before
         except OSError:
             # A DANGLING SYMLINK - a link left behind after a move, which every real repo
             # eventually has. os.walk lists it as a file and stat() then raises, which used to
@@ -494,8 +509,9 @@ def build(dirs=None, write=True):
             # to analyse a codebase; skip it and carry on.
             nodes.pop()                                          # drop the module node just added
             continue
+        stamps[path] = stamp
         c = cache.get(path)
-        if c and c.get("mtime") == mt:                          # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
+        if c and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
             sub = c.get("submodules", {})
         else:
@@ -506,7 +522,7 @@ def build(dirs=None, write=True):
                 nodes.pop()                                      # not a module we can describe
                 continue
         if not multiroot:
-            newcache[path] = {"mtime": mt, "defs": d, "calls": [dict(x) for x in e], "imports": im,
+            newcache[path] = {"stamp": stamp, "defs": d, "calls": [dict(x) for x in e], "imports": im,
                               "aliases": al, "fromimp": fi, "submodules": sub}
         nodes += d; calls += e; imports += im
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
@@ -586,6 +602,17 @@ def build(dirs=None, write=True):
             # Python's own order - C3, not depth-first - because those differ exactly where a
             # diamond makes the answer interesting.
             for b in _mro(ec, bases_of, mro_cache)[1:]:          # [0] is ec itself, handled above
+                if (b + "." + callee) in def_ids:
+                    dst = b + "." + callee; conf = "INHERITED"; break
+        if not dst and e.get("super_of"):
+            # The same C3 order used for INHERITED, entered one place further along: super()
+            # deliberately skips the class it is written in. An explicit super(Base, self)
+            # starts after Base instead, when Base is a class this graph can see.
+            chain = _mro(e["super_of"], bases_of, mro_cache)
+            start = cls_ids.get(srcmod, {}).get(e.get("super_from")) or e["super_of"]
+            try: i = chain.index(start)
+            except ValueError: i = 0
+            for b in chain[i + 1:]:
                 if (b + "." + callee) in def_ids:
                     dst = b + "." + callee; conf = "INHERITED"; break
         if (not dst and method and recv and not e.get("recv_local")
@@ -683,7 +710,7 @@ def build(dirs=None, write=True):
     # version's answers - every resolution fix invisible until somebody happened to edit a file.
     graph = {"version": _VERSION,
              "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
-             "sources": sorted(p for p, _, _ in pairs), "unreadable": sorted(unreadable)}
+             "sources": {p: stamps[p] for p in sorted(stamps)}, "unreadable": sorted(unreadable)}
     if write:
         for target, what in ((CACHE, "cache"), (OUT, "graph")):
             try:
@@ -798,6 +825,15 @@ def _selftest():
     ok21 = ({e["src"]: e.get("dst") for e in gn["calls"] if e["callee"] == "inner"}
             == {"n.outer": "n.outer.inner", "n.other": "n.other.inner"})
     shutil.rmtree(nd, ignore_errors=True)
+    # super().run() - the one call shape whose caller cannot mention the callee by name, and
+    # whose target is nevertheless exact: the next class in the interpreter's own order.
+    sd = tempfile.mkdtemp()
+    _w(os.path.join(sd, "s.py"),
+        "class Base:\n    def run(self):\n        return 1\n"
+        "class Kid(Base):\n    def run(self):\n        return super().run() + 1\n")
+    gs = build([sd], write=False)
+    ok22 = callers_of(gs, "s.Base.run") == ["s.Kid.run"]
+    shutil.rmtree(sd, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -820,8 +856,9 @@ def _selftest():
     print(f"  a half-qualified Base.__init__ means that one, for callers and for where: {ok19}")
     print(f"  RED-FIRST - name matching finds NO caller of __init__; nobody writes it: {ok20}")
     print(f"  SCOPES - two nested helpers both named inner stay two functions: {ok21}")
+    print(f"  super().run() is a real caller of the base method it reaches: {ok22}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 
@@ -851,23 +888,32 @@ def _is_stale(g):
     if g.get("version") != _VERSION:
         return True                            # a different codegraph built this; its answers
                                                # are that version's, not this one's
-    try: built = os.path.getmtime(OUT)
-    except OSError: return True
-    seen = set()
+    if not os.path.exists(OUT): return True
+    known = g.get("sources")
+    if not isinstance(known, dict): return True   # a graph from before stamps: rebuild once
+    seen = {}
     for d in g.get("dirs", [HOME]):
         for dp, dns, fns in os.walk(d):
             dns[:] = [x for x in dns if not _prune_dir(dp, x)]
             for fn in fns:
                 if not fn.endswith(".py"): continue
                 full = os.path.join(dp, fn)
-                seen.add(full)
                 try:
-                    if os.path.getmtime(full) > built: return True
+                    st = os.stat(full)
                 except OSError:
-                    return True
-    known = g.get("sources")
-    if known is None: return True          # a graph from before this was recorded: rebuild once
-    return seen != set(known)
+                    # A DANGLING SYMLINK, which every long-lived repo has one of. This used to
+                    # return True - "something changed" - so a single broken link meant every
+                    # query rebuilt the whole graph, for ever, in silence. The build already
+                    # skips these; the freshness check has to skip the same ones or the two
+                    # disagree about what the tree even contains.
+                    continue
+                seen[full] = [st.st_mtime, st.st_size]
+    # An exact comparison, not "is anything newer than the graph". A file restored from a
+    # backup, a checkout, cp -p, rsync -t or a container layer keeps the timestamp it had, so
+    # it lands OLDER than the graph while holding different code - and the old test called that
+    # fresh. The graph then answered about functions that no longer exist and denied ones that
+    # do, with a success code.
+    return seen != {k: list(v) for k, v in known.items()}
 
 
 def _jwrite(obj, path):
@@ -1143,6 +1189,8 @@ def path(g, src, dst, max_hops=None):
         if e.get("dst"): fwd.setdefault(e["src"], []).append(e["dst"])
     goals = set(_one(g, dst) or [dst])
     for s in (_one(g, src) or [src]):
+        if s in goals: return [s]            # the path from a function to itself is that
+                                             # function. "(no path)" reads as "unconnected".
         q = collections.deque([[s]]); seen = {s}
         while q:
             p = q.popleft()
