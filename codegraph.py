@@ -158,6 +158,7 @@ def _defs_and_calls(path, mod):
         raise Unparseable(f"{os.path.relpath(path)}: {ex}") from ex
     defs, edges, imports = [], [], []
     aliases, fromimp = {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
+    submodules = {}                                             # name -> the module id it MIGHT be, confirmed in build()
 
     class V(ast.NodeVisitor):
         def __init__(self):
@@ -175,7 +176,13 @@ def _defs_and_calls(path, mod):
             for a in node.names:
                 top = a.name.split(".")[0]
                 imports.append({"src": mod, "callee": top, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
-                aliases[a.asname or top] = top                  # `import memory` / `import x as y` -> the receiver name maps to a module
+                # `import pkg.mod as m` binds m to pkg/mod - NOT to pkg. Mapping it to the top
+                # level meant m.func() looked for func in the package's __init__ and missed the
+                # submodule entirely, which is how most package code is written.
+                aliases[a.asname] = a.name.replace(".", "/") if a.asname else None
+                if not a.asname:
+                    aliases[top] = top                          # `import memory` -> the name binds to the top module
+                aliases.pop(None, None)
 
         def visit_ImportFrom(self, node):
             ml = len(self.owner) == 1
@@ -209,6 +216,10 @@ def _defs_and_calls(path, mod):
                 imports.append({"src": mod, "callee": top, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
                 for a in node.names:
                     fromimp[a.asname or a.name] = top           # `from memory import recall` -> bare recall() resolves into module memory
+                    # ...but the name might be a SUBMODULE rather than a function, and
+                    # `from pkg import mod` then mod.func() is ordinary package code. Recorded
+                    # as a candidate; build() keeps it only if that module really exists.
+                    submodules[a.asname or a.name] = f"{node.module.replace('.', '/')}/{a.name}"
 
         def visit_ClassDef(self, node):
             self._decorators(node)
@@ -294,7 +305,7 @@ def _defs_and_calls(path, mod):
         def visit_Call(self, node):
             fn = node.func
             recv = None; method = False
-            recv_root = None
+            recv_root = recv_path = None
             if isinstance(fn, ast.Name): callee = fn.id                          # a BARE call foo() - may be local/imported
             elif isinstance(fn, ast.Attribute):
                 callee = fn.attr; method = True                                  # a METHOD call X.attr() - only resolves via a known module or self, else external
@@ -302,6 +313,14 @@ def _defs_and_calls(path, mod):
                 root = fn.value                                  # and the ROOT of a dotted chain:
                 while isinstance(root, ast.Attribute): root = root.value   # the `os` in os.path.join()
                 recv_root = root.id if isinstance(root, ast.Name) else None
+                parts, cur = [], fn.value                        # and the WHOLE chain, so that
+                while isinstance(cur, ast.Attribute):            # pkg.mod.func() can find pkg/mod
+                    parts.append(cur.attr); cur = cur.value
+                if isinstance(cur, ast.Name):
+                    parts.append(cur.id)
+                    recv_path = "/".join(reversed(parts))
+                else:
+                    recv_path = None
             else: callee = None
             if callee:                                          # attribute this call to its NEAREST enclosing owner (a def, or the module if top-level)
                 # The module is carried, not re-derived. It used to be recovered by splitting
@@ -311,6 +330,7 @@ def _defs_and_calls(path, mod):
                 # and `sites` pointed at "my.py", a file that does not exist.
                 edge = {"src": self.owner[-1], "mod": mod, "callee": callee, "recv": recv, "method": method,
                         "recv_root": recv_root if isinstance(fn, ast.Attribute) else None,
+                        "recv_path": recv_path,
                         # a receiver bound in any enclosing scope is NOT the imported module
                         # or the class of that name - it is whatever the local name holds
                         "recv_local": bool(recv) and any(recv in v or recv in d
@@ -344,7 +364,7 @@ def _defs_and_calls(path, mod):
     for e in seen.values():
         e["lines"] = sorted(set(e["lines"]))
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
-    return defs, list(seen.values()), imports, aliases, fromimp
+    return defs, list(seen.values()), imports, aliases, fromimp, submodules
 
 
 def _root_labels(dirs):
@@ -435,7 +455,7 @@ def build(dirs=None, write=True):
             cache = _c.get("files", {}) if _c.get("_v") == _VERSION else {}   # discard the whole cache if codegraph's code changed (versioned namespace)
         except Exception: cache = {}
     nodes, calls, imports, unreadable = [], [], [], []
-    mod_alias, mod_from, mod_root = {}, {}, {}; newcache = {}
+    mod_alias, mod_from, mod_root, mod_sub = {}, {}, {}, {}; newcache = {}
     for path, d, root in pairs:
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
         base = os.path.basename(rel)
@@ -453,17 +473,19 @@ def build(dirs=None, write=True):
         c = cache.get(path)
         if c and c.get("mtime") == mt:                          # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             d, e, im, al, fi = c["defs"], copy.deepcopy(c["calls"]), c["imports"], c["aliases"], c["fromimp"]
+            sub = c.get("submodules", {})
         else:
             try:
-                d, e, im, al, fi = _defs_and_calls(path, mid)
+                d, e, im, al, fi, sub = _defs_and_calls(path, mid)
             except Unparseable as ex:
                 unreadable.append(str(ex))
                 nodes.pop()                                      # not a module we can describe
                 continue
         if not multiroot:
-            newcache[path] = {"mtime": mt, "defs": d, "calls": [dict(x) for x in e], "imports": im, "aliases": al, "fromimp": fi}
+            newcache[path] = {"mtime": mt, "defs": d, "calls": [dict(x) for x in e], "imports": im,
+                              "aliases": al, "fromimp": fi, "submodules": sub}
         nodes += d; calls += e; imports += im
-        mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root
+        mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
     if multiroot:                                              # remap import aliases to the SAME-ROOT module id, so within-tree imports resolve to the right tree
         allmods = {n["id"] for n in nodes if n["kind"] == "module"}   # the ids known at this point
         qual = lambda r, b: (f"{r}/{b}" if f"{r}/{b}" in allmods else b)
@@ -475,6 +497,22 @@ def build(dirs=None, write=True):
             mod_alias[mid] = {k: qual(r, v) for k, v in mod_alias[mid].items()}
             mod_from[mid] = {k: qual(r, v) for k, v in mod_from[mid].items()}
     allmods = {n["id"] for n in nodes if n["kind"] == "module"}
+    # A package is a directory, and its module id is `pkg/__init__` - so an import that names
+    # `pkg` has to be pointed at the file that actually holds its code. Without this,
+    # `from pkg import helper` resolved to nothing at all, because there is no module `pkg`.
+    def _real_module(name):
+        if name in allmods: return name
+        return f"{name}/__init__" if f"{name}/__init__" in allmods else name
+
+    for table in (mod_alias, mod_from):
+        for mid in table:
+            table[mid] = {k: _real_module(v) for k, v in table[mid].items()}
+    # `from pkg import mod` where pkg/mod is a real module: the name is a MODULE alias, so
+    # mod.func() resolves. Confirmed here, where the whole module list is finally known.
+    for mid, cand in mod_sub.items():
+        for name, target in cand.items():
+            if target in allmods:
+                mod_alias.setdefault(mid, {}).setdefault(name, target)
     by_name = defaultdict(list); by_modname = {}; def_ids = set()
     cls_ids = defaultdict(dict)                                  # module -> {ClassName: class id}
     for n in nodes:
@@ -519,6 +557,9 @@ def build(dirs=None, write=True):
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
             dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
+        if (not dst and method and not e.get("recv_local")
+                and e.get("recv_path") in allmods):             # pkg.mod.func() where pkg/mod is ours
+            dst = by_modname.get((e["recv_path"], callee)); conf = "QUALIFIED" if dst else conf
         if not dst and not method and e.get("callee_local"):
             conf = "UNTYPED"                                   # a local name holding something
         if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`

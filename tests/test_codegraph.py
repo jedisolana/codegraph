@@ -1793,5 +1793,61 @@ class MethodLookupFollowsPython(Sandbox):
         self.assertIn(e.get("dst"), (None, "bad.X.m"))   # partial or nothing, never invented
 
 
+class ImportingASubmodule(Sandbox):
+    """Three ordinary ways to reach into a package, and none of them resolved. An alias was
+    mapped to the top-level package name, so `import pkg.mod as m` then m.func() looked for
+    func in the package's __init__ and missed the submodule entirely - which is how most
+    package code is written."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "pkg"))
+        self.write("pkg/__init__.py", "def func():\n    return 'the package init'\n")
+        self.write("pkg/mod.py", "def func():\n    return 'the submodule'\n")
+
+    def edge(self, body, src):
+        self.write("app.py", body)
+        hits = [e for e in self.graph(write=False)["calls"]
+                if e["src"] == src and e["callee"] == "func"]
+        self.assertEqual(len(hits), 1, f"expected one edge, got {hits}")
+        return hits[0]
+
+    def test_import_submodule_as_alias(self):
+        e = self.edge("import pkg.mod as m\ndef f():\n    return m.func()\n", "app.f")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("pkg/mod.func", "QUALIFIED"))
+
+    def test_from_package_import_submodule(self):
+        e = self.edge("from pkg import mod\ndef f():\n    return mod.func()\n", "app.f")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("pkg/mod.func", "QUALIFIED"))
+
+    def test_a_whole_dotted_receiver(self):
+        e = self.edge("import pkg.mod\ndef f():\n    return pkg.mod.func()\n", "app.f")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("pkg/mod.func", "QUALIFIED"))
+
+    def test_the_package_init_is_still_reachable(self):
+        """`from pkg import func` names a FUNCTION, not a module - it must not be confused
+        with the submodule case."""
+        e = self.edge("from pkg import func\ndef f():\n    return func()\n", "app.f")
+        self.assertEqual(e.get("dst"), "pkg/__init__.func")
+
+    def test_an_alias_to_a_library_is_still_external(self):
+        """`import os.path as p` must not invent a module in this tree."""
+        self.write("app.py", "import os.path as p\ndef f():\n    return p.join('a')\n")
+        e = next(x for x in self.graph(write=False)["calls"] if x["callee"] == "join")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "EXTERNAL")
+
+    def test_a_shadowed_submodule_alias_is_still_refused(self):
+        """The guard from the last two rounds has to hold on this path too."""
+        e = self.edge("from pkg import mod\ndef f(mod):\n    return mod.func()\n", "app.f")
+        self.assertIsNone(e.get("dst"), "a parameter resolved to the submodule it shadows")
+
+    def test_it_lifts_resolution_on_a_real_codebase(self):
+        """The reason this matters: `from package import module` is how packages are used.
+        On this tool's own tests, that pattern is most of the imports."""
+        g = codegraph.build([HERE], write=False)
+        self.assertGreater(codegraph.stats(g)["resolution_rate"], 0.4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
