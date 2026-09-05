@@ -670,7 +670,14 @@ def load(fresh=True):
     except (json.JSONDecodeError, ValueError):
         sys.exit(f"graph {OUT} is corrupt (interrupted build?) - run: codegraph build <path> to rebuild")
     if fresh and _is_stale(g):
-        g = build(g.get("dirs"))
+        try:
+            g = build(g.get("dirs"))
+        except BadPath as e:
+            # The tree this graph describes has been moved or deleted. Rebuilding is the right
+            # instinct and it cannot succeed - but a traceback is not an answer, and the graph
+            # on disk is now a description of somewhere that is not there. Say which.
+            sys.exit(f"the tree this graph was built from is gone: {e}\n"
+                     f"  build somewhere that exists, or delete {OUT}")
     return g
 
 
@@ -1013,7 +1020,13 @@ def _main(argv=None):
         for bad in g.get("unreadable", []):
             print(f"skipped (could not parse) {bad}", file=sys.stderr)
         if not [n for n in g["nodes"] if n["kind"] == "module"]:
-            print(f"no .py files found under {', '.join(g['dirs'])}", file=sys.stderr)
+            # "no .py files found" directly contradicted the skip lines printed just above it
+            # when the files were there and simply would not parse. Two different problems,
+            # and only one of them is solved by pointing at a different directory.
+            bad = len(g.get("unreadable", []))
+            where_ = ", ".join(g["dirs"])
+            print(f"found {bad} .py file(s) under {where_}, none of which could be parsed"
+                  if bad else f"no .py files found under {where_}", file=sys.stderr)
             return 1
         print(json.dumps(stats(g), indent=2))
     elif a[0] == "callers":
@@ -1044,7 +1057,13 @@ def _main(argv=None):
         t, rc = _one_target(g, a[1])
         if t is None: return rc
         print("\n".join(f"{loc}  {c}" for loc, c in sites(g, t)) or "(none)")
-    elif a[0] == "path": p = path(load(), a[1], a[2]); print(" -> ".join(p) if p else "(no path)")
+    elif a[0] == "path":
+        g = load()
+        for end in (a[1], a[2]):                     # both endpoints, same rules as every verb
+            t, rc = _one_target(g, end)
+            if t is None: return rc
+        p = path(g, a[1], a[2])
+        print(" -> ".join(p) if p else "(no path)")
     elif a[0] == "deps":
         g = load()
         if not any(n["kind"] == "module" and n["id"] == a[1] for n in g["nodes"]):

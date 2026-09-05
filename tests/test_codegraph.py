@@ -1344,5 +1344,94 @@ class TheLibraryRefusesWhatTheCliRefuses(Sandbox):
         self.assertEqual(cli, {"nope": 1, "digest": 2, "only": 0})
 
 
+class EveryGraphStateHasAnAnswer(unittest.TestCase):
+    """A matrix: every verb against every state the graph can be in. Crossing them found a
+    traceback nobody would have guessed at from reading the code."""
+
+    def make(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def run_in(self, cwd, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=cwd, capture_output=True, text=True, timeout=180)
+
+    def with_source(self):
+        d = self.make()
+        with open(os.path.join(d, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def f():\n    return 1\n")
+        return d
+
+    def test_a_vanished_source_tree_is_a_sentence_not_a_traceback(self):
+        """Build against src/, delete src/, ask a question. Rebuilding is the right instinct
+        and it cannot succeed - but a traceback is not an answer."""
+        d = self.make()
+        src = os.path.join(d, "src")
+        os.makedirs(src)
+        with open(os.path.join(src, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def f():\n    return 1\n")
+        self.run_in(d, "build", "src")
+        shutil.rmtree(src)
+        r = self.run_in(d, "impact", "f")
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("the tree this graph was built from is gone", r.stderr)
+        self.assertIn("codegraph.json", r.stderr)          # and how to get out of it
+
+    def test_no_graph_at_all_says_how_to_make_one(self):
+        r = self.run_in(self.with_source(), "impact", "f")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("codegraph build", r.stdout + r.stderr)
+
+    def test_a_corrupt_graph_is_named_as_corrupt(self):
+        d = self.with_source()
+        self.run_in(d, "build", ".")
+        with open(os.path.join(d, "codegraph.json"), "w", encoding="utf-8") as f:
+            f.write('{"nodes": [')
+        r = self.run_in(d, "impact", "f")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("corrupt", r.stdout + r.stderr)
+
+    def test_no_verb_ever_crashes_whatever_the_state(self):
+        """The matrix itself, as a test: nothing may produce a traceback."""
+        states = []
+        d = self.with_source(); states.append(("no graph", d))
+        d = self.with_source(); self.run_in(d, "build", "."); states.append(("good", d))
+        d = self.with_source(); self.run_in(d, "build", ".")
+        with open(os.path.join(d, "codegraph.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        states.append(("empty object", d))
+        d = self.with_source(); self.run_in(d, "build", ".")
+        os.remove(os.path.join(d, "m.py")); states.append(("tree emptied", d))
+        for label, d in states:
+            for verb in ("stats", "cycles", "callers f", "impact f", "where f",
+                         "find f", "deps m", "path f f", "calls f"):
+                with self.subTest(state=label, verb=verb):
+                    r = self.run_in(d, *verb.split())
+                    self.assertNotIn("Traceback", r.stderr, f"{label} / {verb}")
+                    self.assertIn(r.returncode, (0, 1, 2), f"{label} / {verb}")
+
+
+class TheMessageMatchesTheSituation(Sandbox):
+    """"no .py files found" contradicted the skip lines printed directly above it."""
+
+    def test_files_that_exist_but_do_not_parse_are_not_reported_as_absent(self):
+        self.write("a.py", "def (((\n")
+        self.write("b.py", "print 'python two'\n")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("none of which could be parsed", r.stderr)
+        self.assertNotIn("no .py files found", r.stderr)
+
+    def test_a_directory_with_no_python_still_says_so(self):
+        self.write("readme.txt", "hello\n")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no .py files found", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
