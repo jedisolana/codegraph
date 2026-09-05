@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codegraph"
+version = "0.1.0"
+description = "Ask your Python codebase who calls what, and what breaks if you change it. One stdlib file, no dependencies."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["call-graph", "static-analysis", "refactoring", "blast-radius", "ast", "code-intelligence"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/jedisolana/codegraph"
+Repository = "https://github.com/jedisolana/codegraph"
+Issues = "https://github.com/jedisolana/codegraph/issues"
+
+[project.scripts]
+codegraph = "codegraph:_main"
+
+# One file on purpose. The whole point is that you can copy it into a repo and it works.
+[tool.setuptools]
+py-modules = ["codegraph"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# E701/E702: this file is written in a deliberately dense one-line style ("if x: return y"),
+# which keeps the AST visitor readable as a table of cases rather than a page of stubs. A
+# linter that fights the author on eighty-five lines is a linter that gets switched off.
+# E731/RUF005 are the same call: a named lambda and `a + [b]` are fine here.
+ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005"]

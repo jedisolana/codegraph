@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # No dependencies to install - it is the standard library and nothing else.
+      - name: lint
+        run: |
+          pip install ruff
+          ruff check .
+      - name: the built-in selftest, with leaked file handles made fatal
+        run: python -W error::ResourceWarning codegraph.py --selftest
+      - name: the test suite
+        run: python -m unittest discover -s tests -v
+      - name: it can read its own source
+        run: |
+          python codegraph.py build .
+          python codegraph.py impact build
