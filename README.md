@@ -248,7 +248,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 328 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 334 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -294,7 +294,8 @@ nothing but the standard library,
 a skip message on a machine whose code and temp directory are on different drives,
 a rename that Windows refuses while another process is reading the file,
 a second build that has to reach the same graph as the first,
-and a hand-written tree walk checked node type by node type against the standard one
+a hand-written tree walk checked node type by node type against the standard one,
+and every way Python has of binding a name, one at a time
 — and codegraph reading its own source.
 
 ## Licence

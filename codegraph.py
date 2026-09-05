@@ -70,6 +70,17 @@ except Exception:
 # getattr because these node types arrive in 3.10 and this file runs on 3.9.
 _MATCH_BINDS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasattr(ast, n))
 _MATCH_MAP = getattr(ast, "MatchMapping", ())
+# Exact node type -> what it binds. Everything absent from this table binds nothing, which is
+# almost every node in a file, and the point is that finding that out costs one dict lookup.
+_BINDS = {ast.Name: "name", ast.Import: "import", ast.ImportFrom: "import",
+          ast.ExceptHandler: "except", ast.Global: "global", ast.Nonlocal: "global",
+          ast.FunctionDef: "def", ast.AsyncFunctionDef: "def", ast.ClassDef: "def",
+          ast.ListComp: "comp", ast.SetComp: "comp", ast.DictComp: "comp",
+          ast.GeneratorExp: "comp"}
+_BINDS.update({t: "match" for t in _MATCH_BINDS})
+if _MATCH_MAP:
+    _BINDS[_MATCH_MAP] = "matchmap"
+_STORES = frozenset({ast.Store, ast.Del})
 
 
 def _say(path):
@@ -107,10 +118,28 @@ def _bound_names(node):
             if arg is not None:
                 names.add(arg.arg)
     stack = list(node.body)
-    comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
     while stack:
         n = stack.pop()
-        if isinstance(n, comps):
+        # One dict lookup on the exact type, instead of a chain of isinstance calls that the
+        # ninety-five per cent of nodes which bind nothing all had to walk to the bottom of.
+        # This ran fifty-five million isinstance calls over a large tree, and was the single
+        # most expensive thing in a build.
+        kind = _BINDS.get(n.__class__)
+        if kind is None:
+            for f in n._fields:
+                v = getattr(n, f, None)
+                if type(v) is list:
+                    stack.extend(x for x in v if isinstance(x, ast.AST))
+                elif isinstance(v, ast.AST):
+                    stack.append(v)
+            continue
+        if kind == "name":
+            # A Name's only child is its ctx, a shared singleton with nothing in it. Names are
+            # the commonest node there is, so not pushing that is worth saying out loud.
+            if n.ctx.__class__ in _STORES:
+                names.add(n.id)
+            continue
+        if kind == "comp":
             # A comprehension's loop variable is its OWN scope in Python 3 and does not leak
             # out. Collecting it here made `[r for config in rows]` shadow the imported module
             # `config` for the whole enclosing scope - and since the module gained a pre-scan of
@@ -121,25 +150,23 @@ def _bound_names(node):
             stack.extend(c for c in ast.iter_child_nodes(n)
                          if not isinstance(c, ast.comprehension))
             continue
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if kind == "def":
             defined.add(n.name)                   # the NAME binds here; the body is its own scope
             continue
-        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
-            names.add(n.id)
-        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+        if kind == "import":
             # An import binds the name TO THE MODULE, which is the one binding resolution wants
             # to follow rather than be blocked by. Counting it as a shadow meant the deliberate
             # cycle-break - `def f(): import memory; return memory.recall()` - lost every call
             # edge through it, in a tool that recognises that idiom well enough to keep it out
             # of the cycle report.
             pass
-        elif isinstance(n, ast.ExceptHandler) and n.name:
+        elif kind == "except" and n.name:
             names.add(n.name)
-        elif _MATCH_BINDS and isinstance(n, _MATCH_BINDS) and n.name:
+        elif kind == "match" and n.name:
             names.add(n.name)                     # case [config] / case str() as config
-        elif _MATCH_MAP and isinstance(n, _MATCH_MAP) and n.rest:
+        elif kind == "matchmap" and n.rest:
             names.add(n.rest)                     # case {**rest}
-        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+        elif kind == "global":
             freed.update(n.names)                 # declared elsewhere; collected and removed last,
         # `ast.iter_child_nodes` is a generator wrapping `iter_fields`, which is another
         # generator with a try/except per field. Five million nodes pay for both. The fields

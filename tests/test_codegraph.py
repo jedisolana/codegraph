@@ -3940,3 +3940,72 @@ class TheHandWrittenWalkMatchesTheStandardOne(unittest.TestCase):
         node, = [n for n in g["nodes"] if n["id"] == "m.pick"]
         self.assertEqual(node["line"], 3, "the live definition is the last one")
         self.assertEqual(node.get("shadows"), [1])
+
+
+class EveryWayPythonBindsAName(unittest.TestCase):
+    """The pre-scan decides what shadows an imported module, and it now dispatches on the exact
+    node type through a table. A table can lose an entry silently - and the failure would be a
+    name that stops shadowing, which does not crash, it just answers wrongly. So: every binding
+    form Python has, in one function, checked one by one."""
+
+    FORMS = (
+        ("parameter",            "def f(bound):\n    pass\n"),
+        ("keyword-only",         "def f(*, bound):\n    pass\n"),
+        ("positional-only",      "def f(bound, /):\n    pass\n"),
+        ("star-args",            "def f(*bound):\n    pass\n"),
+        ("star-kwargs",          "def f(**bound):\n    pass\n"),
+        ("assignment",           "def f():\n    bound = 1\n"),
+        ("annotated assignment", "def f():\n    bound: int = 1\n"),
+        ("augmented assignment", "def f():\n    bound += 1\n"),
+        ("tuple unpacking",      "def f():\n    (bound, x) = (1, 2)\n"),
+        ("starred unpacking",    "def f():\n    a, *bound = [1, 2]\n"),
+        ("for target",           "def f():\n    for bound in []:\n        pass\n"),
+        ("async for target",     "async def f():\n    async for bound in []:\n        pass\n"),
+        ("with target",          "def f():\n    with open('x') as bound:\n        pass\n"),
+        ("except target",        "def f():\n    try:\n        pass\n"
+                                 "    except ValueError as bound:\n        pass\n"),
+        ("walrus",               "def f():\n    if (bound := 1):\n        pass\n"),
+        ("del",                  "def f():\n    del bound\n"),
+        # `import` is the deliberate exception - see the test below it.
+        ("nested def",           "def f():\n    def bound():\n        pass\n"),
+        ("nested class",         "def f():\n    class bound:\n        pass\n"),
+    )
+    MATCH_FORMS = (
+        ("match capture",        "def f(v):\n    match v:\n        case [bound]:\n            pass\n"),
+        ("match as",             "def f(v):\n    match v:\n        case str() as bound:\n            pass\n"),
+        ("match rest",           "def f(v):\n    match v:\n        case {**bound}:\n            pass\n"),
+    )
+
+    def bindings(self, source):
+        fn = ast.parse(source).body[0]
+        values, defs = codegraph._bound_names(fn)
+        return values | defs
+
+    def test_every_form_binds(self):
+        forms = list(self.FORMS)
+        if sys.version_info >= (3, 10):
+            forms += list(self.MATCH_FORMS)
+        for label, source in forms:
+            with self.subTest(label):
+                self.assertIn("bound", self.bindings(source), f"{label} stopped binding")
+        self.assertGreaterEqual(len(forms), 18)
+
+    def test_an_import_binds_the_name_but_does_not_shadow_the_module(self):
+        """The one deliberate exception: `import bound` inside a function binds `bound` to the
+        MODULE, which is the binding resolution follows rather than one it must refuse."""
+        values, _defs = codegraph._bound_names(ast.parse("def f():\n    import bound\n").body[0])
+        self.assertNotIn("bound", values)
+
+    def test_a_name_only_read_binds_nothing(self):
+        self.assertNotIn("bound", self.bindings("def f():\n    return bound + bound.attr\n"))
+
+    def test_a_comprehension_variable_does_not_leak(self):
+        self.assertNotIn("bound", self.bindings("def f(rows):\n    return [r for bound in rows]\n"))
+
+    def test_a_walrus_inside_a_comprehension_does_leak(self):
+        """PEP 572 says it binds in the CONTAINING scope, which is why a comprehension cannot
+        simply be skipped whole."""
+        self.assertIn("bound", self.bindings("def f(rows):\n    return [(bound := r) for r in rows]\n"))
+
+    def test_global_takes_a_name_back_out(self):
+        self.assertNotIn("bound", self.bindings("def f():\n    global bound\n    bound = 1\n"))
