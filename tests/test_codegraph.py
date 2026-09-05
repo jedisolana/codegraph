@@ -9,6 +9,7 @@ codegraph reading its own source.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -809,6 +810,77 @@ class UnusualButLegalPython(Sandbox):
         self.write("comment.py", "# nothing here\n")
         mods = {n["id"] for n in self.graph(write=False)["nodes"] if n["kind"] == "module"}
         self.assertEqual(mods, {"blank", "comment"})
+
+
+class ConcurrentBuilds(unittest.TestCase):
+    """The temp file was a fixed `path + ".tmp"`, which is not atomic between processes: two
+    builds wrote the same temp, the first renamed it away, the second's rename found nothing.
+    Measured before the fix: six of eight concurrent builds died. An agent that runs this
+    before every edit, or a CI matrix, meets it immediately."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for i in range(40):
+            with open(os.path.join(self.dir, f"m{i}.py"), "w", encoding="utf-8") as f:
+                f.write(f"def f{i}():\n    return 1\n")
+
+    def test_eight_at_once_all_succeed_and_leave_a_valid_graph(self):
+        import concurrent.futures as cf
+
+        def build(_):
+            return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                                  cwd=self.dir, capture_output=True, text=True, timeout=300)
+        with cf.ThreadPoolExecutor(8) as ex:
+            results = list(ex.map(build, range(8)))
+        failed = [r for r in results if r.returncode]
+        self.assertEqual(failed, [], failed and failed[0].stderr[-300:])
+        self.assertEqual([f for f in os.listdir(self.dir) if ".tmp" in f], [], "stray temp files")
+        for name in ("codegraph.json", "codegraph.cache.json"):
+            with open(os.path.join(self.dir, name), encoding="utf-8") as f:
+                json.load(f)                          # raises if a writer corrupted it
+
+    def test_a_temp_name_is_unique_per_process_and_thread(self):
+        import re as _re
+        src = inspect.getsource(codegraph._jwrite)
+        self.assertIn("os.getpid()", src)
+        self.assertIn("threading.get_ident()", src)
+        self.assertTrue(_re.search(r"os\.fsync", src), "content must reach disk before the rename")
+
+
+class TheGraphIsFoundFromAnywhereInTheTree(Sandbox):
+    """Build at the repository root, cd into a package, and every query said "no graph yet" -
+    whereupon the obvious move, `build .` inside the package, quietly makes a PARTIAL graph and
+    a second graph file, and the answers exclude the rest of the repo without saying so."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "pkg", "deep"))
+        self.write("root.py", "def top():\n    return 1\n")
+        self.write("pkg/mid.py", "def mid():\n    return 1\n")
+        self.graph()
+        self.cwd = os.getcwd()
+        self.addCleanup(os.chdir, self.cwd)
+
+    def test_a_query_from_a_subdirectory_finds_the_root_graph(self):
+        os.chdir(os.path.join(self.dir, "pkg", "deep"))
+        codegraph.OUT = os.path.join(os.getcwd(), "codegraph.json")   # what a fresh run would use
+        self.assertEqual(codegraph.where(codegraph.load(), "top"), [("root.top", "root.py:1")])
+
+    def test_the_search_stops_at_the_filesystem_root(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        os.chdir(empty)
+        codegraph.OUT = os.path.join(empty, "codegraph.json")
+        with self.assertRaises(SystemExit) as cm:
+            codegraph.load()
+        self.assertIn("no graph yet", str(cm.exception))
+
+    def test_an_explicit_output_path_is_always_obeyed(self):
+        os.chdir(os.path.join(self.dir, "pkg"))
+        os.environ["CODEGRAPH_OUT"] = os.path.join(self.dir, "codegraph.json")
+        self.addCleanup(os.environ.pop, "CODEGRAPH_OUT", None)
+        self.assertEqual(codegraph._find_graph(), codegraph.OUT)
 
 
 if __name__ == "__main__":

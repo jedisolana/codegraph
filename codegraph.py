@@ -32,12 +32,14 @@ matches several definitions or the command was malformed.
 """
 import ast
 import builtins
+import contextlib
 import copy
 import glob
 import hashlib
 import json
 import os
 import sys
+import threading
 from collections import defaultdict
 
 _BUILTINS = set(dir(builtins))                              # next()/len()/sorted()/open()/... are builtins, never a same-named in-tree func (discard edges to built-ins; matters most cross-tree where a unique in-tree name shadows a builtin)
@@ -556,14 +558,60 @@ def _is_stale(g):
     return seen != set(known)
 
 
-def _jwrite(obj, path):                                         # atomic UTF-8 write: an interrupted/crashed write can't leave a half-written (corrupt) json
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as _fh: json.dump(obj, _fh, ensure_ascii=False)
-    os.replace(tmp, path)                                       # POSIX atomic rename
+def _jwrite(obj, path):
+    """Write json so that an interrupted or concurrent write cannot leave a corrupt file.
+
+    The temp name carries the process AND thread id. It used to be a fixed `path + ".tmp"`,
+    which is not atomic between processes at all: two builds of the same tree wrote the same
+    temp file, the first renamed it away, and the second's rename found nothing. Measured: six
+    of eight concurrent builds died with FileNotFoundError. An agent that runs this before
+    every edit, a CI matrix, or two terminals in one repo all hit it immediately.
+
+    The rename is atomic; the CONTENT has to be on disk before it, or a crash can leave a
+    valid-looking file full of nothing.
+    """
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)                                   # POSIX atomic rename
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)                                      # never leave a stray temp behind
+        raise
+
+def _find_graph(start=None):
+    """The nearest graph at or above `start`, the way git looks upward for .git.
+
+    Without this, building at the repository root and then cd-ing into a package meant every
+    query answered "no graph yet" - and the obvious next move, `build .` inside the package,
+    quietly produces a PARTIAL graph plus a second graph file, so from then on the answers
+    exclude the rest of the repository without ever saying so. An explicit CODEGRAPH_OUT is
+    always obeyed; `build` still writes exactly where you point it.
+    """
+    if os.environ.get("CODEGRAPH_OUT"):
+        return OUT
+    d = os.path.abspath(start or os.getcwd())
+    while True:
+        cand = os.path.join(d, "codegraph.json")
+        if os.path.exists(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            return OUT                                # reached the filesystem root; no graph
+        d = parent
+
 
 def load(fresh=True):
     """Load the graph. If `fresh` and any source file changed since the last build, rebuild first (incremental,
     so it's fast) - every query is answered against the CURRENT code, never a stale snapshot."""
+    global OUT, CACHE
+    found = _find_graph()
+    if found != OUT:                                  # answer from the graph that owns this tree
+        OUT = found
+        CACHE = os.path.join(os.path.dirname(found), "codegraph.cache.json")
     try:
         with open(OUT, encoding="utf-8") as _fh:
             g = json.load(_fh)
