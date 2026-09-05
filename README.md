@@ -86,7 +86,7 @@ which is how a metric ends up meaning nothing.
 
 ```
 codegraph build [dir...]     build the graph (default: here); writes codegraph.json
-codegraph impact <name>      callers + call sites + blast radius — the pre-edit view
+codegraph impact <name>      callers + call sites + blast radius, and what it could not resolve
 codegraph callers <name>     who calls this
 codegraph calls <name>       what this calls
 codegraph blast <name>       transitive callers — what could break
@@ -197,7 +197,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 140 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 146 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -206,7 +206,8 @@ from one place, eight builds racing each other, files with a
 byte-order mark, a symlink pointing back into the tree, a graph built
 by an older copy of the tool, two functions that share a name, a misspelled
 name that must not answer "nothing depends on this",
-and every verb crossed with every state the graph can be in — and codegraph reading its own source.
+and every verb crossed with every state the graph can be in,
+plus the graph's own invariants checked against real codebases — and codegraph reading its own source.
 
 ## Licence
 

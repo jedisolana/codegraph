@@ -747,6 +747,8 @@ def _describe(g, name):
     ids = _targets(g, name)
     if ids:
         return "defined", ids
+    if any(n["kind"] == "module" and n["id"] == name for n in g["nodes"]):
+        return "module", []                      # in the graph, just not a function or a class
     bare = name.split(".")[-1]
     if any(e["callee"] == bare for e in g["calls"]):
         return "called", []                      # called here, defined elsewhere (stdlib, a library)
@@ -925,8 +927,18 @@ def impact(g, name):
     its direct callers, every call SITE (file:line), and the transitive blast radius. This is the self-edit
     checklist: read these before touching `name`."""
     _one(g, name)                                    # refuse unknown and ambiguous names FIRST,
-    return {"callers": callers_of(g, name),          # before three empty lists look like an answer
-            "sites": sites(g, name), "blast": blast_radius(g, name)}
+                                                     # before three empty lists look like an answer
+    # Call sites that USE this name and could not be pinned to any definition. `impact start`
+    # reported no callers at all while Engine().start() sat in another file - honest about
+    # each edge, and false reassurance as an answer, which is the one thing this view must
+    # never give. They are not callers; they are places the question is still open.
+    bare = name.split(".")[-1]
+    mod_of = {n["id"]: n["module"] for n in g["nodes"]}
+    unresolved = sorted({(f"{e.get('mod') or mod_of.get(e['src'], '?')}.py:{ln}", e["src"])
+                         for e in g["calls"] if e["callee"] == bare and not e.get("dst")
+                         for ln in (e.get("lines") or [e["line"]])})
+    return {"callers": callers_of(g, name), "sites": sites(g, name),
+            "blast": blast_radius(g, name), "unresolved": unresolved}
 
 
 def stats(g):
@@ -982,6 +994,11 @@ def _one_target(g, name):
     Worse than overstating: you go and "fix" a caller of the other function.
     """
     kind, _ = _describe(g, name)
+    if kind == "module":
+        # It IS in the graph - saying "never heard of it" was simply false, and unhelpful in
+        # the same breath, since the command they wanted is one word away.
+        print(f"{name!r} is a module, not a function - try: codegraph deps {name}", file=sys.stderr)
+        return None, 1
     if kind == "unknown":
         print(f"nothing named {name!r} is defined or called in this graph", file=sys.stderr)
         return None, 1
@@ -1086,6 +1103,12 @@ def _main(argv=None):
         print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
         n = len(im["blast"])
         print(f"blast:   {n} function{'' if n == 1 else 's'} could be affected")
+        if im["unresolved"]:
+            u = im["unresolved"]
+            one = len(u) == 1
+            print(f"unsure:  {len(u)} call site{'' if one else 's'} {'uses' if one else 'use'} "
+                  f"this name and could not be resolved - {', '.join(loc for loc, _ in u[:4])}"
+                  + (" ..." if len(u) > 4 else ""))
     elif a[0] == "stats": print(json.dumps(stats(load()), indent=2))
     else:
         print(__doc__)

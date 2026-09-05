@@ -1433,5 +1433,97 @@ class TheMessageMatchesTheSituation(Sandbox):
         self.assertIn("no .py files found", r.stderr)
 
 
+class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
+    """Properties that must hold of ANY graph this tool produces, checked against real
+    codebases rather than fixtures. Nothing had ever asserted them."""
+
+    LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "LOCAL", "RESOLVED", "INHERITED",
+                        "CLASS", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
+    UNRESOLVED = frozenset({"AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
+
+    def assert_sound(self, g):
+        ids = {n["id"] for n in g["nodes"]}
+        mods = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
+        self.assertEqual(len(ids), len(g["nodes"]), "duplicate node ids")
+        for n in g["nodes"]:
+            self.assertIn(n["module"], mods, n)
+            if n["kind"] != "module":
+                self.assertTrue(n["id"].startswith(n["module"] + "."), n)
+            self.assertGreaterEqual(n.get("line", 0), 0, n)
+        for e in g["calls"]:
+            self.assertIn(e["src"], ids, e)
+            self.assertIn(e["confidence"], self.LABELS, e)
+            self.assertIn(e.get("mod"), mods, e)
+            self.assertTrue(e.get("lines"), e)
+            if e.get("dst"):
+                self.assertIn(e["dst"], ids, e)
+                self.assertNotIn(e["confidence"], self.UNRESOLVED, "resolved but labelled unresolved")
+            else:
+                self.assertIn(e["confidence"], self.UNRESOLVED, "unresolved but labelled resolved")
+        for e in g["imports"]:
+            self.assertIn(e["src"], mods, e)
+
+    def test_its_own_graph_is_sound(self):
+        self.assert_sound(codegraph.build([HERE], write=False))
+
+    def test_a_tree_of_awkward_shapes_is_sound(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, "pkg", "deep"))
+        files = {
+            "pkg/__init__.py": "",
+            "pkg/thing.py": "def load():\n    return 1\n",
+            "pkg/user.py": "from . import thing\nfrom .thing import load\n"
+                           "def a():\n    return thing.load() + load()\n",
+            "pkg/deep/down.py": "from .. import thing\ndef c():\n    return thing.load()\n",
+            "top.py": "class P:\n    def m(self):\n        return 1\n"
+                      "class C(P):\n    def u(self):\n        return self.m()\n"
+                      "def deco(f):\n    return f\n@deco\ndef d():\n    return P().m()\n",
+            "dup.py": "def same():\n    return 1\ndef same():\n    return 2\n",
+        }
+        for rel, body in files.items():
+            with open(os.path.join(d, *rel.split("/")), "w", encoding="utf-8") as f:
+                f.write(body)
+        self.assert_sound(codegraph.build([d], write=False))
+
+
+class ImpactSaysWhatItCouldNotResolve(Sandbox):
+    """`impact start` reported no callers while Engine().start() sat in another file. Each edge
+    was labelled honestly; the ANSWER was false reassurance, which is the one thing a pre-edit
+    view must never give."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.dir, "pkg"))
+        self.write("pkg/lib.py", "class Engine:\n    def start(self):\n        return 1\n"
+                                 "def helper():\n    return 1\n")
+        self.write("main.py", "from pkg.lib import Engine\ndef go():\n"
+                              "    return Engine().start()\n")
+        self.g = self.graph()                            # written, so the CLI tests can read it
+
+    def test_unresolved_uses_of_the_name_are_reported(self):
+        im = codegraph.impact(self.g, "pkg/lib.Engine.start")
+        self.assertEqual(im["callers"], [])
+        self.assertEqual([loc for loc, _ in im["unresolved"]], ["main.py:3"])
+
+    def test_a_function_nothing_touches_reports_nothing_extra(self):
+        self.assertEqual(codegraph.impact(self.g, "pkg/lib.helper")["unresolved"], [])
+
+    def test_the_cli_says_it_is_unsure(self):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "impact", "start"],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        self.assertIn("unsure:", r.stdout)
+        self.assertIn("1 call site uses this name", r.stdout)
+        self.assertIn("main.py:3", r.stdout)
+
+    def test_naming_a_module_points_at_the_right_command(self):
+        """It IS in the graph - "never heard of it" was simply false."""
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "impact", "pkg/lib"],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is a module, not a function", r.stderr)
+        self.assertIn("codegraph deps pkg/lib", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
