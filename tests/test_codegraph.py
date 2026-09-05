@@ -68,9 +68,13 @@ class ConfidenceIsHonest(Sandbox):
     """The tool's whole claim is that it says when it does not know. These are that claim."""
 
     def test_an_ambiguous_name_is_labelled_not_guessed(self):
+        # Two modules starred in, both defining `go`. This is how a bare name reaches two
+        # definitions in real Python - without the imports it is a NameError, and a fixture
+        # that leaves them out is testing a guess rather than the language.
         self.write("a.py", "def go():\n    return 1\n")
         self.write("b.py", "def go():\n    return 2\n")
-        self.write("c.py", "def run():\n    return go()\n")     # which go()? nobody can say
+        self.write("c.py", "from a import *\nfrom b import *\n"
+                           "def run():\n    return go()\n")     # which go()? nobody can say
         e = next(x for x in self.graph(write=False)["calls"] if x["src"] == "c.run")
         self.assertIsNone(e.get("dst"), "it picked one of two identical names")
         self.assertEqual(e["confidence"], "AMBIGUOUS")
@@ -139,9 +143,10 @@ class TheOnDiskContract(Sandbox):
     def test_a_cached_build_still_resolves_after_one_file_changes(self):
         """A mix of hits and misses - and the reused parse must not be mutated by resolution."""
         self.write("core.py", "def leaf():\n    return 1\n")
-        self.write("top.py", "def use():\n    return leaf()\n")
+        self.write("top.py", "from core import leaf\ndef use():\n    return leaf()\n")
         self.graph()
-        self.write("top.py", "def use():\n    return leaf()\ndef extra():\n    return leaf()\n")
+        self.write("top.py", "from core import leaf\n"
+                             "def use():\n    return leaf()\ndef extra():\n    return leaf()\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "core.leaf"), ["top.extra", "top.use"])
 
@@ -485,11 +490,13 @@ class AtScale(Sandbox):
         for i in range(120):                                    # a tenth of the measured tree,
             d = f"pkg{i // 20}"                                 # enough to catch quadratic work
             os.makedirs(os.path.join(self.dir, d), exist_ok=True)
-            lines = []
+            nxt_i = (i + 1) % 120
+            lines = [f"from pkg{nxt_i // 20}.m{nxt_i:03d} import f{nxt_i}_0"]
             for j in range(20):
-                nxt = f"f{i}_{j + 1}()" if j < 19 else f"f{(i + 1) % 120}_0()"
+                nxt = f"f{i}_{j + 1}()" if j < 19 else f"f{nxt_i}_0()"
                 lines += [f"def f{i}_{j}():", f"    return {nxt}"]
-            self.write(f"{d}/m{i:03d}.py", "\n".join(lines) + "\n")
+            self.write(f"{d}/{'__init__' if False else ''}m{i:03d}.py", "\n".join(lines) + "\n")
+            self.write(f"{d}/__init__.py", "")
         t = time.time()
         g = self.graph(write=False)
         build = time.time() - t
@@ -989,11 +996,11 @@ class OneFileHoweverManyPathsReachIt(Sandbox):
 
     def test_resolution_is_not_degraded_by_the_link(self):
         self.write("real.py", "def shared():\n    return 1\n")
-        self.write("caller.py", "def use():\n    return shared()\n")
+        self.write("caller.py", "from real import shared\ndef use():\n    return shared()\n")
         self.link("alias.py", "real.py")
         g = self.graph(write=False)
-        e = next(x for x in g["calls"] if x["src"] == "caller.use")
-        self.assertEqual((e.get("dst"), e["confidence"]), ("real.shared", "RESOLVED"))
+        e = next(x for x in g["calls"] if x["src"] == "caller.use" and x["callee"] == "shared")
+        self.assertEqual((e.get("dst"), e["confidence"]), ("real.shared", "QUALIFIED"))
         self.assertEqual(codegraph.callers_of(g, "real.shared"), ["caller.use"])
 
     def test_the_real_file_is_the_one_named_not_the_link(self):
@@ -1439,7 +1446,7 @@ class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
     """Properties that must hold of ANY graph this tool produces, checked against real
     codebases rather than fixtures. Nothing had ever asserted them."""
 
-    LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "LOCAL", "RESOLVED", "INHERITED",
+    LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "LOCAL", "INHERITED",
                         "CLASS", "CONSTRUCTOR", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
     UNRESOLVED = frozenset({"AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
 
@@ -4357,3 +4364,45 @@ class AVariableKnowsTheClassBesideIt(Sandbox):
         call, = [e for e in g["calls"] if e["src"] == "app.use" and e["callee"] == "feed"]
         self.assertEqual(call["confidence"], "AMBIGUOUS")
         self.assertEqual(call["candidates"], ["a/svc.Base.feed", "b/svc.Base.feed"])
+
+
+class ANameThisFileNeverMentionsIsNotYours(Sandbox):
+    """There used to be one more label: a bare call matched against every definition in the
+    tree, resolving whenever exactly one of them had that name. That is a coincidence, not a
+    resolution - `turtle` builds up(), down(), left() and right() at import time rather than
+    defining them, and those calls were answered with functions in `_pyrepl.commands`."""
+
+    def test_a_bare_call_to_a_name_from_nowhere_is_external(self):
+        self.write("far.py", "def orphan():\n    return 'the only one of its name'\n")
+        self.write("app.py", "def go():\n    return orphan()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go"]
+        self.assertIsNone(call.get("dst"))
+        self.assertEqual(call["confidence"], "EXTERNAL")
+        self.assertEqual(codegraph.callers_of(g, "far.orphan"), [])
+
+    def test_the_four_ways_a_bare_name_does_reach_something(self):
+        """The guard, and the reason the fallback could go: every real route has its own rule."""
+        self.write("lib.py", "def imported():\n    return 1\n")
+        self.write("starred.py", "def starry():\n    return 1\n")
+        self.write("app.py", "from lib import imported\n"
+                             "from starred import *\n"
+                             "\n"
+                             "def same_module():\n    return 1\n"
+                             "\n"
+                             "def go():\n"
+                             "    def nested():\n        return 1\n"
+                             "    return imported() + starry() + same_module() + nested()\n")
+        g = self.graph(write=False)
+        got = {e["callee"]: (e.get("dst"), e["confidence"])
+               for e in g["calls"] if e["src"] == "app.go"}
+        self.assertEqual(got["imported"], ("lib.imported", "QUALIFIED"))
+        self.assertEqual(got["starry"], ("starred.starry", "QUALIFIED"))
+        self.assertEqual(got["same_module"], ("app.same_module", "LOCAL"))
+        self.assertEqual(got["nested"], ("app.go.nested", "LOCAL"))
+
+    def test_a_builtin_is_still_a_builtin(self):
+        self.write("app.py", "def go():\n    return len([1]) + sorted([2])[0]\n")
+        g = self.graph(write=False)
+        self.assertEqual({e["confidence"] for e in g["calls"] if e["src"] == "app.go"},
+                         {"BUILTIN"})

@@ -6,8 +6,8 @@ language server, no model. Nodes are modules, functions, classes and methods; ed
 defines, imports and calls.
 
 Every call edge carries a CONFIDENCE, because the useful part is knowing when the answer is
-solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL, RESOLVED and CONSTRUCTOR each
-pin a call to exactly one definition. AMBIGUOUS lists the candidates instead of choosing.
+solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL and CONSTRUCTOR each pin a call
+to exactly one definition. AMBIGUOUS lists the candidates instead of choosing between them.
 BUILTIN, EXTERNAL and UNTYPED say the target is not here, or cannot be determined. Nothing is
 guessed: a blast radius that quietly picked one of two same-named functions would be worse
 than no blast radius at all.
@@ -1108,12 +1108,15 @@ def build(dirs=None, write=True):
             # statement about provenance even when the tool cannot see through it.
             conf = "EXTERNAL"
         if not dst and not method and not conf:                  # a BARE call
-            if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
-            else:
-                tgts = public.get(callee, [])
-                if len(tgts) == 1: dst = tgts[0]; conf = "RESOLVED"
-                elif len(tgts) > 1: conf = "AMBIGUOUS"; e["candidates"] = tgts
-                else: conf = "EXTERNAL"
+            # Nothing left to try. The name is not defined in this scope or any enclosing one,
+            # not imported, not starred in, and not a builtin - so in Python it is a library,
+            # something a framework injected, or a NameError. It used to be matched across the
+            # whole tree instead: "exactly one definition of that name exists somewhere" is a
+            # coincidence, not a resolution, and by the time every real case had a rule of its
+            # own it fired FIFTEEN times over an entire standard library and zero times over
+            # 2,725 installed packages - turtle's up(), down(), left() and right(), which turtle
+            # builds at import time and does not define, answered with _pyrepl.commands.
+            conf = "BUILTIN" if callee in _BUILTINS else "EXTERNAL"
         if not dst and conf is None:
             rr = e.get("recv_root")
             if rr and mod_alias.get(srcmod, {}).get(rr) not in (None, *allmods):
@@ -1729,7 +1732,7 @@ def _describe(g, name):
 
 
 def callers_of(g, target):
-    """function ids that call `target`. When `target` resolves to a definition, follow the RESOLVED edges -
+    """function ids that call `target`. When `target` resolves to a definition, follow the resolved edges -
     so a query for pulse.digest returns only its real callers, NOT callers of the same-named court.digest.
     Falls back to bare-name matching only for external/unknown targets."""
     ids = set(_one(g, target))
@@ -1740,7 +1743,7 @@ def callers_of(g, target):
 
 
 def calls_from(g, node_id):
-    """RESOLVED in-tree calls made by node_id (the specific definitions it reaches)."""
+    """The resolved in-tree calls made by node_id (the specific definitions it reaches)."""
     for i in _one(g, node_id):
         return sorted({e["dst"] for e in g["calls"] if e["src"] == i and e.get("dst")})
     return sorted({e["dst"] for e in g["calls"] if e["src"] == node_id and e.get("dst")})

@@ -32,6 +32,12 @@ they are the answers a call graph must never give:
 - **The wrong same-named thing.** Two nested helpers called `inner`; a bare call reaching a
   method it cannot see; a class name resolved to the wrong one of two; `from b.svc import
   Client` answered with `a/svc.Client`.
+- **A name the file never mentions.** A bare call used to be matched against every definition
+  in the tree and resolved whenever exactly one had that name — a coincidence, not a
+  resolution. Every real way a bare name reaches a definition has its own rule now (this
+  scope, an enclosing one, this module, an import, a star import, a builtin), so the guess was
+  removed. It was answering `turtle`'s `up()` and `down()` — which turtle builds at import
+  time rather than defining — with functions in `_pyrepl`.
 - **Names the file had already accounted for.** A `from time import sleep` answered with an
   unrelated `sleep` in your tree; `from ops import index as _index` looked up under the alias;
   a star import treated as a name spelled `*`; a lambda parameter, a comprehension variable, a

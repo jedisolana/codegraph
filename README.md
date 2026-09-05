@@ -51,7 +51,6 @@ Every call edge carries a confidence label:
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
-| `RESOLVED` | a bare call, and exactly one definition of that name exists at module level — a helper nested inside some other function is not a candidate, because a bare name cannot reach it, and neither is anything when the file imported that name from outside the tree |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
 | `TYPED` (again) | `c(1)` where `c` is a known `Client` — calling an instance runs its `__call__`, and the call site never writes that name |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
@@ -72,25 +71,30 @@ measure how much of the standard library you happen to use:
 
 ```json
 {
-  "call_edges": 2664,
-  "call_sites": 3553,
-  "edge_confidence": {"UNTYPED": 982, "QUALIFIED": 530, "EXTERNAL": 420, "BUILTIN": 387,
-                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 56, "INHERITED": 10,
-                      "TYPED": 3, "CLASS": 1, "RESOLVED": 0, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 875,
-  "could_have_been_resolved": 1857,
-  "resolution_rate": 0.471
+  "call_edges": 2694,
+  "call_sites": 3590,
+  "edge_confidence": {"UNTYPED": 998, "QUALIFIED": 536, "EXTERNAL": 425, "BUILTIN": 389,
+                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 57, "INHERITED": 10,
+                      "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 882,
+  "could_have_been_resolved": 1880,
+  "resolution_rate": 0.469
 }
 ```
 
-That 0.471 is a real number on a real codebase, measured the hard way. Most of what it cannot
+That 0.469 is a real number on a real codebase, measured the hard way. Most of what it cannot
 place are method calls on objects it has no type for — the honest ceiling of static analysis
 this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
 which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
 every point since came from a resolution bug fixed with a test, not from a change to the sum.
-`RESOLVED` reaching zero on this tree is the same story from the other side: that label is the
-weakest one — a bare name that happens to be unique — and every call it used to catch is now
-placed by the import that names it.
+There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
+that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
+every real way a bare name reaches a definition had a rule of its own, it fired fifteen times
+across an entire standard library and not once across 2,725 installed packages, and the fifteen
+were wrong: `turtle` builds `up`, `down`, `left` and `right` at import time rather than defining
+them, and those calls were being answered with functions in `_pyrepl`. A name this file neither
+defines nor imports nor stars in is a library, something injected at runtime, or a mistake — and
+saying `EXTERNAL` is the true answer to all three.
 
 ## The commands
 
@@ -253,7 +257,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 352 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 355 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
