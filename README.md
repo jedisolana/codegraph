@@ -71,18 +71,18 @@ measure how much of the standard library you happen to use:
 
 ```json
 {
-  "call_edges": 2663,
-  "call_sites": 3552,
-  "edge_confidence": {"UNTYPED": 992, "QUALIFIED": 520, "EXTERNAL": 420, "BUILTIN": 387,
-                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 55, "INHERITED": 10,
+  "call_edges": 2664,
+  "call_sites": 3553,
+  "edge_confidence": {"UNTYPED": 982, "QUALIFIED": 530, "EXTERNAL": 420, "BUILTIN": 387,
+                      "LOCAL": 197, "SELF-METHOD": 78, "CONSTRUCTOR": 56, "INHERITED": 10,
                       "TYPED": 3, "CLASS": 1, "RESOLVED": 0, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 864,
-  "could_have_been_resolved": 1856,
-  "resolution_rate": 0.466
+  "resolved_to_one_def": 875,
+  "could_have_been_resolved": 1857,
+  "resolution_rate": 0.471
 }
 ```
 
-That 0.466 is a real number on a real codebase, measured the hard way. Most of what it cannot
+That 0.471 is a real number on a real codebase, measured the hard way. Most of what it cannot
 place are method calls on objects it has no type for — the honest ceiling of static analysis
 this size. The alternative was a rate of 0.84 computed by leaving the hard cases out of the sum,
 which is how a metric ends up meaning nothing. It was 0.29 when this README was first written;
@@ -106,7 +106,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         28 ground-truth checks, several of them red-first
+codegraph --selftest         29 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -216,7 +216,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 28 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 29 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -239,8 +239,10 @@ including **red-first controls** that prove the naive approach fails where this 
   what the receiver is and the other does not
 - a class defined inside a function, which a second function cannot name — beside
   `svc.Client()`, which any function that imported `svc` can
+- `lambda config: config.dumps(x)` in a file that imports a module called `config`, beside a
+  deferred `import config` inside a function, which is the same name meaning the opposite thing
 
-The test suite adds 261 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 272 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -272,7 +274,8 @@ a blank argument, which is a missing one rather than a pattern matching everythi
 a class name that two files answer to,
 a repository holding both thing.py and thing/__init__.py,
 a variable reassigned to something the tool cannot name,
-and a helper nested in one function that a second function must not reach
+a helper nested in one function that a second function must not reach,
+and a loop variable at the top of a file with the same name as an import
 — and codegraph reading its own source.
 
 ## Licence

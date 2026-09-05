@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         28 ground-truth checks, several of them red-first
+  codegraph --selftest         29 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -78,10 +78,11 @@ def _bound_names(node):
     tool's highest confidence, on an answer that is simply wrong.
     """
     names, defined, freed = set(), set(), set()
-    a = node.args
-    for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
-        if arg is not None:
-            names.add(arg.arg)
+    a = getattr(node, "args", None)                  # a Module has a body and no parameters
+    if a is not None:
+        for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
+            if arg is not None:
+                names.add(arg.arg)
     stack = list(node.body)
     while stack:
         n = stack.pop()
@@ -91,8 +92,12 @@ def _bound_names(node):
         if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
             names.add(n.id)
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
-            for al in n.names:
-                names.add((al.asname or al.name).split(".")[0])
+            # An import binds the name TO THE MODULE, which is the one binding resolution wants
+            # to follow rather than be blocked by. Counting it as a shadow meant the deliberate
+            # cycle-break - `def f(): import memory; return memory.recall()` - lost every call
+            # edge through it, in a tool that recognises that idiom well enough to keep it out
+            # of the cycle report.
+            pass
         elif isinstance(n, ast.ExceptHandler) and n.name:
             names.add(n.name)
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
@@ -183,7 +188,14 @@ def _defs_and_calls(path, mod):
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class
             self.vtypes = [{}]                                  # per-scope var->ClassName from `x = Foo(...)`, so x.method() resolves to Foo.method (local type inference)
-            self.bound = [(set(), set())]                       # per-scope (values, defs) bound locally, which SHADOW an imported module or class of the same name
+            # The MODULE is a scope too, and it was the only one with no pre-scan: every
+            # function got one and the file's own top level got an empty set. So
+            # `for config in rows:` or `with open(p) as config:` at top level left config
+            # looking like the imported module, and config.dumps() resolved into it, labelled
+            # QUALIFIED - on a receiver that is a number, or a file.
+            # Only VALUES, never the module's own defs: a top-level `class Parent` is the
+            # definition Parent.make() is looking for, not a shadow of it.
+            self.bound = [(_bound_names(tree)[0], set())]       # per-scope (values, defs) bound locally, which SHADOW an imported module or class of the same name
 
         def _qual(self, name):
             return ".".join(self.scope + [name])
@@ -330,6 +342,24 @@ def _defs_and_calls(path, mod):
             self.bound.append(_bound_names(node))
             for c in node.body: self.visit(c)
             self.bound.pop(); self.vtypes.pop(); self.owner.pop(); self.scope.pop()
+
+        def visit_Lambda(self, node):
+            """A lambda's parameters are a scope, and they were not one at all.
+            `lambda config: config.dumps(x)` read config as the imported module and resolved
+            the call into it at the tool's highest confidence - on a receiver that is whatever
+            the caller passes in."""
+            for d in (*node.args.defaults, *[k for k in node.args.kw_defaults if k]):
+                self.visit(d)                                    # defaults run in the ENCLOSING scope
+            params = {arg.arg for arg in (*node.args.posonlyargs, *node.args.args,
+                                          *node.args.kwonlyargs, node.args.vararg,
+                                          node.args.kwarg) if arg is not None}
+            for sub in ast.walk(node.body):                      # lambda: (c := Foo()) binds c
+                if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                    params.add(sub.target.id)
+            self.bound.append((params, set()))
+            self.vtypes.append({k: v for k, v in self.vtypes[-1].items() if k not in params})
+            self.visit(node.body)
+            self.bound.pop(); self.vtypes.pop()
 
         def visit_FunctionDef(self, node): self._func(node)
         def visit_AsyncFunctionDef(self, node): self._func(node)
@@ -1061,6 +1091,19 @@ def _selftest():
             and _by.get(("app.holder", "Inner")) == "app.holder.Inner"
             and _by.get(("app.near", "get")) == "svc.Client.get")
     shutil.rmtree(nd2, ignore_errors=True)
+    # SCOPES nobody had pre-scanned: a lambda's parameters, and the file's own top level. And
+    # the opposite mistake in the same machinery - a DEFERRED import counted as a name
+    # shadowing the module, so the cycle-break idiom lost every call edge through it.
+    ld = tempfile.mkdtemp()
+    _w(os.path.join(ld, "config.py"), "def dumps(x):\n    return 1\n")
+    _w(os.path.join(ld, "app.py"),
+        "import config\n"
+        "handler = lambda config: config.dumps(1)\n"
+        "def deferred():\n    import config as later\n    return later.dumps(2)\n")
+    gl = build([ld], write=False)
+    _le = {e["src"]: e.get("dst") for e in gl["calls"] if e["callee"] == "dumps"}
+    ok27 = _le.get("app") is None and _le.get("app.deferred") == "config.dumps"
+    shutil.rmtree(ld, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -1090,8 +1133,9 @@ def _selftest():
     print(f"  one name imported from two modules names BOTH, picks neither: {ok24}")
     print(f"  an annotated parameter is a type, and Dict[str, Client] is NOT one: {ok25}")
     print(f"  RED-FIRST - a class nested in a function is not offered to the tree: {ok26}")
+    print(f"  a lambda parameter shadows, and a deferred import still resolves: {ok27}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26 and ok27)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

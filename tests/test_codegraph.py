@@ -2997,3 +2997,127 @@ class TheQualifiedWayToBuildAThing(Sandbox):
                              "    return c.get()\n")
         g = self.graph(write=False)
         self.assertEqual(self.get_edge(g, "app.go"), (None, "UNTYPED"))
+
+
+class ALambdaParameterIsAScope(Sandbox):
+    """A lambda's parameters were not a scope at all, so `lambda config: config.dumps(x)` read
+    config as the imported module and resolved the call into it - QUALIFIED, the tool's highest
+    confidence, on a receiver that is whatever the caller passes in."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+
+    def edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "dumps"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_parameter_shadows_at_module_level(self):
+        self.write("app.py", "import config\n\nhandler = lambda config: config.dumps(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app"), (None, "UNTYPED"))
+
+    def test_a_parameter_shadows_inside_a_function(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "def go():\n"
+                             "    return (lambda config: config.dumps(2))(None)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.go"), (None, "UNTYPED"))
+
+    def test_a_lambda_that_shadows_nothing_still_resolves(self):
+        """The guard: the fix is a scope, not a blindfold."""
+        self.write("app.py", "import config\n\nhandler = lambda x: config.dumps(x)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app"), ("config.dumps", "QUALIFIED"))
+
+    def test_a_default_value_is_evaluated_outside_the_lambda(self):
+        """`lambda config=config.dumps(0): ...` - the default runs in the enclosing scope,
+        where config is still the module."""
+        self.write("app.py", "import config\n\nhandler = lambda config=config.dumps(0): 1\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app"), ("config.dumps", "QUALIFIED"))
+
+
+class TheModuleIsAScopeToo(Sandbox):
+    """Every function got a pre-scan of the names it binds; the file's own top level got an
+    empty set. So a top-level `for config in rows:` or `with open(p) as config:` left config
+    looking like the imported module, and config.dumps() resolved into it - on a receiver that
+    is a number, or a file."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("config.py", "def dumps(x):\n    return 1\n")
+
+    def edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "dumps"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_top_level_loop_target_shadows(self):
+        self.write("app.py", "import config\n\nfor config in [2]:\n    config.dumps(5)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"), (None, "UNTYPED"))
+
+    def test_a_top_level_with_target_shadows(self):
+        self.write("app.py", "import config\n"
+                             "\n"
+                             "with open(__file__) as config:\n"
+                             "    config.dumps(6)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app"), (None, "UNTYPED"))
+
+    def test_an_import_alone_is_not_a_shadow(self):
+        """The guard: the import is the binding resolution is trying to follow."""
+        self.write("app.py", "import config\n\ndef go():\n    return config.dumps(7)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "app.go"),
+                         ("config.dumps", "QUALIFIED"))
+
+    def test_a_top_level_class_is_not_a_shadow_of_itself(self):
+        """The guard that caught a regression while this was being written: a module's own
+        `class Parent` is the definition Parent.make() is looking for."""
+        self.write("app.py", "class Parent:\n"
+                             "    @classmethod\n"
+                             "    def make(cls):\n"
+                             "        return 1\n"
+                             "\n"
+                             "def go():\n"
+                             "    return Parent.make()\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.go" and e["callee"] == "make"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("app.Parent.make", "CLASS"))
+
+
+class ADeferredImportIsStillAnImport(Sandbox):
+    """`def f(): import memory; return memory.recall()` is the deliberate cycle-break, and the
+    tool knows the idiom well enough to keep it out of the cycle report - then lost every call
+    edge through it, because the local import counted as a name shadowing the module."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("memory.py", "def recall(x):\n    return 1\n")
+
+    def test_a_local_import_resolves_the_call(self):
+        self.write("app.py", "def deferred():\n"
+                             "    import memory\n"
+                             "    return memory.recall(1)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.deferred"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("memory.recall", "QUALIFIED"))
+
+    def test_a_local_from_import_resolves_too(self):
+        self.write("app.py", "def deferred():\n"
+                             "    from memory import recall\n"
+                             "    return recall(2)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "app.deferred"]
+        self.assertEqual((call.get("dst"), call["confidence"]), ("memory.recall", "QUALIFIED"))
+
+    def test_it_is_still_not_a_module_level_dependency(self):
+        """The guard: resolving the call must not turn the cycle-break back into a cycle."""
+        self.write("memory.py", "import app\ndef recall(x):\n    return app.go()\n")
+        self.write("app.py", "def go():\n"
+                             "    import memory\n"
+                             "    return memory.recall(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(codegraph.cycles(g), [])
+        self.assertEqual(codegraph.callers_of(g, "memory.recall"), ["app.go"])
