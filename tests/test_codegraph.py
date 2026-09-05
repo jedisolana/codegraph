@@ -2898,3 +2898,102 @@ class ARebindingIsInformationToo(Sandbox):
                              "    return a.go()\n")
         g = self.graph(write=False)
         self.assertIsNone(self.go_edge(g, "app.use"))
+
+
+class ANestedDefinitionIsNotAvailableToTheTree(Sandbox):
+    """A class or function defined inside another function is not visible outside it - `Inner()`
+    in a second function is a NameError. The tree-wide fallback offered it anyway, resolved the
+    call, and then typed the variable from it: two confident answers about a name Python would
+    refuse to look up at all."""
+
+    TREE = ("def holder():\n"
+            "    class Inner:\n"
+            "        def run(self):\n"
+            "            return 1\n"
+            "    return Inner()\n"
+            "\n"
+            "def uses_inner():\n"
+            "    i = Inner()\n"
+            "    return i.run()\n")
+
+    def test_a_class_nested_in_a_function_is_not_reachable_from_another(self):
+        self.write("app.py", self.TREE)
+        g = self.graph(write=False)
+        made = [e for e in g["calls"] if e["src"] == "app.uses_inner" and e["callee"] == "Inner"]
+        self.assertEqual([(e.get("dst"), e["confidence"]) for e in made], [(None, "EXTERNAL")])
+        self.assertEqual(codegraph.callers_of(g, "app.holder.Inner"), ["app.holder"])
+        self.assertEqual(codegraph.callers_of(g, "app.holder.Inner.run"), [])
+
+    def test_the_function_that_owns_it_still_reaches_it(self):
+        """The guard: the scope chain is what makes the nested name legal where it is legal."""
+        self.write("app.py", self.TREE)
+        g = self.graph(write=False)
+        own, = [e for e in g["calls"] if e["src"] == "app.holder" and e["callee"] == "Inner"]
+        self.assertEqual((own.get("dst"), own["confidence"]), ("app.holder.Inner", "LOCAL"))
+
+    def test_a_nested_function_is_not_offered_either(self):
+        self.write("app.py", "def holder():\n"
+                             "    def work():\n"
+                             "        return 1\n"
+                             "    return work()\n"
+                             "\n"
+                             "def elsewhere():\n"
+                             "    return work()\n")
+        g = self.graph(write=False)
+        far, = [e for e in g["calls"] if e["src"] == "app.elsewhere"]
+        self.assertIsNone(far.get("dst"))
+        self.assertEqual(codegraph.callers_of(g, "app.holder.work"), ["app.holder"])
+
+
+class TheQualifiedWayToBuildAThing(Sandbox):
+    """`import svc` then `svc.Client()` is how package code constructs things, and it gave no
+    type at all - so the very next line's c.get() was a blind spot in one of the most ordinary
+    shapes Python has. The module part says exactly where to look: there is nothing to search
+    and nothing to be ambiguous about."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("svc.py", "class Client:\n"
+                             "    def get(self):\n        return 1\n"
+                             "def make():\n    return 2\n")
+
+    def get_edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "get"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_a_module_qualified_constructor_gives_a_type(self):
+        self.write("app.py", "import svc\n"
+                             "\n"
+                             "def go():\n"
+                             "    c = svc.Client()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.get_edge(g, "app.go"), ("svc.Client.get", "TYPED"))
+
+    def test_a_module_qualified_annotation_gives_a_type(self):
+        self.write("app.py", "import svc\n"
+                             "\n"
+                             "def go(c: svc.Client):\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.get_edge(g, "app.go"), ("svc.Client.get", "TYPED"))
+
+    def test_a_receiver_that_is_not_an_imported_module_invents_nothing(self):
+        """The guard: `x = factory.Client()` where factory is a local object must stay unknown
+        - the same rule round twenty-nine put on every other dotted receiver."""
+        self.write("app.py", "def go(factory):\n"
+                             "    c = factory.Client()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.get_edge(g, "app.go"), (None, "UNTYPED"))
+
+    def test_a_module_function_is_not_a_class(self):
+        """`x = svc.make()` names a function. It is not a constructor and must not be typed."""
+        self.write("app.py", "import svc\n"
+                             "\n"
+                             "def go():\n"
+                             "    c = svc.make()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.get_edge(g, "app.go"), (None, "UNTYPED"))

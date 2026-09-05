@@ -46,12 +46,12 @@ Every call edge carries a confidence label:
 | label | meaning |
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
-| `TYPED` | `x = Foo(); x.method()`, or an annotation that names the class outright — `def send(c: Client)`. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
+| `TYPED` | `x = Foo()`, `x = svc.Foo()`, or an annotation that names the class outright — `def send(c: Client)`, `def send(c: svc.Client)`. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
 | `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
 | `LOCAL` | a bare call to a function in the same module |
-| `RESOLVED` | a bare call, and exactly one definition of that name exists |
+| `RESOLVED` | a bare call, and exactly one definition of that name exists at module level — a helper nested inside some other function is not a candidate, because a bare name cannot reach it |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
 | `EXTERNAL` | a builtin, the stdlib, a library, or a method on an object it cannot type |
@@ -106,7 +106,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         27 ground-truth checks, several of them red-first
+codegraph --selftest         28 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -216,7 +216,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 27 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 28 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -237,8 +237,10 @@ including **red-first controls** that prove the naive approach fails where this 
   sources, and a dict that could only remember the fallback
 - `def send(c: Client)` beside `def keyed(d: Dict[str, Client])`, where one of the two says
   what the receiver is and the other does not
+- a class defined inside a function, which a second function cannot name — beside
+  `svc.Client()`, which any function that imported `svc` can
 
-The test suite adds 254 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 261 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -269,7 +271,8 @@ a dangling symlink that must not make every query rebuild,
 a blank argument, which is a missing one rather than a pattern matching everything,
 a class name that two files answer to,
 a repository holding both thing.py and thing/__init__.py,
-and a variable reassigned to something the tool cannot name
+a variable reassigned to something the tool cannot name,
+and a helper nested in one function that a second function must not reach
 — and codegraph reading its own source.
 
 ## Licence

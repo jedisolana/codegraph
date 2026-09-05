@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         27 ground-truth checks, several of them red-first
+  codegraph --selftest         28 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -354,9 +354,7 @@ def _defs_and_calls(path, mod):
             # half of Python initialises an optional.
             if isinstance(node.value, ast.Constant) and node.value.value is None:
                 return self.generic_visit(node)
-            cls = (node.value.func.id
-                   if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-                   else None)
+            cls = _called_class(node.value)
             for tgt in node.targets:
                 if isinstance(tgt, ast.Name): self._retype(tgt.id, cls)
                 elif isinstance(tgt, (ast.Tuple, ast.List)):     # a, b = f() - two unknowns
@@ -369,8 +367,7 @@ def _defs_and_calls(path, mod):
             reach through the call."""
             if isinstance(node.target, ast.Name):
                 cls = _annotated_class(node.annotation)
-                if cls is None and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-                    cls = node.value.func.id
+                if cls is None: cls = _called_class(node.value)
                 if cls or node.value is not None: self._retype(node.target.id, cls)
             self.generic_visit(node)
 
@@ -473,9 +470,29 @@ def _annotated_class(ann):
     """
     if isinstance(ann, ast.Name):
         return ann.id
+    if isinstance(ann, ast.Attribute) and isinstance(ann.value, ast.Name):
+        return f"{ann.value.id}.{ann.attr}"                # svc.Client - a module and a class
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
         text = ann.value.strip()
         return text if text.isidentifier() else None
+    return None
+
+
+def _called_class(value):
+    """The class name a `x = ...` right-hand side constructs, as written.
+
+    `Client()` gives "Client" and `svc.Client()` gives "svc.Client" - the qualified form is how
+    package code constructs things (`import svc` then `svc.Client()`), and it used to give no
+    type at all, so the very next line's c.get() was a blind spot in the most ordinary shape
+    Python has.
+    """
+    if not isinstance(value, ast.Call):
+        return None
+    fn = value.func
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+        return f"{fn.value.id}.{fn.attr}"
     return None
 
 
@@ -666,16 +683,21 @@ def build(dirs=None, write=True):
                 seen_hops.add(nxt); target = nxt; hops += 1
             mod_from[mid][name] = target
     by_name = defaultdict(list); by_modname = {}; def_ids = set()
+    # A bare name written in one scope can only reach a definition at MODULE level. A class
+    # defined inside a function is not visible outside it - `def holder(): class Inner: ...`
+    # then Inner() in another function is a NameError - and yet the tree-wide fallback offered
+    # it, resolving the call and then typing the variable from it: two confident wrong answers
+    # from a name Python would refuse to look up at all.
+    public = defaultdict(list)
     cls_ids = defaultdict(dict)                                  # module -> {ClassName: class id}
     for n in nodes:
         if n["kind"] in ("func", "class"):
             by_name[n["name"]].append(n["id"]); def_ids.add(n["id"])
             if n["id"] == n["module"] + "." + n["name"]:         # MODULE-LEVEL only. A (module, name)
                 by_modname[(n["module"], n["name"])] = n["id"]   # dict cannot hold two `inner`s or a
-                                                                 # method and a function sharing a name;
-                                                                 # whichever parsed last silently won.
-        if n["kind"] == "class":
-            cls_ids[n["module"]][n["name"]] = n["id"]
+                public[n["name"]].append(n["id"])                # method and a function sharing a name;
+                if n["kind"] == "class":                         # whichever parsed last silently won.
+                    cls_ids[n["module"]][n["name"]] = n["id"]
     bases_of = {}                                                # class id -> base class ids
     for n in nodes:
         if n["kind"] == "class" and n.get("bases"):
@@ -684,7 +706,7 @@ def build(dirs=None, write=True):
             for b in n["bases"]:
                 if b in here: resolved.append(here[b])           # a base in the same module
                 else:
-                    hits = [i for i in by_name.get(b, []) if i.split(".")[-1] == b]
+                    hits = [i for i in public.get(b, []) if i.split(".")[-1] == b]
                     if len(hits) == 1: resolved.append(hits[0])  # exactly one class of that name in the tree
             bases_of[n["id"]] = resolved
     kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
@@ -727,14 +749,20 @@ def build(dirs=None, write=True):
             # with no ambiguity test at all: a file writing `from b.svc import Client` had
             # c.get() resolved into a/svc.Client, one line after the Client() call itself was
             # labelled AMBIGUOUS. The tool contradicted itself inside a single function.
-            cands = []
-            scoped = (cls_ids.get(srcmod, {}).get(rt)
-                      or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
-                      or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
-            if scoped:
-                cands = [scoped]
+            if "." in rt:
+                # `import svc` then `svc.Client()`: the module part says exactly where to look,
+                # so there is nothing to search and nothing to be ambiguous about. This is how
+                # package code constructs things, and it used to give no type at all.
+                who, cname = rt.rsplit(".", 1)
+                where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
+                cid = by_modname.get((where_, cname)) if where_ else None
+                cands = [cid] if cid and kind_of.get(cid) == "class" else []
             else:
-                cands = [i for i in by_name.get(rt, []) if kind_of.get(i) == "class"]
+                scoped = (cls_ids.get(srcmod, {}).get(rt)
+                          or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
+                          or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
+                cands = ([scoped] if scoped
+                         else [i for i in public.get(rt, []) if kind_of.get(i) == "class"])
             if len(cands) == 1:
                 if (cands[0] + "." + callee) in def_ids:
                     dst = cands[0] + "." + callee; conf = "TYPED"
@@ -790,7 +818,7 @@ def build(dirs=None, write=True):
         if not dst and not method and not conf:                  # a BARE call
             if callee in _BUILTINS: conf = "BUILTIN"             # next/len/sorted/open... - certainly not yours
             else:
-                tgts = by_name.get(callee, [])
+                tgts = public.get(callee, [])
                 if len(tgts) == 1: dst = tgts[0]; conf = "RESOLVED"
                 elif len(tgts) > 1: conf = "AMBIGUOUS"; e["candidates"] = tgts
                 else: conf = "EXTERNAL"
@@ -1015,6 +1043,24 @@ def _selftest():
     _ae = {e["src"]: e.get("dst") for e in ga["calls"] if e["callee"] == "get"}
     ok25 = _ae.get("app.send") == "svc.Client.get" and _ae.get("app.keyed") is None
     shutil.rmtree(ad, ignore_errors=True)
+    # SCOPE, from the other side: a class defined inside a function is a NameError anywhere
+    # else, and the tree-wide fallback used to hand it out - resolving the call and then typing
+    # the variable from it. `import svc` then svc.Client() is the shape that DOES have an
+    # answer, and had none.
+    nd2 = tempfile.mkdtemp()
+    _w(os.path.join(nd2, "svc.py"), "class Client:\n    def get(self):\n        return 1\n")
+    _w(os.path.join(nd2, "app.py"),
+        "import svc\n"
+        "def holder():\n    class Inner:\n        def run(self):\n            return 1\n"
+        "    return Inner()\n"
+        "def far():\n    i = Inner()\n    return i.run()\n"
+        "def near():\n    c = svc.Client()\n    return c.get()\n")
+    gn2 = build([nd2], write=False)
+    _by = {(e["src"], e["callee"]): e.get("dst") for e in gn2["calls"]}
+    ok26 = (_by.get(("app.far", "Inner")) is None and _by.get(("app.far", "run")) is None
+            and _by.get(("app.holder", "Inner")) == "app.holder.Inner"
+            and _by.get(("app.near", "get")) == "svc.Client.get")
+    shutil.rmtree(nd2, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -1043,8 +1089,9 @@ def _selftest():
     print(f"  x = Client(); x.get() resolves to the Client this file IMPORTED: {ok23}")
     print(f"  one name imported from two modules names BOTH, picks neither: {ok24}")
     print(f"  an annotated parameter is a type, and Dict[str, Client] is NOT one: {ok25}")
+    print(f"  RED-FIRST - a class nested in a function is not offered to the tree: {ok26}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25 and ok26)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 
