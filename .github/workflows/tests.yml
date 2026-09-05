@@ -38,7 +38,11 @@ jobs:
       - name: it can read its own source
         run: |
           python codegraph.py build .
-          python codegraph.py impact build
+          # A QUALIFIED name, because the tests define a nested `build` of their own and the
+          # bare one is genuinely ambiguous - this step used to fail with the tool being right.
+          python codegraph.py impact codegraph.build
+          python codegraph.py callers codegraph._defs_and_calls
+          python codegraph.py stats
 
   # The file is meant to be copied into a repo, and it is also meant to install. Those are two
   # different things, and only one of them is covered by running the tests from a checkout:
