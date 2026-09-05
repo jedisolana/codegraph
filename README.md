@@ -46,7 +46,7 @@ Every call edge carries a confidence label:
 | label | meaning |
 |---|---|
 | `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
-| `TYPED` | `x = Foo(); x.method()` — resolved by local type inference: which `Foo` is decided by what this file defines or imports, refused when two branches give `x` two types, and refused when two classes answer to the name |
+| `TYPED` | `x = Foo(); x.method()`, or an annotation that names the class outright — `def send(c: Client)`. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
 | `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module |
 | `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
@@ -106,7 +106,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
-codegraph --selftest         26 ground-truth checks, several of them red-first
+codegraph --selftest         27 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
@@ -176,7 +176,12 @@ Static analysis, honestly labelled:
   method order — C3 linearisation, so a diamond resolves where the interpreter resolves it —
   when the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
   A base imported under an alias, or built by a metaclass, is not followed.
-- **Type inference is one line deep** — `x = Foo()` then `x.method()`. Nothing beyond that.
+- **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
+  say it outright: a parameter's, and a variable's. A container annotation is not its contents,
+  so `Dict[str, Client]` stays a dict. A name rebound to anything the tool cannot name loses its
+  type rather than keeping the old one. Nothing beyond that: no return types, no attributes,
+  and `with Foo() as c` is not assumed to give you a Foo, because `__enter__` may return
+  anything at all.
 
 Everything it cannot resolve is labelled rather than guessed, so the limits are visible in the
 output instead of hidden in it.
@@ -211,7 +216,7 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-`python3 codegraph.py --selftest` builds small trees with known answers and checks all 26 —
+`python3 codegraph.py --selftest` builds small trees with known answers and checks all 27 —
 including **red-first controls** that prove the naive approach fails where this one does not:
 
 - two modules both defining `digest`, and a query that must reach exactly one of them
@@ -230,8 +235,10 @@ including **red-first controls** that prove the naive approach fails where this 
   the one the file imported
 - `try: from fast import parse / except ImportError: from slow import parse` — one name, two
   sources, and a dict that could only remember the fallback
+- `def send(c: Client)` beside `def keyed(d: Dict[str, Client])`, where one of the two says
+  what the receiver is and the other does not
 
-The test suite adds 244 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 254 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -261,7 +268,8 @@ a file restored from a backup with the timestamp it used to have,
 a dangling symlink that must not make every query rebuild,
 a blank argument, which is a missing one rather than a pattern matching everything,
 a class name that two files answer to,
-and a repository holding both thing.py and thing/__init__.py
+a repository holding both thing.py and thing/__init__.py,
+and a variable reassigned to something the tool cannot name
 — and codegraph reading its own source.
 
 ## Licence

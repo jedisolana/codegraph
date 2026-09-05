@@ -24,7 +24,7 @@ than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph --selftest         26 ground-truth checks, several of them red-first
+  codegraph --selftest         27 ground-truth checks, several of them red-first
   codegraph --help             this text
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
@@ -317,7 +317,16 @@ def _defs_and_calls(path, mod):
             self._signature(node)
             qid = self._qual(node.name)
             defs.append({"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno})
-            self.scope.append(node.name); self.owner.append(qid); self.vtypes.append({})   # calls inside this body belong to qid; its own var-type scope
+            self.scope.append(node.name); self.owner.append(qid)
+            # A parameter's ANNOTATION is the type, stated outright. `def send(c: Client)` then
+            # c.get() was UNTYPED - the tool inferring around an answer the source had written
+            # down. *args and **kwargs are skipped: the annotation there describes the ELEMENTS.
+            seeded = {}
+            for arg in [*getattr(node.args, "posonlyargs", []), *node.args.args,
+                        *node.args.kwonlyargs]:
+                cls = _annotated_class(arg.annotation)
+                if cls: seeded[arg.arg] = cls
+            self.vtypes.append(seeded)                          # calls inside this body belong to qid; its own var-type scope
             self.bound.append(_bound_names(node))
             for c in node.body: self.visit(c)
             self.bound.pop(); self.vtypes.pop(); self.owner.pop(); self.scope.pop()
@@ -325,17 +334,44 @@ def _defs_and_calls(path, mod):
         def visit_FunctionDef(self, node): self._func(node)
         def visit_AsyncFunctionDef(self, node): self._func(node)
 
+        def _retype(self, name, cls):
+            """cls is a class name, or None for "rebound to something I cannot name"."""
+            if name in self.vtypes[-1] and self.vtypes[-1][name] != cls:
+                # `if c: x = Alpha() else: x = Beta()` then x.go() used to pick whichever
+                # branch was walked last and label it TYPED - right half the time, and
+                # certain both times. Two answers is not a type.
+                self.vtypes[-1][name] = None
+            else:
+                self.vtypes[-1][name] = cls                                       # x = Foo(...) -> x is a Foo (resolved to a class in build())
+
         def visit_Assign(self, node):
-            if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-                    and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
-                name, cls = node.targets[0].id, node.value.func.id
-                if name in self.vtypes[-1] and self.vtypes[-1][name] != cls:
-                    # `if c: x = Alpha() else: x = Beta()` then x.go() used to pick whichever
-                    # branch was walked last and label it TYPED - right half the time, and
-                    # certain both times. Two answers is not a type.
-                    self.vtypes[-1][name] = None
-                else:
-                    self.vtypes[-1][name] = cls                                   # x = Foo(...) -> x is a Foo (resolved to a class in build())
+            # EVERY target, and every kind of value. `a = b = Client()` bound neither, because
+            # the check wanted exactly one target. Worse, `x = Foo()` followed by
+            # `x = load_config()` left x a Foo: a rebinding to anything that was not another
+            # class call was invisible, so x.go() was answered with Foo.go, confidently. The
+            # one value that says nothing is None - a name cannot be called through it, so the
+            # code has to rebind before using it, and `x = None` above an `x = Foo()` is how
+            # half of Python initialises an optional.
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                return self.generic_visit(node)
+            cls = (node.value.func.id
+                   if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                   else None)
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name): self._retype(tgt.id, cls)
+                elif isinstance(tgt, (ast.Tuple, ast.List)):     # a, b = f() - two unknowns
+                    for el in tgt.elts:
+                        if isinstance(el, ast.Name): self._retype(el.id, None)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            """`c: Client = make()` - the annotation names the class the inference could not
+            reach through the call."""
+            if isinstance(node.target, ast.Name):
+                cls = _annotated_class(node.annotation)
+                if cls is None and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+                    cls = node.value.func.id
+                if cls or node.value is not None: self._retype(node.target.id, cls)
             self.generic_visit(node)
 
         def visit_Call(self, node):
@@ -424,6 +460,23 @@ def _defs_and_calls(path, mod):
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, submodules)
+
+
+def _annotated_class(ann):
+    """The class an annotation names, when it names one plainly.
+
+    `c: Client` and `c: "Client"` (a forward reference, and what every annotation becomes under
+    `from __future__ import annotations`) both say exactly which class this is - the source
+    stating the answer the tool was inferring around. A SUBSCRIPT does not: `Dict[str, Client]`
+    is a dict, and reading Client out of it would resolve d.get() to a Client method. Only a
+    bare name counts.
+    """
+    if isinstance(ann, ast.Name):
+        return ann.id
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        text = ann.value.strip()
+        return text if text.isidentifier() else None
+    return None
 
 
 def _bind(table, alts, name, target):
@@ -950,6 +1003,18 @@ def _selftest():
     ok24 = (len(_pe) == 1 and _pe[0].get("dst") is None
             and _pe[0].get("candidates") == ["fast.parse", "slow.parse"])
     shutil.rmtree(cd3, ignore_errors=True)
+    # ANNOTATIONS. A parameter is the one place no assignment exists to read, and the one place
+    # modern Python writes the type down. `def send(c: Client)` then c.get() was UNTYPED.
+    ad = tempfile.mkdtemp()
+    _w(os.path.join(ad, "svc.py"), "class Client:\n    def get(self):\n        return 1\n")
+    _w(os.path.join(ad, "app.py"),
+        "from typing import Dict\nfrom svc import Client\n"
+        "def send(c: Client):\n    return c.get()\n"
+        "def keyed(d: Dict[str, Client]):\n    return d.get('k')\n")
+    ga = build([ad], write=False)
+    _ae = {e["src"]: e.get("dst") for e in ga["calls"] if e["callee"] == "get"}
+    ok25 = _ae.get("app.send") == "svc.Client.get" and _ae.get("app.keyed") is None
+    shutil.rmtree(ad, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     print(f"  resolves alpha.digest specifically (QUALIFIED, not ambiguous): {ok1}")
     print(f"  blast-radius trustworthy (caller.run in alpha's radius, NOT beta's): {ok2}")
@@ -977,8 +1042,9 @@ def _selftest():
     print(f"  RED-FIRST - one dot too many climbs out of the tree, not onto thing.py: {ok18b}")
     print(f"  x = Client(); x.get() resolves to the Client this file IMPORTED: {ok23}")
     print(f"  one name imported from two modules names BOTH, picks neither: {ok24}")
+    print(f"  an annotated parameter is a type, and Dict[str, Client] is NOT one: {ok25}")
     ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 and ok12
-          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24)
+          and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19 and ok20 and ok21 and ok22 and ok18a and ok18b and ok23 and ok24 and ok25)
     print("SELFTEST", "GREEN" if ok else "RED")
     return 0 if ok else 1
 

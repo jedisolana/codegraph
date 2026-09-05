@@ -2756,3 +2756,145 @@ class APackageShadowsAModuleOfTheSameName(Sandbox):
         g = self.graph(write=False)
         call, = [e for e in g["calls"] if e["src"] == "app.go"]
         self.assertEqual(call.get("dst"), "thing.f")
+
+
+class TheSourceSaysWhatTypeItIs(Sandbox):
+    """`def send(c: Client)` then c.get() was UNTYPED - the tool inferring around an answer the
+    source had written down. Annotations are the modern way to say which class a name holds,
+    and the one form that says it about a PARAMETER, where no assignment exists to read."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("svc.py", "class Client:\n"
+                             "    def get(self):\n        return 1\n"
+                             "    def close(self):\n        return 2\n")
+
+    def edge(self, g, src, callee="get"):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_an_annotated_parameter_is_a_type(self):
+        self.write("app.py", "from svc import Client\n"
+                             "\n"
+                             "def send(c: Client):\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send"), ("svc.Client.get", "TYPED"))
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.get"), ["app.send"])
+
+    def test_a_forward_reference_in_quotes_counts(self):
+        """What every annotation becomes under `from __future__ import annotations`."""
+        self.write("app.py", "from svc import Client\n"
+                             "\n"
+                             "def send(c: 'Client'):\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send"), ("svc.Client.get", "TYPED"))
+
+    def test_a_keyword_only_parameter_counts_too(self):
+        self.write("app.py", "from svc import Client\n"
+                             "\n"
+                             "def send(*, c: Client):\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send"), ("svc.Client.get", "TYPED"))
+
+    def test_an_annotated_local_is_a_type(self):
+        self.write("app.py", "from svc import Client\n"
+                             "\n"
+                             "def make():\n"
+                             "    return Client()\n"
+                             "\n"
+                             "def send():\n"
+                             "    c: Client = make()\n"
+                             "    return c.get()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send"), ("svc.Client.get", "TYPED"))
+
+    def test_a_container_annotation_is_not_its_contents(self):
+        """The guard, and the reason only a bare name counts: `Dict[str, Client]` is a dict.
+        Reading Client out of it would resolve d.get() - a dict method - to Client.get."""
+        self.write("app.py", "from typing import Dict\n"
+                             "from svc import Client\n"
+                             "\n"
+                             "def send(d: Dict[str, Client]):\n"
+                             "    return d.get('k')\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send"), (None, "UNTYPED"))
+
+    def test_a_chained_assignment_binds_every_name(self):
+        """`a = b = Client()` bound neither: the check wanted exactly one target."""
+        self.write("app.py", "from svc import Client\n"
+                             "\n"
+                             "def send():\n"
+                             "    a = b = Client()\n"
+                             "    return a.get() + b.close()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "app.send", "get"), ("svc.Client.get", "TYPED"))
+        self.assertEqual(self.edge(g, "app.send", "close"), ("svc.Client.close", "TYPED"))
+
+
+class ARebindingIsInformationToo(Sandbox):
+    """A name reassigned to anything that was not another class call kept its old type. So
+    `x = Foo()` followed by `x = load_config()` left x a Foo, and x.go() was answered with
+    Foo.go at full confidence - the wrong class, from a line the tool had walked straight past."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("m.py", "class Foo:\n    def go(self):\n        return 1\n"
+                           "class Bar:\n    def go(self):\n        return 2\n"
+                           "def load_config():\n    return Bar()\n")
+
+    def go_edge(self, g, src):
+        m = [e for e in g["calls"] if e["src"] == src and e["callee"] == "go"]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst")
+
+    def test_a_reassignment_takes_the_type_away(self):
+        """A bare `Name()` on the right was the only shape that counted. `m.load_config()` is
+        an attribute call, so the line was walked straight past and x stayed a Foo."""
+        self.write("app.py", "import m\n"
+                             "from m import Foo\n"
+                             "\n"
+                             "def use():\n"
+                             "    x = Foo()\n"
+                             "    x = m.load_config()\n"
+                             "    return x.go()\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.go_edge(g, "app.use"))
+        self.assertEqual(codegraph.callers_of(g, "m.Foo.go"), [])
+
+    def test_a_plain_rebinding_takes_it_away_as_well(self):
+        self.write("app.py", "from m import Foo\n"
+                             "\n"
+                             "def use(other):\n"
+                             "    x = Foo()\n"
+                             "    x = other\n"
+                             "    return x.go()\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.go_edge(g, "app.use"))
+
+    def test_the_optional_idiom_still_resolves(self):
+        """`x = None` then `x = Foo()` is how half of Python initialises an optional. None
+        holds no methods, so it cannot be what the call goes through."""
+        self.write("app.py", "from m import Foo\n"
+                             "\n"
+                             "def use(flag):\n"
+                             "    x = None\n"
+                             "    if flag:\n"
+                             "        x = Foo()\n"
+                             "    return x.go()\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.go_edge(g, "app.use"), "m.Foo.go")
+
+    def test_unpacking_over_a_known_name_takes_it_away(self):
+        """A tuple target was skipped entirely, so `a` kept the type it had two lines up."""
+        self.write("app.py", "from m import Foo, load_config\n"
+                             "\n"
+                             "def use():\n"
+                             "    a = Foo()\n"
+                             "    a, b = load_config(), 1\n"
+                             "    return a.go()\n")
+        g = self.graph(write=False)
+        self.assertIsNone(self.go_edge(g, "app.use"))
