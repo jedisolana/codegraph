@@ -439,7 +439,7 @@ def build(dirs=None, write=True):
     for d in dirs:
         root = labels.get(d) or os.path.basename(d.rstrip(os.sep)) or "root"
         for dp, dns, fns in os.walk(d):
-            dns[:] = [x for x in dns if not _prune_dir(dp, x)]   # single pruned walk: skip noise, hidden, embedded interpreters, venv roots
+            dns[:] = [x for x in dns if not _prune_dir(dp, x)]   # one pruned walk: skip noise, hidden, embedded interpreters, venv roots
             for fn in sorted(fns):
                 if not fn.endswith(".py"): continue
                 full = os.path.join(dp, fn)
@@ -1218,8 +1218,20 @@ def _main(argv=None):
         what = {"path": "<from> <to>", "deps": "<module>", "find": "<substring>"}.get(a[0], "<name>")
         print(f"usage: codegraph {a[0]} {what}", file=sys.stderr)
         return 2
-    if a and a[0] == "--selftest": return _selftest()
-    if not a or a[0] == "build":
+    if a and a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0                                     # a help request is not an error, and
+                                                     # `codegraph --help || echo failed` said
+                                                     # failed because this used to exit 2
+    if not a:
+        # A bare invocation used to BUILD - walking whatever directory you happened to be
+        # standing in and writing two files into it. Someone typing `codegraph` in their home
+        # directory to see what it does deserves the usage, not a silent traversal of
+        # everything they own.
+        print(__doc__)
+        return 0
+    if a[0] == "--selftest": return _selftest()
+    if a[0] == "build":
         try:
             g = build(a[1:] or None)
         except BadPath as e:

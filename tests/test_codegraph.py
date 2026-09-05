@@ -1978,3 +1978,118 @@ class WhenTheDirectoryIsReadOnly(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheFrontDoor(unittest.TestCase):
+    """The first command anyone types is the tool's name, and the second is `--help`. Both used
+    to be wrong: `--help` exited 2, so `codegraph --help && echo ok` printed nothing, and a bare
+    `codegraph` silently BUILT - walking whatever directory you were standing in and writing two
+    files into it. Typed in a home directory that is a traversal of everything you own."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        with open(os.path.join(self.dir, "app.py"), "w", encoding="utf-8") as f:
+            f.write("def leaf():\n    return 1\n")
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=120)
+
+    def leftovers(self):
+        return sorted(f for f in os.listdir(self.dir) if f.startswith("codegraph"))
+
+    def test_asking_for_help_is_not_a_failure(self):
+        for flag in ("-h", "--help", "help"):
+            r = self.run_it(flag)
+            self.assertEqual(r.returncode, 0, f"{flag} exited {r.returncode}: {r.stderr}")
+            self.assertIn("codegraph impact", r.stdout, flag)
+            self.assertEqual(r.stderr, "", flag)
+
+    def test_a_bare_invocation_explains_itself_instead_of_writing_files(self):
+        r = self.run_it()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("codegraph build", r.stdout)
+        self.assertEqual(self.leftovers(), [], "a bare invocation wrote into the directory")
+
+    def test_the_library_door_agrees_with_the_command_line(self):
+        """`_main([])` is the same entry point `pip install` exposes as a console script."""
+        cwd = os.getcwd()
+        saved = {k: getattr(codegraph, k) for k in ("HOME", "OUT", "CACHE")}
+        # HOME is captured at import, so chdir alone would have let the old behaviour build the
+        # REPOSITORY and write into it - a leftover check pointed at the sandbox saw nothing.
+        codegraph.HOME = self.dir
+        codegraph.OUT = os.path.join(self.dir, "codegraph.json")
+        codegraph.CACHE = os.path.join(self.dir, "codegraph.cache.json")
+        os.chdir(self.dir)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = codegraph._main([])
+        finally:
+            os.chdir(cwd)
+            for k, v in saved.items():
+                setattr(codegraph, k, v)
+        self.assertEqual(rc, 0)
+        self.assertIn("codegraph build", out.getvalue())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_wrong_command_is_still_an_error(self):
+        """The fix for `--help` must not turn every typo into a success."""
+        self.assertEqual(self.run_it("wat").returncode, 2)
+        self.assertEqual(self.run_it("callers").returncode, 2)   # verb, no name
+
+    def test_help_names_every_verb_the_tool_accepts(self):
+        """A verb added without a line in the help is a feature nobody can find."""
+        with open(os.path.join(HERE, "codegraph.py"), encoding="utf-8") as f:
+            src = f.read()
+        body = src[src.index("def _main("):]
+        verbs = set(re.findall(r'a\[0\] == "([a-z]+)"', body))
+        verbs |= set(re.findall(r'"([a-z]+)": [12],', body))     # the arity table
+        self.assertGreaterEqual(len(verbs), 12, verbs)
+        for verb in sorted(verbs):
+            self.assertIn(f"codegraph {verb}", codegraph.__doc__, f"{verb} is undocumented")
+
+
+class NothingShippedNamesItsAuthor(unittest.TestCase):
+    """Everything in this repository is published: the source, the help text a user prints, the
+    comments, the README, the CI file. A private origin story in a code comment - the machine it
+    grew up on, the private modules beside it, the assistant that helped write it - ships with
+    it. Git metadata is the part people remember to scrub; the help text is the part they read."""
+
+    # Assembled from fragments so this guard does not trip over its own evidence.
+    FORBIDDEN = ("cla" + "ude", "anthro" + "pic", "co-auth" + "ored-by", "gpt-", "openai",
+                 "super" + "agent", "wiring." + "py", "graph" + "ify", "the brain",
+                 "/users/", "c:\\users\\", "@gmail", "@icloud", "127.0.0.1:8420")
+    SKIP_DIRS = frozenset({".git", "__pycache__", ".ruff_cache", "build", "dist", ".venv"})
+    TEXT = frozenset({".py", ".md", ".toml", ".yml", ".yaml", ".cfg", ".txt", ".json", ".sh", ""})
+
+    def shipped_files(self):
+        me = os.path.abspath(__file__)
+        for root, dirs, names in os.walk(HERE):
+            dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS and not d.endswith(".egg-info")]
+            for n in names:
+                full = os.path.join(root, n)
+                if full == me or os.path.splitext(n)[1].lower() not in self.TEXT:
+                    continue
+                yield full
+
+    def test_no_shipped_file_names_a_private_origin(self):
+        checked = 0
+        for full in self.shipped_files():
+            try:
+                with open(full, encoding="utf-8") as f:
+                    low = f.read().lower()
+            except (OSError, UnicodeDecodeError):
+                continue
+            checked += 1
+            for bad in self.FORBIDDEN:
+                self.assertNotIn(bad.lower(), low,
+                                 f"{os.path.relpath(full, HERE)} contains {bad!r}")
+        self.assertGreater(checked, 4, "the scan found almost nothing to read")
+
+    def test_the_help_text_a_user_prints_is_clean(self):
+        """The one string the tool puts on a stranger's screen, checked on its own."""
+        low = codegraph.__doc__.lower()
+        for bad in self.FORBIDDEN:
+            self.assertNotIn(bad.lower(), low, f"the help text contains {bad!r}")
+        self.assertIn("codegraph - ask a Python codebase", codegraph.__doc__)

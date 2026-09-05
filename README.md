@@ -98,6 +98,7 @@ codegraph deps <module>      a module's in-tree imports and importers
 codegraph cycles             import cycles of any length (refactor smells)
 codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         17 ground-truth checks, several of them red-first
+codegraph --help             the same list; a bare `codegraph` prints it too
 ```
 
 **Exit codes**, because scripts and agents read them:
@@ -200,7 +201,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `from .thing import load` inside a package, next to a top-level `thing.py` — the trap that
   makes a lazy implementation return the wrong function with full confidence
 
-The test suite adds 188 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 195 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -217,7 +218,11 @@ a class, or a function of the same name,
 a diamond hierarchy checked against the interpreter's own MRO,
 the ordinary ways to import a submodule,
 a name re-exported through a package's __init__,
-an unreadable file and a read-only directory — and codegraph reading its own source.
+an unreadable file and a read-only directory,
+a help request that must not exit non-zero,
+a bare invocation that must not build your home directory,
+every verb checked against the help text that is supposed to list it,
+and every shipped file checked for a private origin story — and codegraph reading its own source.
 
 ## Licence
 
