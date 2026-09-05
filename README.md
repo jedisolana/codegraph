@@ -53,6 +53,7 @@ Every call edge carries a confidence label:
 | `LOCAL` | a bare call to a function in the same module |
 | `RESOLVED` | a bare call, and exactly one definition of that name exists at module level — a helper nested inside some other function is not a candidate, because a bare name cannot reach it |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
+| `TYPED` (again) | `c(1)` where `c` is a known `Client` — calling an instance runs its `__call__`, and the call site never writes that name |
 | `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
 | `EXTERNAL` | a builtin, the stdlib, a library, or a method on an object it cannot type |
 
@@ -244,7 +245,7 @@ including **red-first controls** that prove the naive approach fails where this 
 - `[config.dumps(r) for config in rows]` on one line and `config.dumps(2)` on the next, where
   the same name is the loop variable and then the module again
 
-The test suite adds 289 more: the CLI and its error messages, the on-disk contract, cache
+The test suite adds 293 more: the CLI and its error messages, the on-disk contract, cache
 invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
 and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
 long, a 1,200-deep import chain, decorators, redefined functions, overlapping
@@ -281,7 +282,8 @@ a loop variable at the top of a file with the same name as an import,
 a module that imports itself,
 a codegraph.json that is valid JSON and not a graph,
 a class attribute with the same name as an import,
-and two trees whose call sites have to name files that exist
+two trees whose call sites have to name files that exist,
+and an instance that is called rather than a method on it
 — and codegraph reading its own source.
 
 ## Licence

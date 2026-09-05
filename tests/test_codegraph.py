@@ -3374,3 +3374,64 @@ class EveryLocationIsAPlaceYouCanOpen(unittest.TestCase):
         g = codegraph.build([self.root], write=False)
         (_, loc), = codegraph.where(g, "shared")
         self.assertEqual(loc, "a/api/util.py:1")
+
+
+class CallingAnInstanceRunsItsCall(Sandbox):
+    """`c = Client()` then `c(1)`. Calling an instance runs __call__, and the call site never
+    writes that name - so `impact Client.__call__` answered "callers: (none), blast: 0" about a
+    method being called two lines away. The same shape as __init__, and the same wrong answer.
+    Callable classes are ordinary Python: decorators written as classes, handlers, anything with
+    state and one obvious verb."""
+
+    def edge(self, g, callee):
+        m = [e for e in g["calls"] if e["src"] == "m.uses" and e["callee"] == callee]
+        self.assertEqual(len(m), 1, m)
+        return m[0].get("dst"), m[0]["confidence"]
+
+    def test_calling_a_typed_local_reaches_call(self):
+        self.write("m.py", "class Client:\n"
+                           "    def __call__(self, x):\n"
+                           "        return x\n"
+                           "\n"
+                           "def uses():\n"
+                           "    c = Client()\n"
+                           "    return c(1)\n")
+        g = self.graph(write=False)
+        self.assertEqual(self.edge(g, "c"), ("m.Client.__call__", "TYPED"))
+        im = codegraph.impact(g, "m.Client.__call__")
+        self.assertEqual(im["callers"], ["m.uses"])
+        self.assertEqual([loc for loc, _ in im["sites"]], ["m.py:7"])
+
+    def test_an_inherited_call_counts(self):
+        """The same rule CONSTRUCTOR follows: the method that actually runs, through the MRO."""
+        self.write("m.py", "class Callable:\n"
+                           "    def __call__(self, x):\n"
+                           "        return x\n"
+                           "\n"
+                           "class Sub(Callable):\n"
+                           "    pass\n"
+                           "\n"
+                           "def uses():\n"
+                           "    b = Sub()\n"
+                           "    return b(2)\n")
+        self.assertEqual(self.edge(self.graph(write=False), "b"),
+                         ("m.Callable.__call__", "TYPED"))
+
+    def test_a_class_that_is_not_callable_invents_nothing(self):
+        """The guard: most objects are not callable, and calling one is a TypeError, not an
+        edge to be found."""
+        self.write("m.py", "class Plain:\n"
+                           "    def work(self):\n"
+                           "        return 1\n"
+                           "\n"
+                           "def uses():\n"
+                           "    p = Plain()\n"
+                           "    return p()\n")
+        self.assertEqual(self.edge(self.graph(write=False), "p"), (None, "UNTYPED"))
+
+    def test_an_untyped_local_is_still_untyped(self):
+        """The guard on the other side: without a type there is nothing to look __call__ up on."""
+        self.write("m.py", "def uses(c):\n    return c(1)\n")
+        g = self.graph(write=False)
+        call, = [e for e in g["calls"] if e["src"] == "m.uses"]
+        self.assertIsNone(call.get("dst"))

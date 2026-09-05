@@ -511,6 +511,13 @@ def _defs_and_calls(path, mod):
                         edge["super_from"] = a0.id
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
+                if not method and self.vtypes[-1].get(callee):
+                    # c(1) where c is a Client. Calling an INSTANCE runs its __call__, and the
+                    # call site never writes that name - the same shape as __init__, and the
+                    # same answer it used to give: "callers: (none)" for a method being called
+                    # two lines away. Callable classes are ordinary Python: decorators written
+                    # as classes, handlers, anything with state and one obvious verb.
+                    edge["invoke_type"] = self.vtypes[-1][callee]
                 edges.append(edge)
             self.generic_visit(node)                            # recurse into args/keywords (which may hold more calls)
 
@@ -804,6 +811,19 @@ def build(dirs=None, write=True):
     imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
                    for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
     mro_cache = {}                                                # linearisation is reused across edges
+    def _classes_named(rt, srcmod):
+        """Which class a type name means HERE: the one this module defines or imported, before
+        any tree-wide search. A qualified `svc.Client` says outright where to look."""
+        if "." in rt:
+            who, cname = rt.rsplit(".", 1)
+            where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
+            cid = by_modname.get((where_, cname)) if where_ else None
+            return [cid] if cid and kind_of.get(cid) == "class" else []
+        scoped = (cls_ids.get(srcmod, {}).get(rt)
+                  or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
+                  or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
+        return [scoped] if scoped else [i for i in public.get(rt, []) if kind_of.get(i) == "class"]
+
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         ec = e.get("encl_class")
@@ -833,6 +853,15 @@ def build(dirs=None, write=True):
             # unbound call. The receiver is a class in this module, not an unknown object.
             cand = cls_ids[srcmod][recv] + "." + callee
             if cand in def_ids: dst = cand; conf = "CLASS"
+        it = e.get("invoke_type")
+        if not dst and it:
+            hits = []
+            for c in _classes_named(it, srcmod):
+                for b in _mro(c, bases_of, mro_cache):           # inherited __call__ counts,
+                    if (b + ".__call__") in def_ids:             # the same way an inherited
+                        hits.append(b + ".__call__"); break      # __init__ does
+            if len(hits) == 1: dst = hits[0]; conf = "TYPED"
+            elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
         rt = e.get("recv_type")
         if not dst and rt:                                       # x.method() where `x = Foo()` (local type inference) -> Foo.method
             # WHICH class called Foo? The one this module can see - defined here, or imported
@@ -840,20 +869,7 @@ def build(dirs=None, write=True):
             # with no ambiguity test at all: a file writing `from b.svc import Client` had
             # c.get() resolved into a/svc.Client, one line after the Client() call itself was
             # labelled AMBIGUOUS. The tool contradicted itself inside a single function.
-            if "." in rt:
-                # `import svc` then `svc.Client()`: the module part says exactly where to look,
-                # so there is nothing to search and nothing to be ambiguous about. This is how
-                # package code constructs things, and it used to give no type at all.
-                who, cname = rt.rsplit(".", 1)
-                where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
-                cid = by_modname.get((where_, cname)) if where_ else None
-                cands = [cid] if cid and kind_of.get(cid) == "class" else []
-            else:
-                scoped = (cls_ids.get(srcmod, {}).get(rt)
-                          or by_modname.get((mod_from.get(srcmod, {}).get(rt), rt))
-                          or by_modname.get((mod_sub.get(srcmod, {}).get(rt), rt)))
-                cands = ([scoped] if scoped
-                         else [i for i in public.get(rt, []) if kind_of.get(i) == "class"])
+            cands = _classes_named(rt, srcmod)
             if len(cands) == 1:
                 if (cands[0] + "." + callee) in def_ids:
                     dst = cands[0] + "." + callee; conf = "TYPED"
