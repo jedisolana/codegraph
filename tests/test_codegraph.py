@@ -2452,6 +2452,32 @@ class TwoCallsAreOneEdgeOnlyIfTheyLandInTheSamePlace(Sandbox):
         lines = {e["dst"]: e["lines"] for e in g["calls"] if e["callee"] == "run"}
         self.assertEqual(lines, {"m.B.run": [9], "m.A.run": [10]})
 
+    def test_no_field_escapes_the_attribute_read_key_either(self):
+        """Attribute reads are deduplicated on four fields rather than eighteen, because they
+        reach exactly two resolution paths and are emitted forty thousand at a time to keep
+        nine hundred. That is a second key, and a second key is a second thing that can fall
+        behind the edges it identifies - so it gets the same check as the first."""
+        seen = set()
+        for rel in ("codegraph.py", "tests/test_codegraph.py", "tools/mutation.py"):
+            _defs, edges, *_rest = codegraph._defs_and_calls(
+                os.path.join(HERE, rel), os.path.basename(rel)[:-3])
+            for e in edges:
+                if e.get("attr_read"):
+                    seen.update(e.keys())
+        self.assertTrue(seen, "no attribute-read edges were produced to check")
+        # `attr_read`, `method` and `kind` are constant on every one of them; `line` is where
+        # it was written, which is what the dedup deliberately collapses.
+        escaped = seen - set(codegraph.ATTR_IDENTITY) - {"attr_read", "method", "kind",
+                                                         "mod", "line", "lines"}
+        self.assertEqual(escaped, set(),
+                         f"an attribute-read edge carries {escaped}, which its key ignores")
+
+    def test_a_short_key_cannot_collide_with_a_long_one(self):
+        """The two keys share one dictionary. Without something to tell them apart, a
+        five-field tuple could in principle equal the first five of an eighteen-field one."""
+        self.assertNotIn(codegraph.ATTR_IDENTITY_MARK, codegraph.EDGE_IDENTITY)
+        self.assertTrue(codegraph.ATTR_IDENTITY_MARK.startswith("\0"))
+
     def test_the_same_call_written_twice_is_still_one_edge(self):
         """The control. Splitting on everything would be as wrong as merging on nothing:
         calling the same helper three times is one relationship with three sites."""
