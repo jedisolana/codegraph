@@ -27,7 +27,6 @@ import contextlib
 import hashlib
 import os
 import random
-import resource
 import shutil
 import signal
 import subprocess
@@ -98,12 +97,21 @@ class Mutator(ast.NodeTransformer):
 #   2. nothing capped what it could allocate.  A ceiling is what makes a runaway mutant fail
 #      instead of taking the machine with it - waiting ninety seconds is far too long to
 #      notice 400GB of address space being asked for.
+# `resource`, `os.setsid` and `preexec_fn` are POSIX only - importing resource on Windows is
+# a ModuleNotFoundError, which turned this file into one that cannot be imported at all there
+# and took a test with it. What is guarded below is guarded on POSIX; on Windows the child is
+# still killed on timeout and by the signal handler, and the ceiling and the orphan watch are
+# not available. Saying so is better than pretending.
+POSIX = os.name == "posix"
+if POSIX:
+    import resource
+
 CHILD_MEMORY_CAP = 4 * 1024 ** 3          # generous for a test suite, fatal to a runaway loop
 _running: list[subprocess.Popen] = []
 
 
 def _cap_child():
-    """Runs in the child between fork and exec."""
+    """Runs in the child between fork and exec. POSIX only - see above."""
     os.setsid()                            # its own process group, so the whole tree is killable
     with contextlib.suppress(Exception):
         resource.setrlimit(resource.RLIMIT_AS, (CHILD_MEMORY_CAP, CHILD_MEMORY_CAP))
@@ -112,8 +120,9 @@ def _cap_child():
 def _kill_group(proc):
     """Kill the child AND anything it started. The suite runs the CLI as a subprocess, so
     killing only the direct child leaves grandchildren behind."""
-    with contextlib.suppress(Exception):
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    if POSIX:
+        with contextlib.suppress(Exception):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     with contextlib.suppress(Exception):
         proc.kill()
     with contextlib.suppress(Exception):
@@ -137,12 +146,18 @@ threading.Thread(target=_orphan_watch, daemon=True).start()
 unittest.main(module=None, argv=["mutant", "discover", "-s", "tests", "-q", "--failfast"])
 """
 
+# Windows does not reparent an orphan onto pid 1, so the check above has nothing to look at.
+PLAIN_CHILD = """
+import unittest
+unittest.main(module=None, argv=["mutant", "discover", "-s", "tests", "-q", "--failfast"])
+"""
+
 
 def _run_suite(timeout):
     """The suite, in its own process group, under a memory ceiling, killed as a group."""
-    proc = subprocess.Popen([sys.executable, "-c", CHILD],
+    proc = subprocess.Popen([sys.executable, "-c", CHILD if POSIX else PLAIN_CHILD],
                             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, preexec_fn=_cap_child)
+                            text=True, **({"preexec_fn": _cap_child} if POSIX else {}))
     _running.append(proc)
     try:
         out, err = proc.communicate(timeout=timeout)
