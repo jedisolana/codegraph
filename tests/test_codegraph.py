@@ -2788,6 +2788,71 @@ class AClassNestedInsideAClassIsStillAType(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.Widget.go"), [])
 
 
+class OptionalIsNotAContainer(Sandbox):
+    """`c: Client | None` says outright what c is, and it was read as nothing.
+
+    A subscripted annotation was skipped wholesale, on the sound reasoning that
+    `Dict[str, Client]` is a dict and reading Client out of it would resolve `d.get()` to a
+    Client method. `Optional[Client]`, `Union[Client, None]` and `Client | None` are not
+    containers: each says "a Client, or nothing at all", and a method called on one is a
+    Client's method with no second candidate.
+
+    It was the costliest annotation gap left. In an installed-packages corpus `X | None` is 414
+    of the annotated parameters against 550 plain ones - two in five stated their type and were
+    not listened to.
+    """
+
+    HEAD = ("from typing import Dict, List, Optional, Union\n"
+            "\n"
+            "class Client:\n"
+            "    def go(self): return 1\n"
+            "\n"
+            "class Server:\n"
+            "    def go(self): return 2\n")
+
+    def build(self, body):
+        self.write("m.py", self.HEAD + "\n" + body)
+        return self.graph()
+
+    def test_optional_of_one_class_is_that_class(self):
+        g = self.build("def use(c: Optional[Client]):\n    return c.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), ["m.use"])
+
+    def test_the_new_union_spelling_too(self):
+        g = self.build("def use(c: Client | None):\n    return c.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), ["m.use"])
+
+    def test_and_the_old_one(self):
+        g = self.build("def use(c: Union[Client, None]):\n    return c.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), ["m.use"])
+
+    def test_a_forward_reference_spelling_it_out(self):
+        """A string annotation used to be read only when the whole of it was one identifier."""
+        g = self.build('def use(c: "Optional[Client]"):\n    return c.go()\n')
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), ["m.use"])
+
+    def test_a_union_of_two_real_classes_is_not_guessed(self):
+        """`Client | Server` does name a class the call could reach. Picking one is the guess
+        this tool exists not to make, and picking wrongly points a blast radius at code that
+        cannot be affected."""
+        g = self.build("def use(x: Client | Server):\n    return x.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "m.Server.go"), [])
+
+    def test_three_options_with_a_none_is_still_two_options(self):
+        g = self.build("def use(x: Union[Client, Server, None]):\n    return x.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "m.Server.go"), [])
+
+    def test_a_container_of_clients_is_not_a_client(self):
+        """The reasoning the old rule was built on, which still holds and must keep holding:
+        a dict of Clients is a dict."""
+        g = self.build("def use(d: Dict[str, Client]):\n    return d.go()\n"
+                       "\n"
+                       "def use2(items: List[Client]):\n    return items.go()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Client.go"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

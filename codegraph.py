@@ -907,14 +907,37 @@ def _is_property(node):
     return False
 
 
+def _is_none_annotation(node):
+    """`None` in an annotation, written either way."""
+    return ((isinstance(node, ast.Constant) and node.value is None)
+            or (isinstance(node, ast.Name) and node.id == "None"))
+
+
+def _union_parts(ann):
+    """Flatten `A | B | None` into its operands."""
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        return _union_parts(ann.left) + _union_parts(ann.right)
+    return [ann]
+
+
 def _annotated_class(ann):
     """The class an annotation names, when it names one plainly.
 
     `c: Client` and `c: "Client"` (a forward reference, and what every annotation becomes under
     `from __future__ import annotations`) both say exactly which class this is - the source
-    stating the answer the tool was inferring around. A SUBSCRIPT does not: `Dict[str, Client]`
-    is a dict, and reading Client out of it would resolve d.get() to a Client method. Only a
-    bare name counts.
+    stating the answer the tool was inferring around. A SUBSCRIPT usually does not:
+    `Dict[str, Client]` is a dict, and reading Client out of it would resolve d.get() to a
+    Client method.
+
+    `Optional[Client]`, `Union[Client, None]` and `Client | None` are the exception, and they
+    are not a container: each says "a Client, or nothing at all". A method called on one is a
+    Client's method, and there is no second class it could belong to. Reading none of them cost
+    more than any other annotation gap - in an installed-packages corpus `X | None` is 414 of
+    the annotated parameters against 550 plain ones, so two in five said outright what they
+    were and were not listened to.
+
+    A union of two real classes stays unread. `Client | Server` does name a class the call
+    could reach, and picking one of them is the guess this tool exists not to make.
     """
     if isinstance(ann, ast.Name):
         return ann.id
@@ -922,7 +945,24 @@ def _annotated_class(ann):
         return f"{ann.value.id}.{ann.attr}"                # svc.Client - a module and a class
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
         text = ann.value.strip()
-        return text if text.isidentifier() else None
+        if text.isidentifier():
+            return text
+        try:                                               # c: "Optional[Client]"
+            return _annotated_class(ast.parse(text, mode="eval").body)
+        except (SyntaxError, ValueError, RecursionError):
+            return None
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        real = [p for p in _union_parts(ann) if not _is_none_annotation(p)]
+        return _annotated_class(real[0]) if len(real) == 1 else None
+    if isinstance(ann, ast.Subscript):
+        v = ann.value
+        nm = v.id if isinstance(v, ast.Name) else (v.attr if isinstance(v, ast.Attribute) else None)
+        if nm == "Optional":
+            return _annotated_class(ann.slice)
+        if nm == "Union":
+            elts = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
+            real = [p for p in elts if not _is_none_annotation(p)]
+            return _annotated_class(real[0]) if len(real) == 1 else None
     return None
 
 

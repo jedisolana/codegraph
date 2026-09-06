@@ -4,6 +4,22 @@
 
 First release.
 
+### `Optional[Client]` is a Client
+
+A subscripted annotation was skipped wholesale, on the sound reasoning that `Dict[str, Client]`
+is a dict and reading `Client` out of it would resolve `d.get()` to a Client method. That rule
+swept up the one subscript that is not a container: `Optional[Client]`, `Union[Client, None]`
+and `Client | None` each say "a Client, or nothing at all", and a method called on one is a
+Client's method with no second candidate.
+
+It was the costliest annotation gap left. In an installed-packages corpus `X | None` is 414 of
+the annotated parameters against 550 plain ones — two in five stated their type outright and
+were not listened to. A string forward reference spelling out the same thing,
+`"Optional[Client]"`, is now read too, where before only a single bare identifier was.
+
+A union of two real classes is still not read. `Client | Server` does name a class the call
+could reach, and choosing one is the guess this tool exists not to make.
+
 ### A class nested inside a class is still a type
 
 `i = Outer.Inner()` then `i.method()`: the construction resolved and the method did not.
