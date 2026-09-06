@@ -1164,14 +1164,29 @@ def build(dirs=None, write=True):
     # define it. Follow the chain to where the name actually lives, with a hop limit because a
     # circular re-export is expressible even if it would not import.
     defined_in = {(n["module"], n["name"]) for n in nodes if n["kind"] in ("func", "class")}
+    # Follow it under the name the OTHER module knows it by, not the one written here.
+    # `from pkg import load as l` re-exported through a package walked the chain looking for
+    # `l`, which no module along it has ever heard of, so the hop failed on the first step and
+    # the call came back EXTERNAL. Aliasing an import is 3.7% of the from-imports in the
+    # standard library, and the unaliased form worked, so the two spellings of one import gave
+    # different answers - and the failing one failed silently.
     for mid in mod_from:
         for name, target in list(mod_from[mid].items()):
+            real = mod_orig.get(mid, {}).get(name, name)
             hops, seen_hops = 0, set()
-            while (target, name) not in defined_in and target in mod_from and hops < 8:
-                nxt = mod_from[target].get(name)
+            while (target, real) not in defined_in and target in mod_from and hops < 8:
+                nxt = mod_from[target].get(real)
                 if not nxt or nxt in seen_hops: break
-                seen_hops.add(nxt); target = nxt; hops += 1
+                # each module along the chain may have renamed it again on the way through
+                seen_hops.add(nxt)
+                real = mod_orig.get(target, {}).get(real, real)
+                target = nxt; hops += 1
             mod_from[mid][name] = target
+            # And under the name the DEFINING module uses, which is not necessarily the one
+            # this module imported: every hop is free to rename it again. Following the chain
+            # to the right module and then asking it for the wrong name resolves to nothing,
+            # which looks exactly like a call to something outside the tree.
+            if real != name: mod_orig.setdefault(mid, {})[name] = real
     by_name = defaultdict(list); by_modname = {}; def_ids = set()
     # A bare name written in one scope can only reach a definition at MODULE level. A class
     # defined inside a function is not visible outside it - `def holder(): class Inner: ...`

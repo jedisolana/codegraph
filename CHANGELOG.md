@@ -4,6 +4,20 @@
 
 First release.
 
+### A renamed import was a different function
+
+`from pkg import load` resolved and `from pkg import load as l` did not. When a package
+re-exports a name, the chain that follows it to where the name really lives was walked under
+the name written at the call site — so aliasing it meant no module along the chain had heard of
+that name, the first hop failed, and the call came back `EXTERNAL`: the label that means "not
+in your tree" about a function two directories away. Two spellings of one import, two different
+answers, and the wrong one silent.
+
+The chain is now followed under the name each module along it actually knows, and the name the
+defining module uses is carried back — every hop is free to rename it again, and arriving at
+the right module to ask for the wrong name resolves to nothing, which looks identical to a call
+going outside the tree.
+
 ### Two calls were one edge even when they landed in different places
 
 Call edges were deduplicated on (caller, receiver, name). A method holding

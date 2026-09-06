@@ -2513,6 +2513,61 @@ class ThingsCalledWhenAClassOrAStringIsBuilt(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.S.__str__"), ["m.use"])
 
 
+class ARenamedImportIsStillTheSameFunction(Sandbox):
+    """`from pkg import load` resolved and `from pkg import load as l` did not.
+
+    A package re-exports a name, and the chain that follows it to where the name really lives
+    was walked under the name written HERE. Alias it and no module along the chain has ever
+    heard of that name, so the first hop fails and the call comes back EXTERNAL - the label
+    that means "not in your tree" about a function two directories away. Two spellings of one
+    import, two different answers, and the wrong one silent.
+    """
+
+    def tree(self, consumer):
+        self.write("a/__init__.py", "")
+        self.write("a/inner.py", "def shared():\n    return 'a'\n")
+        self.write("a/sub/__init__.py", "from ..inner import shared\n")
+        self.write("uses.py", consumer)
+        return self.graph()
+
+    def test_a_reexported_name_resolves_under_an_alias(self):
+        g = self.tree("from a.sub import shared as s\n\n\ndef use():\n    return s()\n")
+        self.assertEqual(codegraph.callers_of(g, "a/inner.shared"), ["uses.use"])
+
+    def test_the_unaliased_form_still_resolves(self):
+        """The control that makes the test above a comparison rather than a claim: this one
+        always worked, and if it ever stops the two are broken together."""
+        g = self.tree("from a.sub import shared\n\n\ndef use():\n    return shared()\n")
+        self.assertEqual(codegraph.callers_of(g, "a/inner.shared"), ["uses.use"])
+
+    def test_a_direct_aliased_import_still_resolves(self):
+        """The other control: aliasing was never broken on its own, only in combination with
+        a re-export, which is what made it look like the alias worked."""
+        g = self.tree("from a.inner import shared as s\n\n\ndef use():\n    return s()\n")
+        self.assertEqual(codegraph.callers_of(g, "a/inner.shared"), ["uses.use"])
+
+    def test_a_name_renamed_again_midway_is_still_followed(self):
+        """Every hop is free to rename it. Following the chain to the right module and then
+        asking that module for the wrong name resolves to nothing, which is indistinguishable
+        from a call to something outside the tree."""
+        self.write("pk/__init__.py", "")
+        self.write("pk/base.py", "def original():\n    return 1\n")
+        self.write("pk/mid/__init__.py", "from ..base import original as renamed\n")
+        self.write("top.py", "from pk.mid import renamed as again\n\n\ndef use():\n    return again()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pk/base.original"), ["top.use"])
+
+    def test_a_circular_reexport_terminates(self):
+        """Two packages re-exporting each other is expressible even though it would not
+        import. The walk has a hop limit and a seen-set; carrying a renamed name through it
+        must not give either of them the slip."""
+        self.write("x/__init__.py", "from y import thing as thing\n")
+        self.write("y/__init__.py", "from x import thing as thing\n")
+        self.write("go.py", "from x import thing\n\n\ndef use():\n    return thing()\n")
+        g = self.graph()                      # the assertion is that this returns at all
+        self.assertTrue(any(n["id"] == "go.use" for n in g["nodes"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
