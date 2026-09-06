@@ -1707,10 +1707,6 @@ def _files(g):
     return out
 
 
-def _by_name(g, name):
-    return [n["id"] for n in g["nodes"] if n["name"] == name and n["kind"] in ("func", "class")]
-
-
 def _ids_matching(g, name):
     """The definitions a query name refers to: an exact id, else every id it is a dotted TAIL of.
 
@@ -2164,13 +2160,21 @@ def _main(argv=None):
             rest.append(tok)
     a = rest
 
-    def wanted(module):
-        """True if this module survives --only and --exclude."""
-        if keep_pat and not any(fnmatch.fnmatch(module, p) for p in keep_pat): return False
-        return not any(fnmatch.fnmatch(module, p) for p in drop_pat)
+    def wanted(what):
+        """True if this id survives --only and --exclude.
+
+        Matched against the FULL id and against its module, because both are things a person
+        reaches for: `tests/*` is a corner of the tree, `*.V.*` is a class inside one file.
+        Matching only the module meant the second silently matched nothing - which I found by
+        typing it and getting back the exact list I was trying to filter out.
+        """
+        names = (what, _module_of(what))
+        if keep_pat and not any(fnmatch.fnmatch(n, p) for n in names for p in keep_pat):
+            return False
+        return not any(fnmatch.fnmatch(n, p) for n in names for p in drop_pat)
 
     def keep_ids(ids):
-        return [i for i in ids if wanted(_module_of(i))]
+        return [i for i in ids if wanted(i)]
     # Every query verb takes a name. Forgetting it used to be an IndexError traceback - the
     # first thing a new user sees when they type a command from memory.
     NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
@@ -2234,7 +2238,7 @@ def _main(argv=None):
         else: print("\n".join(found) or "(none)")
     elif a[0] == "where":
         g = load()
-        hits = [(i, loc) for i, loc in where(g, a[1]) if wanted(_module_of(i))]
+        hits = [(i, loc) for i, loc in where(g, a[1]) if wanted(i)]
         if not hits and _describe(g, a[1])[0] == "module":
             # Every other verb explains this; `where` used to answer "(not found)" about a
             # module sitting right there in the graph.
@@ -2245,7 +2249,7 @@ def _main(argv=None):
         else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
         if not hits: return 1                    # a search that matched nothing, like grep
     elif a[0] == "find":
-        hits = [(i, loc) for i, loc in find(load(), a[1]) if wanted(_module_of(i))]
+        hits = [(i, loc) for i, loc in find(load(), a[1]) if wanted(i)]
         if as_json: _emit({"query": "find", "results": [{"id": i, "at": loc} for i, loc in hits]})
         else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(none)")
         if not hits: return 1
@@ -2253,7 +2257,7 @@ def _main(argv=None):
         g = load()
         t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        found = [(loc, c) for loc, c in sites(g, t) if wanted(_module_of(c))]
+        found = [(loc, c) for loc, c in sites(g, t) if wanted(c)]
         if as_json: _emit({"query": "sites", "target": t[0] if isinstance(t, list) else t,
                            "results": [{"at": loc, "caller": c} for loc, c in found]})
         else: print("\n".join(f"{loc}  {c}" for loc, c in found) or "(none)")
@@ -2291,9 +2295,9 @@ def _main(argv=None):
         if t is None: return rc
         im = impact(g, t)
         im = {"callers": keep_ids(im["callers"]),
-              "sites": [(loc, c) for loc, c in im["sites"] if wanted(_module_of(c))],
+              "sites": [(loc, c) for loc, c in im["sites"] if wanted(c)],
               "blast": keep_ids(im["blast"]),
-              "unresolved": [(loc, c) for loc, c in im["unresolved"] if wanted(_module_of(c))]}
+              "unresolved": [(loc, c) for loc, c in im["unresolved"] if wanted(c)]}
         if as_json:
             # The prose says how MANY the blast radius holds; an agent asking what breaks needs
             # to be told WHICH, and the library has always returned them. Nothing is truncated
@@ -2324,14 +2328,14 @@ def _main(argv=None):
                   f"this name and could not be resolved - {', '.join(loc for loc, _ in u[:4])}"
                   + (" ..." if len(u) > 4 else ""))
     elif a[0] == "symbols":
-        rows = [r for r in symbols(load()) if wanted(_module_of(r[0]))]
+        rows = [r for r in symbols(load()) if wanted(r[0])]
         if as_json:
             _emit({"query": "symbols",
                    "results": [{"id": i, "at": loc, "kind": k} for i, loc, k in rows]})
         else:
             print("\n".join(f"{i}  {loc}" for i, loc, _k in rows) or "(none)")
     elif a[0] == "unused":
-        rows = [r for r in unused(load()) if wanted(_module_of(r[0]))]
+        rows = [r for r in unused(load()) if wanted(r[0])]
         if as_json:
             _emit({"query": "unused",
                    "results": [{"id": i, "at": loc, "called_by_python": d} for i, loc, d in rows]})

@@ -106,9 +106,19 @@ class TheOnDiskContract(Sandbox):
     def test_the_graph_is_written_beside_the_code_not_beside_the_script(self):
         """It used to land next to codegraph.py: analyse someone's repo, pollute your own."""
         self.write("x.py", "def f():\n    return 1\n")
+        # Whether one is ALREADY here is the developer's business - running the tool in its own
+        # repository is the most ordinary thing there is. What must be true is that this build
+        # did not put one here.
+        beside_the_script = os.path.join(HERE, "codegraph.json")
+        before = os.path.exists(beside_the_script)
+        stamp = os.path.getmtime(beside_the_script) if before else None
         self.graph()
         self.assertTrue(os.path.exists(os.path.join(self.dir, "codegraph.json")))
-        self.assertFalse(os.path.exists(os.path.join(HERE, "codegraph.json")))
+        self.assertEqual(os.path.exists(beside_the_script), before,
+                         "the build created a graph next to the script")
+        if before:
+            self.assertEqual(os.path.getmtime(beside_the_script), stamp,
+                             "the build overwrote the graph next to the script")
 
     def test_two_builds_of_unchanged_code_are_byte_identical(self):
         """Deterministic output is what makes a graph diffable between commits."""
@@ -2077,13 +2087,25 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
     TEXT = frozenset({".py", ".md", ".toml", ".yml", ".yaml", ".cfg", ".txt", ".json", ".sh", ""})
 
     def shipped_files(self):
+        """What git tracks - which is what "shipped" means, and is not the same as what happens
+        to be lying in the directory. Running codegraph inside its own repository leaves a
+        codegraph.json full of absolute paths, and this scan used to read it and fail: the tool
+        being used normally broke its own test suite."""
         me = os.path.abspath(__file__)
-        for root, dirs, names in os.walk(HERE):
-            dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS and not d.endswith(".egg-info")]
-            for n in names:
-                full = os.path.join(root, n)
-                if full == me or os.path.splitext(n)[1].lower() not in self.TEXT:
-                    continue
+        tracked = subprocess.run([shutil.which("git") or "git", "ls-files", "-z"],
+                                 cwd=HERE, capture_output=True, text=True)
+        if tracked.returncode == 0 and tracked.stdout:
+            paths = [os.path.join(HERE, p) for p in tracked.stdout.split("\0") if p]
+        else:                                    # not a checkout: fall back to walking
+            paths = []
+            for root, dirs, names in os.walk(HERE):
+                dirs[:] = [d for d in dirs
+                           if d not in self.SKIP_DIRS and not d.endswith(".egg-info")]
+                paths += [os.path.join(root, n) for n in names]
+        for full in paths:
+            if full == me or os.path.splitext(full)[1].lower() not in self.TEXT:
+                continue
+            if os.path.isfile(full):
                 yield full
 
     def test_no_shipped_file_names_a_private_origin(self):
@@ -4955,3 +4977,50 @@ class AskingWhatIsInHere(Sandbox):
     def test_a_blank_find_is_still_refused(self):
         """The guard: this verb exists so that `find ""` did not have to become a wildcard."""
         self.assertEqual(self.run_it("find", "").returncode, 2)
+
+
+class ItSurvivesBeingUsedOnItself(unittest.TestCase):
+    """Running codegraph inside its own repository is the most ordinary thing a person does
+    with it, and it broke the suite three ways: the private-origin scan read the generated
+    codegraph.json and found absolute paths in it, the date scan read the same file, and one
+    test asserted that no graph exists beside the script - true only until somebody runs it."""
+
+    def test_the_generated_graph_is_not_a_shipped_file(self):
+        scan = NothingShippedNamesItsAuthor()
+        listed = set(scan.shipped_files())
+        for name in ("codegraph.json", "codegraph.cache.json"):
+            self.assertNotIn(os.path.join(HERE, name), listed,
+                             f"{name} is generated output, not something this repository ships")
+
+    def test_what_it_scans_is_what_git_tracks(self):
+        tracked = subprocess.run([shutil.which("git") or "git", "ls-files", "-z"],
+                                 cwd=HERE, capture_output=True, text=True)
+        if tracked.returncode != 0:
+            self.skipTest("not a git checkout")
+        known = {os.path.join(HERE, p) for p in tracked.stdout.split("\0") if p}
+        for path in NothingShippedNamesItsAuthor().shipped_files():
+            self.assertIn(path, known, f"{path} is not tracked and should not be scanned")
+
+    def test_a_build_here_leaves_the_repository_answerable(self):
+        """End to end: build a graph in this very directory, then ask it something."""
+        cg = os.path.join(HERE, "codegraph.py")
+        pre = os.path.exists(os.path.join(HERE, "codegraph.json"))
+        try:
+            build = subprocess.run([sys.executable, cg, "build", "."], cwd=HERE,
+                                   capture_output=True, text=True, timeout=300)
+            self.assertEqual(build.returncode, 0, build.stderr[-400:])
+            r = subprocess.run([sys.executable, cg, "impact", "codegraph.build", "--json"],
+                               cwd=HERE, capture_output=True, text=True, timeout=300)
+            got = json.loads(r.stdout)
+            self.assertEqual(got["target"], "codegraph.build")
+            self.assertIn("codegraph.load", got["callers"])
+            dead = subprocess.run([sys.executable, cg, "unused", "--only", "codegraph*",
+                                   "--exclude", "*.V.*", "--json"],
+                                  cwd=HERE, capture_output=True, text=True, timeout=300)
+            self.assertEqual(json.loads(dead.stdout)["results"], [],
+                             "codegraph has a function nothing calls")
+        finally:
+            if not pre:
+                for n in ("codegraph.json", "codegraph.cache.json"):
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(HERE, n))

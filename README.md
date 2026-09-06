@@ -143,7 +143,8 @@ codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         32 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 --json                       any query, answered as data instead of prose
---only PAT / --exclude PAT   keep or drop results by module — `--exclude 'tests/*'`
+--only PAT / --exclude PAT   keep or drop results — a glob over the id or its module,
+                             so `--exclude 'tests/*'` and `--exclude '*.Handler.*'` both work
 ```
 
 **Exit codes**, because scripts and agents read them:
@@ -317,7 +318,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 398 more. Grouped, because a list of every one of them stopped being
+The test suite adds 401 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
