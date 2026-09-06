@@ -2568,6 +2568,70 @@ class ARenamedImportIsStillTheSameFunction(Sandbox):
         self.assertTrue(any(n["id"] == "go.use" for n in g["nodes"]))
 
 
+class ConstructingRunsNewAsWellAsInit(Sandbox):
+    """`X()` runs `__new__` and then `__init__`, and only the second half was recorded.
+
+    The constructor edge was added because `impact __init__` on a class built in twenty places
+    answered "callers: (none)". The same argument covers `__new__`, and it was left out: 237
+    definitions in the standard library, 8 of them with a caller. A class that defines only
+    `__new__` - a singleton, an immutable type, anything that interns its instances - reported
+    that nothing depends on the method that builds it.
+
+    Not an either/or. A class defining both runs both, so both get the edge.
+    """
+
+    def test_a_class_with_only_new_has_a_constructor_caller(self):
+        self.write("m.py", "class Singleton:\n"
+                           "    def __new__(cls, *a):\n"
+                           "        return super().__new__(cls)\n"
+                           "\n"
+                           "def build():\n"
+                           "    return Singleton()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Singleton.__new__"), ["m.build"])
+
+    def test_a_class_with_both_credits_both(self):
+        """Python calls `__new__` then `__init__`; picking one would be inventing an answer
+        about which half of construction a change can reach."""
+        self.write("m.py", "class Both:\n"
+                           "    def __new__(cls, *a):\n"
+                           "        return super().__new__(cls)\n"
+                           "    def __init__(self, x):\n"
+                           "        self.x = x\n"
+                           "\n"
+                           "def build():\n"
+                           "    return Both(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Both.__new__"), ["m.build"])
+        self.assertEqual(codegraph.callers_of(g, "m.Both.__init__"), ["m.build"])
+
+    def test_an_inherited_new_is_found_through_the_mro(self):
+        """Same order the interpreter uses, the way an inherited `__init__` already was."""
+        self.write("m.py", "class Base:\n"
+                           "    def __new__(cls, *a):\n"
+                           "        return super().__new__(cls)\n"
+                           "\n"
+                           "class Sub(Base):\n"
+                           "    pass\n"
+                           "\n"
+                           "def build():\n"
+                           "    return Sub()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Base.__new__"), ["m.build"])
+
+    def test_a_class_with_neither_produces_no_such_edge(self):
+        """The negative half: `object.__new__` is not in the tree, and inventing an edge to a
+        method the class does not have would be worse than the gap it fills."""
+        self.write("m.py", "class Plain:\n"
+                           "    pass\n"
+                           "\n"
+                           "def build():\n"
+                           "    return Plain()\n")
+        g = self.graph()
+        made_up = [e for e in g["calls"] if e["callee"] in ("__new__", "__init__")]
+        self.assertEqual(made_up, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

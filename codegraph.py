@@ -1469,6 +1469,15 @@ def build(dirs=None, write=True):
     ctor = []
     for e in calls:
         if e.get("dst") in class_ids:
+            # Constructing also runs `__new__`, BEFORE `__init__` and independently of it -
+            # not an either/or, since a class defining both runs both. This half was missed:
+            # 237 definitions in the standard library, 8 of them with a caller. A class that
+            # defines only `__new__` - a singleton, an immutable type, anything interning its
+            # instances - answered "nothing depends on this" about the method that builds it.
+            for c in _mro(e["dst"], bases_of, mro_cache):
+                if (c + ".__new__") in def_ids:
+                    ctor.append({**e, "dst": c + ".__new__", "confidence": "CONSTRUCTOR"})
+                    break
             for c in _mro(e["dst"], bases_of, mro_cache):
                 if (c + ".__init__") in def_ids:
                     ctor.append({**e, "dst": c + ".__init__", "confidence": "CONSTRUCTOR"})

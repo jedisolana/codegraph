@@ -51,7 +51,7 @@ Every call edge carries a confidence label:
 | `INHERITED` | `self.method()` or `super().method()`, where the method lives on a base class | yes |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module | yes |
 | `TYPED` | the receiver's class is known: `x = Foo()`, `x = svc.Foo()`, or an annotation that says so | yes |
-| `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__init__` it runs | yes |
+| `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__new__` and `__init__` it runs | yes |
 | `AMBIGUOUS` | several definitions match; the candidates are listed and none is picked | no |
 | `BUILTIN` | `len()`, `open()`, `sorted()` — certainly not yours | no |
 | `EXTERNAL` | a library, the stdlib, or a method whose name nothing in your tree defines | no |
@@ -360,7 +360,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 451 more. Grouped, because a list of every one of them stopped being
+The test suite adds 455 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

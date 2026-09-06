@@ -4,6 +4,18 @@
 
 First release.
 
+### Constructing an object runs `__new__` too
+
+The constructor edge exists because `impact __init__` on a class built in twenty places used to
+answer "callers: (none)". `X()` runs `__new__` first, and that half was never recorded: 237
+definitions in the standard library, 8 of them with a caller. A class defining only `__new__` —
+a singleton, an immutable type, anything that interns its instances — reported that nothing
+depends on the method that builds it.
+
+Both are recorded now, not one or the other, because a class defining both runs both. Found
+through the same inheritance order as `__init__`. 125 of those 237 now have a caller, 1,373
+more edges resolve, and the resolution rate goes from 0.409 to 0.413 at no measurable cost.
+
 ### A renamed import was a different function
 
 `from pkg import load` resolved and `from pkg import load as l` did not. When a package
