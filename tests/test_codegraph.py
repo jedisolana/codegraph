@@ -5034,7 +5034,11 @@ class TheHandWrittenWalkMatchesTheStandardOne(unittest.TestCase):
 
     def test_over_its_own_test_suite(self):
         with open(os.path.abspath(__file__), encoding="utf-8") as f:
-            self.assert_same_walk(f.read(), "the tests")
+            n = self.assert_same_walk(f.read(), "the tests")
+        # The count, not just the absence of a failure. A comparison that walks nothing
+        # reports the same silence as a comparison that agrees, and only one of those is
+        # evidence - the sibling above has checked it from the start and these two did not.
+        self.assertGreater(n, 5000, "that walk covered almost nothing")
 
     def test_over_syntax_this_file_does_not_happen_to_contain(self):
         exotic = ("async def a(x: int = 1, *args, k: str = 'v', **kw) -> bool:\n"
@@ -5064,7 +5068,8 @@ class TheHandWrittenWalkMatchesTheStandardOne(unittest.TestCase):
                        "            return rest\n"
                        "        case C(x=0) as got:\n"
                        "            return got\n")
-        self.assert_same_walk(exotic, "exotic syntax")
+        n = self.assert_same_walk(exotic, "exotic syntax")
+        self.assertGreater(n, 40, "that fixture was too small to mean anything")
 
     def test_a_redefined_name_still_resolves_to_the_last_one(self):
         """The observable consequence of walk order, checked end to end."""
