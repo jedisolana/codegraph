@@ -16,6 +16,7 @@ do that on a `git clone` of the repository rather than the copy you are working 
 while it runs the file on disk is a broken one.
 """
 import ast
+import contextlib
 import hashlib
 import os
 import random
@@ -94,6 +95,17 @@ def main(argv):
                  f"       mutation.py --help           what this does and why")
     if want < 1:
         sys.exit("a run of no mutations proves nothing")
+    marker_path = os.path.join(os.path.dirname(TARGET), ".mutation-running")
+    if os.path.exists(marker_path):
+        # Say what happened, rather than leaving "commit or stash" to be read as advice about
+        # work somebody did themselves.
+        with open(marker_path, encoding="utf-8") as fh:
+            where = fh.readline().strip()
+        sys.exit(f"a previous run was killed before it could put codegraph.py back.\n"
+                 f"  the file on disk is a mutated, comment-stripped rewrite of the real one\n"
+                 f"  restore it:  git checkout -- codegraph.py\n"
+                 f"  or from:     {where}\n"
+                 f"  then remove: {marker_path}")
     if not clean_tree():
         sys.exit("codegraph.py has uncommitted changes - commit or stash them first, because "
                  "this rewrites the file and an interrupted run would be hard to tell apart")
@@ -102,6 +114,14 @@ def main(argv):
     before = hashlib.sha256(text.encode()).hexdigest()
     backup = os.path.join(tempfile.mkdtemp(), "codegraph.py")
     shutil.copy(TARGET, backup)
+    # A breadcrumb, because the restore below is in a `finally` and a `finally` does not run
+    # when the process is killed - which is how a long run actually ends when a machine runs
+    # short of memory. What it leaves behind is not one flipped comparison: every mutation is
+    # written back with ast.unparse, so the file on disk has lost the shebang and every comment
+    # in it. That is a 2,500-line diff and nothing on screen to say why.
+    marker = os.path.join(os.path.dirname(TARGET), ".mutation-running")
+    with open(marker, "w", encoding="utf-8") as fh:
+        fh.write(f"{backup}\n{before}\n")
 
     every = list(candidates(ast.parse(text)))
     random.seed(seed)
@@ -150,6 +170,8 @@ def main(argv):
                 print(f"  {tried}/{len(sample)}  {killed} killed, {len(survivors)} survived"
                       f"  ~{left/60:.0f} min left", flush=True)
     finally:
+        with contextlib.suppress(OSError):
+            os.remove(marker)
         shutil.copy(backup, TARGET)
         with open(TARGET, encoding="utf-8") as fh:
             after = hashlib.sha256(fh.read().encode()).hexdigest()

@@ -212,9 +212,15 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. 208 mutations, all caught. It
-edits the file in place, so it refuses to start on a dirty tree and verifies the file byte for
-byte before it exits.
+change — a suite that never fails is not evidence of anything. The file admits 839 mutations,
+and the count is checked by a test, because it was published as 208 here and 710 in the README
+while the real number was neither.
+
+It edits codegraph.py in place, so it refuses to start unless that file is committed, and it
+verifies it byte for byte before exiting. A run that is killed rather than finished cannot do
+that — `finally` does not run — and what it leaves behind is not one flipped comparison but the
+whole file rewritten without its comments, so it now drops a marker on the way in and explains
+itself on the way back.
 
 ### Correctness work before release
 

@@ -3070,6 +3070,56 @@ class TheStatsBlockInTheReadmeIsRealOutput(unittest.TestCase):
                                d["resolution_rate"], places=3)
 
 
+class TheMutationCountInTheDocsIsReal(Sandbox):
+    """Both documents publish how many mutations the tool admits, and they disagreed with each
+    other and with the file: the CHANGELOG said 208, the README said 710, and there were 839.
+
+    Nothing checked either. The selftest count beside them is checked and was right, which is
+    the whole argument - the number with a test on it stayed true and the two without it drifted
+    in different directions.
+
+    Only the COUNT is verified here. Whether every one of them is caught takes hours, so that
+    claim is made by running `tools/mutation.py` and is not something a unit test can stand
+    behind - but a count that is wrong makes the sentence around it wrong too, and the count is
+    free.
+    """
+
+    def harness(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mutharness", os.path.join(HERE, "tools", "mutation.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)      # main() sits behind if __name__ == "__main__"
+        return mod
+
+    def actual(self):
+        with open(os.path.join(HERE, "codegraph.py"), encoding="utf-8") as f:
+            return len(list(self.harness().candidates(ast.parse(f.read()))))
+
+    def test_both_documents_state_the_real_number(self):
+        import re
+        n = self.actual()
+        self.assertGreater(n, 100, "the harness found almost no mutations to make")
+        for name in ("README.md", "CHANGELOG.md"):
+            with open(os.path.join(HERE, name), encoding="utf-8") as f:
+                text = f.read()
+            claims = [int(x) for x in re.findall(r"(\d[\d,]*) mutations", text.replace(",", ""))]
+            self.assertTrue(claims, f"{name} no longer states a mutation count")
+            for c in claims:
+                self.assertEqual(c, n, f"{name} says {c} mutations; the file admits {n}")
+
+    def test_the_two_documents_agree_with_each_other(self):
+        """They did not, and each was wrong in its own direction - which is what happens to a
+        number written twice and checked nowhere."""
+        import re
+        counts = {}
+        for name in ("README.md", "CHANGELOG.md"):
+            with open(os.path.join(HERE, name), encoding="utf-8") as f:
+                counts[name] = {int(x) for x in
+                                re.findall(r"(\d[\d,]*) mutations", f.read().replace(",", ""))}
+        self.assertEqual(counts["README.md"], counts["CHANGELOG.md"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

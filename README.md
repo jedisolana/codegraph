@@ -115,13 +115,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3764,
-  "call_sites": 5023,
-  "edge_confidence": {"EXTERNAL": 1996, "INHERITED": 601, "BUILTIN": 437, "SELF-METHOD": 297,
-                      "QUALIFIED": 257, "LOCAL": 119, "UNTYPED": 53, "CONSTRUCTOR": 3,
+  "call_edges": 3801,
+  "call_sites": 5067,
+  "edge_confidence": {"EXTERNAL": 2023, "INHERITED": 601, "BUILTIN": 444, "SELF-METHOD": 299,
+                      "QUALIFIED": 257, "LOCAL": 119, "UNTYPED": 54, "CONSTRUCTOR": 3,
                       "TYPED": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1278,
-  "could_have_been_resolved": 1331,
+  "resolved_to_one_def": 1280,
+  "could_have_been_resolved": 1334,
   "resolution_rate": 0.96
 }
 ```
@@ -321,10 +321,15 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 A suite that never fails is not evidence of anything, so it is checked the other way round.
 `tools/mutation.py` breaks the tool one small way at a time — flips a comparison, swaps an
 `and` for an `or`, drops a `not`, moves a number by one — and runs the suite against each
-change. Every one of them should make something go red. **All 710 mutations the file admits:
-710 caught, none survived.** Two of them do not make the suite fail but make it never finish —
-flip the comparison that ends a `while` — and those are caught by a timeout and counted apart,
-because "hung" and "failed" are different facts.
+change. Every one of them should make something go red, and one that does not is the
+interesting output: it names a behaviour nothing is checking.
+
+**The file admits 839 mutations.** A full pass is hours of work, so it is run deliberately
+rather than on every push, and the count is checked by a test — it was published as 710 here
+and 208 in the changelog while the file admitted 839, because a number written twice and
+checked nowhere drifts in two directions. Two mutations do not make the suite fail but make
+it never finish — flip the comparison that ends a `while` — and those are caught by a timeout
+and counted apart, because "hung" and "failed" are different facts.
 
 Which name shadows which is the question everything else rests on, so it is not only
 checked against fixtures: `symtable` is CPython's own scope analysis, and on the versions
@@ -362,7 +367,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 487 more. Grouped, because a list of every one of them stopped being
+The test suite adds 489 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
