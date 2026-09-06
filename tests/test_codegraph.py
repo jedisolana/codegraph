@@ -2010,6 +2010,130 @@ class WhenTheDirectoryIsReadOnly(unittest.TestCase):
                         "the cache did not follow the graph")
 
 
+class ReadingAPropertyRunsIt(Sandbox):
+    """`c.endpoint` on a property is a call, and it writes no parentheses.
+
+    Nothing about it is an ast.Call, so the call visitor never saw one: every @property in a
+    tree answered "callers: (none)", and `impact` on one said changing it would break nothing.
+    That is the tool's worst shape of wrong answer, because it is the answer somebody deletes
+    code on. In the standard library it covered 807 definitions, 331 of which really are read
+    somewhere.
+    """
+
+    def test_a_property_read_through_an_annotation_has_a_caller(self):
+        self.write("m.py", "class Cfg:\n"
+                           "    @property\n"
+                           "    def endpoint(self):\n"
+                           "        return 'x'\n"
+                           "\n"
+                           "def reads(c: Cfg):\n"
+                           "    return c.endpoint\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.endpoint"), ["m.reads"])
+
+    def test_the_method_beside_it_already_worked(self):
+        """The control that makes the test above mean something: same class, same annotation,
+        same shape. If this ever fails the two are broken together and neither proves anything
+        about properties."""
+        self.write("m.py", "class Cfg:\n"
+                           "    def method(self):\n"
+                           "        return 'y'\n"
+                           "\n"
+                           "def calls(c: Cfg):\n"
+                           "    return c.method()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.method"), ["m.calls"])
+
+    def test_a_property_read_on_self_resolves_in_its_own_class(self):
+        self.write("m.py", "class Cfg:\n"
+                           "    @property\n"
+                           "    def endpoint(self):\n"
+                           "        return 'x'\n"
+                           "\n"
+                           "    def show(self):\n"
+                           "        return self.endpoint\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.endpoint"), ["m.Cfg.show"])
+
+    def test_an_inherited_property_is_found_through_the_mro(self):
+        """`self.raw` in a subclass, where the property is on the mixin - the shape the
+        standard library's buffered IO is built out of, and where most of the real edges are."""
+        self.write("m.py", "class Mixin:\n"
+                           "    @property\n"
+                           "    def raw(self):\n"
+                           "        return self._raw\n"
+                           "\n"
+                           "class Reader(Mixin):\n"
+                           "    def peek(self):\n"
+                           "        return self.raw\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Mixin.raw"), ["m.Reader.peek"])
+
+    def test_cached_property_counts_and_so_does_a_setter(self):
+        self.write("m.py", "from functools import cached_property\n"
+                           "\n"
+                           "class Cfg:\n"
+                           "    @cached_property\n"
+                           "    def heavy(self):\n"
+                           "        return 1\n"
+                           "\n"
+                           "    @property\n"
+                           "    def name(self):\n"
+                           "        return self._n\n"
+                           "\n"
+                           "    @name.setter\n"
+                           "    def name(self, v):\n"
+                           "        self._n = v\n"
+                           "\n"
+                           "def use(c: Cfg):\n"
+                           "    return c.heavy, c.name\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.heavy"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.name"), ["m.use"])
+
+    def test_an_ordinary_attribute_is_not_a_call(self):
+        """The negative half, and the one that keeps the graph honest. Every typed attribute
+        read is recorded while parsing, because whether a name is a property cannot be known
+        one file at a time - and all but a fraction are plain fields that must be dropped."""
+        self.write("m.py", "class Cfg:\n"
+                           "    def __init__(self):\n"
+                           "        self.count = 0\n"
+                           "\n"
+                           "    def show(self):\n"
+                           "        return self.count\n"
+                           "\n"
+                           "def use(c: Cfg):\n"
+                           "    return c.count\n")
+        g = self.graph()
+        reads = [e for e in g["calls"] if e["callee"] == "count"]
+        self.assertEqual(reads, [], f"a plain attribute became a call edge: {reads}")
+
+    def test_a_property_name_belonging_to_another_class_is_not_borrowed(self):
+        """Two classes, one property name. Reading it off the class that does not define it
+        must not point at the one that does."""
+        self.write("m.py", "class HasIt:\n"
+                           "    @property\n"
+                           "    def tag(self):\n"
+                           "        return 'a'\n"
+                           "\n"
+                           "class HasNot:\n"
+                           "    def __init__(self):\n"
+                           "        self.tag = 'b'\n"
+                           "\n"
+                           "def use(x: HasNot):\n"
+                           "    return x.tag\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.HasIt.tag"), [])
+
+    def test_a_property_that_nothing_reads_is_still_reported_unused(self):
+        self.write("m.py", "class Cfg:\n"
+                           "    @property\n"
+                           "    def never(self):\n"
+                           "        return 1\n")
+        g = self.graph()
+        self.assertIn("m.Cfg.never", [u[0] for u in codegraph.unused(g)])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

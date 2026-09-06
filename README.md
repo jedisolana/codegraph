@@ -71,6 +71,12 @@ what they run. `Client()` runs an `__init__`; `super().save()` runs a parent's `
 runs a `__call__`. Without those edges the tool answers "nothing depends on this" about the
 most-edited method in Python.
 
+**Reading a property runs it**, and writes no parentheses doing so — `c.endpoint` is a call
+with nothing in the syntax to say so. Attribute reads are counted wherever the receiver can be
+typed, the same reach a method call has: `self` and `cls` inside a class, or a local whose
+class is known, resolved through the same inheritance order. In the standard library that is
+807 definitions, 331 of which really are read somewhere and used to report no callers at all.
+
 Most call-graph tools guess and hand you one answer. This one refuses. An `AMBIGUOUS` edge is
 a real result: it means the question does not have a single answer, and a blast radius that
 quietly picked one would be worse than no blast radius at all.
@@ -225,6 +231,14 @@ Static analysis, honestly labelled:
 - **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
   that is where it runs. But a decorator that *replaces* the function with a different one is
   not followed through: calls to the decorated name still point at the original `def`.
+- **A property read needs a receiver the file can type.** `self.thing` and `c.thing` where `c`
+  is annotated or was built here both resolve; a bare `x.thing` on an untyped `x` does not, the
+  same way `x.method()` does not. Every typed attribute read is recorded while parsing and
+  dropped afterwards unless the name turns out to be a property, since one file cannot know
+  what another one defines.
+- **A function passed by name is not a call** — `Thread(target=f)`, `sorted(key=f)`,
+  `partial(f, 1)`. `f` is referenced, never invoked here, so it shows in `unused`. That listing
+  says "nothing here calls this", which is not the same as dead, and says so.
 - **`super()` resolves against the class it is written in.** Python's own order for that
   class - so a diamond lands where the interpreter lands. What static analysis cannot know is
   that `B.m`'s `super()` goes to `C` when `B` is reached through a `D(B, C)` instance.
@@ -321,7 +335,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 406 more. Grouped, because a list of every one of them stopped being
+The test suite adds 414 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

@@ -297,6 +297,7 @@ def _defs_and_calls(path, mod):
 
         def __init__(self):
             self._route = {}
+            self._call_funcs = set()                            # ids of Attribute nodes that ARE a call's func, so the reader below does not count `c.f()` twice
             self.scope = [mod]                                  # qualified-name stack: module -> class -> func
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class
@@ -488,7 +489,9 @@ def _defs_and_calls(path, mod):
             self._decorators(node)
             self._signature(node)
             qid = self._qual(node.name)
-            defs.append({"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno})
+            d = {"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno}
+            if _is_property(node): d["prop"] = True
+            defs.append(d)
             self.scope.append(node.name); self.owner.append(qid)
             # A parameter's ANNOTATION is the type, stated outright. `def send(c: Client)` then
             # c.get() was UNTYPED - the tool inferring around an answer the source had written
@@ -583,8 +586,36 @@ def _defs_and_calls(path, mod):
                 if cls or node.value is not None: self._retype(node.target.id, cls)
             self.generic_visit(node)
 
+        def visit_Attribute(self, node):
+            """Reading a property RUNS it, and writes no parentheses doing so.
+
+            Nothing here is an ast.Call, so visit_Call never saw it: every @property in a tree
+            reported "callers: (none)", and `impact` on one answered that changing it would
+            break nothing - the tool's most dangerous shape of wrong answer, because it is the
+            answer somebody deletes code on. A method one line away, on the same annotated
+            receiver, resolved perfectly.
+
+            Only a receiver this file can actually type is recorded - `self`/`cls` inside a
+            class, or a local whose class is known - which is the same reach the method case
+            has. An untyped `x.y` would be a guess, and there are millions of them; a module
+            attribute is not a property at all. Edges that turn out not to point at a property
+            are dropped once every definition is known.
+            """
+            if (isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name)
+                    and id(node) not in self._call_funcs):
+                recv = node.value.id
+                edge = {"src": self.owner[-1], "mod": mod, "callee": node.attr, "recv": recv,
+                        "method": True, "kind": "CALL", "attr_read": True,
+                        "line": getattr(node, "lineno", 0)}
+                if recv in ("self", "cls") and self.classes:
+                    edge["encl_class"] = self.classes[-1]; edges.append(edge)
+                elif self.vtypes[-1].get(recv):
+                    edge["recv_type"] = self.vtypes[-1][recv]; edges.append(edge)
+            self.generic_visit(node)
+
         def visit_Call(self, node):
             fn = node.func
+            if isinstance(fn, ast.Attribute): self._call_funcs.add(id(fn))
             recv = None; method = False
             recv_root = recv_path = None
             if isinstance(fn, ast.Name): callee = fn.id                          # a BARE call foo() - may be local/imported
@@ -689,6 +720,21 @@ def _defs_and_calls(path, mod):
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules)
+
+
+# `@property`, `@cached_property`, and the `@x.setter/.getter/.deleter` that go with them.
+# Anything decorated with one of these is reached by READING an attribute, never by writing
+# parentheses, so no ast.Call node exists at the place it runs.
+_PROPERTY_DECORATORS = frozenset({"property", "cached_property", "setter", "getter", "deleter"})
+
+
+def _is_property(node):
+    """Is this def reached by attribute access rather than by a call?"""
+    for d in node.decorator_list:
+        n = d.func if isinstance(d, ast.Call) else d            # @foo(...) as well as @foo
+        if isinstance(n, ast.Name) and n.id in _PROPERTY_DECORATORS: return True
+        if isinstance(n, ast.Attribute) and n.attr in _PROPERTY_DECORATORS: return True
+    return False
 
 
 def _annotated_class(ann):
@@ -889,6 +935,15 @@ def build(dirs=None, write=True):
     # reparsed, and the answers are in `newcache` now. Holding it through resolution and two
     # JSON writes is a second copy of the whole tree's parse for nothing - on a large one that
     # is hundreds of megabytes still resident at the moment of peak use.
+    # Ninety-eight per cent of the attribute reads recorded during parsing are ordinary field
+    # access - `self.count`, `self._buf` - and were recorded at all only because whether a name
+    # belongs to a property is not knowable while one file is being read. It is knowable now,
+    # and the cheap half of the answer is the NAME: an attribute that nothing in the tree
+    # defines as a property is not one, and does not need an MRO walk to say so. This runs
+    # before the resolution pass rather than after it, which is the difference between carrying
+    # forty thousand dead edges through the expensive half of the build and carrying hundreds.
+    prop_names = {n["name"] for n in nodes if n.get("prop")}
+    calls = [e for e in calls if not e.get("attr_read") or e["callee"] in prop_names]
     cache = None
     if multiroot:                                              # remap import aliases to the SAME-ROOT module id, so within-tree imports resolve to the right tree
         allmods = {n["id"] for n in nodes if n["kind"] == "module"}   # the ids known at this point
@@ -1183,6 +1238,12 @@ def build(dirs=None, write=True):
         if (e["confidence"] == "UNTYPED" and e.get("method")
                 and e["callee"] not in by_name):
             e["confidence"] = "EXTERNAL"
+    # An attribute read was recorded wherever the receiver could be typed, because whether the
+    # name belongs to a property is not knowable until every file has been parsed. Now it is:
+    # anything that did not land on a property was an ordinary attribute - a field, a constant,
+    # a bound method passed around - and is not a call.
+    prop_ids = {n["id"] for n in nodes if n.get("prop")}
+    calls = [e for e in calls if not e.get("attr_read") or e.get("dst") in prop_ids]
     # Constructing an object RUNS its __init__, and that edge was missing. `impact __init__`
     # on a class built in twenty places answered "callers: (none), blast: 0" with exit code 0 -
     # the tool's one unforgivable answer, given to the single most commonly edited method in

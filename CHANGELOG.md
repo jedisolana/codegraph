@@ -4,6 +4,26 @@
 
 First release.
 
+### Reading a property is a call
+
+`c.endpoint` on a `@property` runs a function, and there is nothing in the syntax to say so —
+no `ast.Call` node exists, so the call visitor never saw one. Every property in a tree answered
+`callers: (none)`, and `impact` on one said that changing it would break nothing. That is the
+worst shape of wrong answer this tool can give, because it is the answer somebody deletes code
+on: a method one line away, on the same annotated receiver, resolved perfectly.
+
+Attribute reads are now counted wherever the receiver can be typed — `self`/`cls` inside a
+class, or a local whose class is known — and resolved through the same inheritance order as a
+method call, so a property on a mixin is found from a subclass that reads it. `cached_property`
+and the `@x.setter` family count too.
+
+Against the standard library that is 888 new edges and 310 definitions that no longer claim to
+have no callers, verified against the source rather than counted. Whether a name is a property
+cannot be known while a single file is being parsed, so every typed attribute read is recorded
+and then discarded once all the definitions are in: 98% of them are ordinary fields. They are
+dropped by name before the resolution pass rather than after it, which keeps the cost to
+roughly 5% of peak memory and 6% of build time.
+
 ### Installing it
 
 The distribution is **`jedi-codegraph`**. `codegraph` on PyPI belongs to an unrelated project,
