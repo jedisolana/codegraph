@@ -4909,3 +4909,49 @@ class AnAnswerYouCanScope(Sandbox):
         self.assertIn("\n  app/core.user\n", out)
         self.assertRegex(out, r"\n  app/core\.py:\d+  app/core\.user\n")
         self.assertIn("codegraph blast app/core.shared to list them", out)
+
+
+class AskingWhatIsInHere(Sandbox):
+    """There was no way to list what a codebase contains. `find` needs a substring and refuses
+    a blank one - correctly, since an unset shell variable must not match everything - so
+    surveying a tree meant reading codegraph.json by hand, which is exactly what I ended up
+    doing while trying to rank a real project's functions by how far a change would reach."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(os.path.join("app", "__init__.py"), "")
+        self.write(os.path.join("app", "core.py"),
+                   "class Store:\n    def put(self):\n        return 1\n"
+                   "def helper():\n    return 2\n")
+        self.write(os.path.join("tests", "__init__.py"), "")
+        self.write(os.path.join("tests", "test_core.py"), "def test_it():\n    return 3\n")
+        codegraph.build([self.dir])
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def test_it_lists_every_definition_with_its_kind(self):
+        rows = codegraph.symbols(codegraph.load())
+        self.assertEqual([(i, k) for i, _at, k in rows],
+                         [("app/core.Store", "class"), ("app/core.Store.put", "func"),
+                          ("app/core.helper", "func"), ("tests/test_core.test_it", "func")])
+
+    def test_it_says_where_each_one_is(self):
+        at = {i: loc for i, loc, _k in codegraph.symbols(codegraph.load())}
+        self.assertEqual(at["app/core.helper"], "app/core.py:4")
+
+    def test_it_scopes_like_the_others(self):
+        out = self.run_it("symbols", "--exclude", "tests/*")
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("tests/", out.stdout)
+        self.assertIn("app/core.Store", out.stdout)
+
+    def test_the_json_carries_the_kind(self):
+        got = json.loads(self.run_it("symbols", "--only", "app/*", "--json").stdout)
+        self.assertEqual({r["kind"] for r in got["results"]}, {"class", "func"})
+        self.assertEqual(len(got["results"]), 3)
+
+    def test_a_blank_find_is_still_refused(self):
+        """The guard: this verb exists so that `find ""` did not have to become a wildcard."""
+        self.assertEqual(self.run_it("find", "").returncode, 2)

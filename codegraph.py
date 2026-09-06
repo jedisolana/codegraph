@@ -24,6 +24,7 @@ than no blast radius at all.
   codegraph path <from> <to>   a call path connecting two functions
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
+  codegraph symbols            every function and class defined here
   codegraph unused             every definition nothing here calls - read the caveat
   codegraph stats              counts, resolution rate, never-called definitions
   codegraph --selftest         32 ground-truth checks, several of them red-first
@@ -2002,6 +2003,19 @@ def impact(g, name):
             "blast": blast_radius(g, name), "unresolved": unresolved}
 
 
+def symbols(g):
+    """Every function and class the tree defines, as (id, file:line, kind).
+
+    There was no way to ask what is IN a codebase. `find` needs a substring and refuses a
+    blank one - correctly, since an unset shell variable must not match everything - so
+    surveying a tree meant reading codegraph.json by hand. Which is what I did, repeatedly,
+    while trying to rank this project's functions by how far a change to each would reach.
+    """
+    files = _files(g)
+    return sorted((n["id"], f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}", n["kind"])
+                  for n in g["nodes"] if n["kind"] in ("func", "class"))
+
+
 def unused(g):
     """Every function definition nothing in this tree calls, as (id, file:line, called_by_python).
 
@@ -2309,6 +2323,13 @@ def _main(argv=None):
             print(f"unsure:  {len(u)} call site{'' if one else 's'} {'uses' if one else 'use'} "
                   f"this name and could not be resolved - {', '.join(loc for loc, _ in u[:4])}"
                   + (" ..." if len(u) > 4 else ""))
+    elif a[0] == "symbols":
+        rows = [r for r in symbols(load()) if wanted(_module_of(r[0]))]
+        if as_json:
+            _emit({"query": "symbols",
+                   "results": [{"id": i, "at": loc, "kind": k} for i, loc, k in rows]})
+        else:
+            print("\n".join(f"{i}  {loc}" for i, loc, _k in rows) or "(none)")
     elif a[0] == "unused":
         rows = [r for r in unused(load()) if wanted(_module_of(r[0]))]
         if as_json:
