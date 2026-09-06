@@ -27,6 +27,8 @@ than no blast radius at all.
   codegraph stats              counts, resolution rate, never-called definitions
   codegraph --selftest         32 ground-truth checks, several of them red-first
   codegraph --help             this text
+  --json                       any query, answered as JSON instead of prose - including
+                               the refusals, and including the blast radius by name
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
 matches several definitions or the command was malformed.
@@ -2028,7 +2030,19 @@ def _explain(g, exc):
         print(f"    {i}  {where_.get(i, '')}", file=sys.stderr)
 
 
-def _one_target(g, name):
+def _located(g, ids):
+    """Each id with where it is defined, for a refusal that has to be machine-readable."""
+    at = {n["id"]: f"{_files(g).get(n['module'], n['module'] + '.py')}:{n['line']}"
+          for n in g["nodes"] if n["id"] in set(ids)}
+    return [(i, at.get(i, "?")) for i in sorted(ids)]
+
+
+def _emit(obj):
+    """One shape for every answer: what was asked, and what came back."""
+    print(json.dumps(obj, indent=2))
+
+
+def _one_target(g, name, as_json=False):
     """(target, exit code). The target is None once the problem has been explained.
 
     Three failures a script has to tell apart, and they used to be one: 2 means you were vague
@@ -2046,10 +2060,22 @@ def _one_target(g, name):
     if kind == "module":
         # It IS in the graph - saying "never heard of it" was simply false, and unhelpful in
         # the same breath, since the command they wanted is one word away.
-        print(f"{name!r} is a module, not a function - try: codegraph deps {name}", file=sys.stderr)
+        if as_json:
+            _emit({"error": "not a function", "name": name, "detail": "it is a module",
+                   "try": f"codegraph deps {name}"})
+        else:
+            print(f"{name!r} is a module, not a function - try: codegraph deps {name}",
+                  file=sys.stderr)
         return None, 1
     if kind == "unknown":
-        print(f"nothing named {name!r} is defined or called in this graph", file=sys.stderr)
+        # The refusals are answers too, and an agent should not have to read English to get
+        # them. A misspelling and a function with no callers are the two things that must
+        # never look alike, and telling them apart from prose means matching on a sentence.
+        if as_json:
+            _emit({"error": "unknown name", "name": name,
+                   "detail": "nothing of that name is defined or called in this graph"})
+        else:
+            print(f"nothing named {name!r} is defined or called in this graph", file=sys.stderr)
         return None, 1
     if kind == "called":
         # A legitimate question - "where do we call json.load" - but say that it is what is
@@ -2059,7 +2085,12 @@ def _one_target(g, name):
     try:
         ids = _one(g, name)
     except Ambiguous as exc:
-        _explain(g, exc)
+        if as_json:
+            _emit({"error": "ambiguous", "name": name,
+                   "detail": f"{len(exc.candidates)} definitions answer to that name",
+                   "candidates": [{"id": i, "at": loc} for i, loc in _located(g, exc.candidates)]})
+        else:
+            _explain(g, exc)
         return None, 2
     return ids[0], 0
 
@@ -2068,6 +2099,10 @@ def _main(argv=None):
     """The CLI, as a function so `pip install` can expose it as a console script -- and so the
     tests can drive it in-process instead of shelling out."""
     a = list(sys.argv[1:] if argv is None else argv)
+    # --anywhere, because that is how people type it. The prose below is for a person; this
+    # gives the same answers to whatever is going to parse them.
+    as_json = "--json" in a
+    a = [x for x in a if x != "--json"]
     # Every query verb takes a name. Forgetting it used to be an IndexError traceback - the
     # first thing a new user sees when they type a command from memory.
     NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
@@ -2113,21 +2148,22 @@ def _main(argv=None):
                   if bad else f"no .py files found under {where_}", file=sys.stderr)
             return 1
         print(json.dumps(stats(g), indent=2))
-    elif a[0] == "callers":
+    elif a[0] in ("callers", "calls"):
         g = load()
-        t, rc = _one_target(g, a[1])
+        t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        print("\n".join(callers_of(g, t)) or "(none)")
-    elif a[0] == "calls":
-        g = load()
-        t, rc = _one_target(g, a[1])
-        if t is None: return rc
-        print("\n".join(calls_from(g, t)) or "(none)")
+        found = callers_of(g, t) if a[0] == "callers" else calls_from(g, t)
+        if as_json: _emit({"query": a[0], "target": t[0] if isinstance(t, list) else t,
+                           "results": found})
+        else: print("\n".join(found) or "(none)")
     elif a[0] == "blast":
         g = load()
-        t, rc = _one_target(g, a[1])
+        t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        print("\n".join(blast_radius(g, t)) or "(none)")
+        found = blast_radius(g, t)
+        if as_json: _emit({"query": "blast", "target": t[0] if isinstance(t, list) else t,
+                           "results": found})
+        else: print("\n".join(found) or "(none)")
     elif a[0] == "where":
         g = load()
         hits = where(g, a[1])
@@ -2137,24 +2173,30 @@ def _main(argv=None):
             print(f"{a[1]!r} is a module, not a function - try: codegraph deps {a[1]}",
                   file=sys.stderr)
             return 1
-        print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
+        if as_json: _emit({"query": "where", "results": [{"id": i, "at": loc} for i, loc in hits]})
+        else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
         if not hits: return 1                    # a search that matched nothing, like grep
     elif a[0] == "find":
         hits = find(load(), a[1])
-        print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(none)")
+        if as_json: _emit({"query": "find", "results": [{"id": i, "at": loc} for i, loc in hits]})
+        else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(none)")
         if not hits: return 1
     elif a[0] == "sites":
         g = load()
-        t, rc = _one_target(g, a[1])
+        t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        print("\n".join(f"{loc}  {c}" for loc, c in sites(g, t)) or "(none)")
+        found = sites(g, t)
+        if as_json: _emit({"query": "sites", "target": t[0] if isinstance(t, list) else t,
+                           "results": [{"at": loc, "caller": c} for loc, c in found]})
+        else: print("\n".join(f"{loc}  {c}" for loc, c in found) or "(none)")
     elif a[0] == "path":
         g = load()
         for end in (a[1], a[2]):                     # both endpoints, same rules as every verb
-            t, rc = _one_target(g, end)
+            t, rc = _one_target(g, end, as_json)
             if t is None: return rc
         p = path(g, a[1], a[2])
-        print(" -> ".join(p) if p else "(no path)")
+        if as_json: _emit({"query": "path", "from": a[1], "to": a[2], "results": p})
+        else: print(" -> ".join(p) if p else "(no path)")
     elif a[0] == "deps":
         g = load()
         if not any(n["kind"] == "module" and n["id"] == a[1] for n in g["nodes"]):
@@ -2163,19 +2205,34 @@ def _main(argv=None):
             print(f"no module {a[1]!r} in the graph", file=sys.stderr)
             return 1
         im, imp = module_deps(g, a[1])
-        print("imports:   " + (", ".join(im) or "(none)"))
-        print("importers: " + (", ".join(imp) or "(none)"))
+        if as_json: _emit({"query": "deps", "module": a[1], "imports": im, "importers": imp})
+        else:
+            print("imports:   " + (", ".join(im) or "(none)"))
+            print("importers: " + (", ".join(imp) or "(none)"))
     elif a[0] == "cycles":
         cy = cycles(load())
-        # A one-module group is a module that imports ITSELF. Printed as a bare name it read
-        # like a cycle with one participant, which is not a thing.
-        print("\n".join(" <-> ".join(group if len(group) > 1 else (*group, "itself"))
-                        for group in cy) or "(none)")
+        if as_json: _emit({"query": "cycles", "results": [list(group) for group in cy]})
+        else:
+            # A one-module group is a module that imports ITSELF. Printed as a bare name it
+            # read like a cycle with one participant, which is not a thing.
+            print("\n".join(" <-> ".join(group if len(group) > 1 else (*group, "itself"))
+                            for group in cy) or "(none)")
     elif a[0] == "impact":
         g = load()
-        t, rc = _one_target(g, a[1])
+        t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
         im = impact(g, t)
+        if as_json:
+            # The prose says how MANY the blast radius holds; an agent asking what breaks needs
+            # to be told WHICH, and the library has always returned them. Nothing is truncated
+            # here either - the four-site preview below is a courtesy to a human reader, and a
+            # courtesy is the wrong thing to hand a parser.
+            _emit({"query": "impact", "target": t[0] if isinstance(t, list) else t,
+                   "callers": im["callers"],
+                   "sites": [{"at": loc, "caller": c} for loc, c in im["sites"]],
+                   "blast": im["blast"],
+                   "unresolved": [{"at": loc, "caller": c} for loc, c in im["unresolved"]]})
+            return 0
         print("callers:", ", ".join(im["callers"]) or "(none)")
         print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
         n = len(im["blast"])

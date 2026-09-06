@@ -140,6 +140,7 @@ codegraph cycles             import cycles of any length, including a module imp
 codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         32 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
+--json                       any query, answered as data instead of prose
 ```
 
 **Exit codes**, because scripts and agents read them:
@@ -178,6 +179,25 @@ codegraph.impact(g, "spend_cap")   # {"callers": [...], "sites": [...], "blast":
 `impact` before an edit is the difference between "I changed a function" and "I changed a
 function that five others depend on, here are their line numbers." The output is small, exact,
 and cheap — no model call, no network.
+
+From a shell, add `--json` and every verb answers in data rather than prose — **including the
+refusals**, so a misspelling and a function with nothing calling it stay distinguishable
+without matching on an English sentence:
+
+```bash
+$ codegraph impact leaf --json
+{"query": "impact", "target": "app.leaf", "callers": ["app.mid"],
+ "sites": [{"at": "app.py:4", "caller": "app.mid"}], "blast": ["app.mid", "app.top"],
+ "unresolved": []}
+
+$ codegraph callers digest --json        # exit 2
+{"error": "ambiguous", "name": "digest", "detail": "2 definitions answer to that name",
+ "candidates": [{"id": "pulse.digest", "at": "pulse.py:9"}, ...]}
+```
+
+The prose form of `impact` says the blast radius holds *five functions*; the JSON says
+**which**. That gap existed because the prose was written for a person reading it and nothing
+was checking the other reader.
 
 The library refuses exactly what the command line refuses, through the same code:
 `codegraph.Ambiguous` when several definitions answer to the name, carrying the candidates, and
@@ -294,7 +314,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 374 more. Grouped, because a list of every one of them stopped being
+The test suite adds 380 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

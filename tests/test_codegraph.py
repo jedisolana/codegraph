@@ -4677,3 +4677,99 @@ class TheReadmeListsEveryLabel(unittest.TestCase):
             self.assertEqual(answers[label], "no", label)
         for label in TheGraphKeepsItsOwnInvariants.LABELS - TheGraphKeepsItsOwnInvariants.UNRESOLVED:
             self.assertEqual(answers[label], "yes", label)
+
+
+class TheCommandLineCanAnswerInData(unittest.TestCase):
+    """Written after noticing that in a whole day of using this tool to investigate itself, the
+    command line was never once used to do it - every question went through a Python one-liner
+    reading codegraph.json directly. That is the tool saying something. It prints prose, and
+    the thing asking was a program.
+
+    The sharpest symptom: `impact` prints how MANY functions the blast radius holds and never
+    which, although the library has returned the list all along."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.write("app.py", "def leaf():\n    return 1\n"
+                             "def mid():\n    return leaf()\n"
+                             "def top():\n    return mid()\n")
+        self.write("other.py", "def leaf():\n    return 2\n")
+        self.assertEqual(self.run_it("build", ".").returncode, 0)
+
+    def write(self, name, body):
+        with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def as_json(self, *args):
+        r = self.run_it(*args)
+        try:
+            return json.loads(r.stdout), r.returncode
+        except json.JSONDecodeError:
+            self.fail(f"{' '.join(args)} did not produce JSON:\n{r.stdout}\n{r.stderr}")
+
+    def test_impact_names_the_blast_radius_it_only_counted(self):
+        got, rc = self.as_json("impact", "app.leaf", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(got["target"], "app.leaf")
+        self.assertEqual(got["callers"], ["app.mid"])
+        self.assertEqual(got["blast"], ["app.mid", "app.top"])
+        self.assertEqual(got["sites"], [{"at": "app.py:4", "caller": "app.mid"}])
+        prose = self.run_it("impact", "app.leaf").stdout
+        self.assertIn("2 functions", prose)
+        self.assertNotIn("app.top", prose, "the prose names the count, not the members")
+
+    def test_every_query_verb_answers_in_data(self):
+        for args, want in (
+            (("callers", "app.leaf"), {"query", "target", "results"}),
+            (("calls", "app.mid"), {"query", "target", "results"}),
+            (("blast", "app.leaf"), {"query", "target", "results"}),
+            (("sites", "app.leaf"), {"query", "target", "results"}),
+            (("where", "app.leaf"), {"query", "results"}),
+            (("find", "lea"), {"query", "results"}),
+            (("path", "app.top", "app.leaf"), {"query", "from", "to", "results"}),
+            (("deps", "app"), {"query", "module", "imports", "importers"}),
+            (("cycles",), {"query", "results"}),
+        ):
+            with self.subTest(args[0]):
+                got, rc = self.as_json(*args, "--json")
+                self.assertEqual(rc, 0)
+                self.assertEqual(set(got), want)
+
+    def test_a_refusal_is_data_too(self):
+        """A misspelling and a function with no callers must never look alike, and telling
+        them apart from prose means matching on an English sentence."""
+        amb, rc = self.as_json("callers", "leaf", "--json")
+        self.assertEqual(rc, 2)
+        self.assertEqual(amb["error"], "ambiguous")
+        self.assertEqual([c["id"] for c in amb["candidates"]], ["app.leaf", "other.leaf"])
+
+        unknown, rc = self.as_json("callers", "nosuchname", "--json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(unknown["error"], "unknown name")
+
+        mod, rc = self.as_json("callers", "app", "--json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(mod["error"], "not a function")
+        self.assertIn("deps app", mod["try"])
+
+    def test_an_empty_answer_is_an_empty_list_not_a_word(self):
+        """`(none)` is fine for a person and is a parsing problem for anything else."""
+        got, rc = self.as_json("callers", "app.top", "--json")
+        self.assertEqual((rc, got["results"]), (0, []))
+
+    def test_the_flag_goes_where_you_type_it(self):
+        before, _ = self.as_json("--json", "callers", "app.leaf")
+        after, _ = self.as_json("callers", "app.leaf", "--json")
+        self.assertEqual(before, after)
+
+    def test_without_the_flag_nothing_changed(self):
+        """The guard: prose is still prose, for the person who is reading it."""
+        r = self.run_it("callers", "app.leaf")
+        self.assertEqual(r.stdout.strip(), "app.mid")
+        self.assertEqual(self.run_it("callers", "app.top").stdout.strip(), "(none)")
+        self.assertEqual(self.run_it("callers", "leaf").returncode, 2)

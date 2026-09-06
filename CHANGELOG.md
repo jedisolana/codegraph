@@ -13,6 +13,13 @@ First release.
 - A built-in `--selftest`: 32 ground-truth checks, several of them red-first controls that
   prove the naive approach fails where this one does not.
 
+### Two readers
+
+The command line prints prose for a person. `--json` gives the same answers as data for
+whatever is going to parse them — including the refusals, so a misspelling and a function with
+nothing calling it stay distinguishable without matching on an English sentence. The prose form
+of `impact` says the blast radius holds *five functions*; the JSON says which.
+
 ### The part that matters
 
 Every call edge carries a confidence label, and the tool refuses rather than guesses. An
