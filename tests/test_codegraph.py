@@ -2091,11 +2091,17 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
         to be lying in the directory. Running codegraph inside its own repository leaves a
         codegraph.json full of absolute paths, and this scan used to read it and fail: the tool
         being used normally broke its own test suite."""
-        me = os.path.abspath(__file__)
+        # normpath on BOTH sides: git prints forward slashes, and joining one onto a Windows
+        # root gives `D:\a\repo\tests/test_codegraph.py`, which is not the string
+        # os.path.abspath(__file__) produces. The self-exclusion below then missed, this file
+        # scanned itself, and found its own list of forbidden markers. Green on two machines,
+        # red on the third.
+        me = os.path.normcase(os.path.normpath(os.path.abspath(__file__)))
         tracked = subprocess.run([shutil.which("git") or "git", "ls-files", "-z"],
                                  cwd=HERE, capture_output=True, text=True)
         if tracked.returncode == 0 and tracked.stdout:
-            paths = [os.path.join(HERE, p) for p in tracked.stdout.split("\0") if p]
+            paths = [os.path.normpath(os.path.join(HERE, p))
+                     for p in tracked.stdout.split("\0") if p]
         else:                                    # not a checkout: fall back to walking
             paths = []
             for root, dirs, names in os.walk(HERE):
@@ -2103,7 +2109,8 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                            if d not in self.SKIP_DIRS and not d.endswith(".egg-info")]
                 paths += [os.path.join(root, n) for n in names]
         for full in paths:
-            if full == me or os.path.splitext(full)[1].lower() not in self.TEXT:
+            if (os.path.normcase(os.path.normpath(full)) == me
+                    or os.path.splitext(full)[1].lower() not in self.TEXT):
                 continue
             if os.path.isfile(full):
                 yield full
@@ -5024,3 +5031,30 @@ class ItSurvivesBeingUsedOnItself(unittest.TestCase):
                 for n in ("codegraph.json", "codegraph.cache.json"):
                     with contextlib.suppress(OSError):
                         os.remove(os.path.join(HERE, n))
+
+
+class TheScanExcludesItselfOnEveryPlatform(unittest.TestCase):
+    """This file lists the markers it hunts for, so if the scan ever fails to skip it, it finds
+    its own list and reports the guard as the leak. That happened: git prints forward slashes,
+    joining one onto a Windows root gives `D:\\a\\repo\\tests/test_codegraph.py`, and that string
+    is not what os.path.abspath produces. Green on macOS and Linux, red on Windows."""
+
+    def test_this_file_is_never_scanned(self):
+        me = os.path.normcase(os.path.normpath(os.path.abspath(__file__)))
+        listed = {os.path.normcase(os.path.normpath(p))
+                  for p in NothingShippedNamesItsAuthor().shipped_files()}
+        self.assertNotIn(me, listed)
+
+    def test_a_mixed_separator_path_still_matches_itself(self):
+        """The comparison, isolated from the filesystem: the two spellings of one path."""
+        native = os.path.join("tests", "test_codegraph.py")
+        from_git = "tests/test_codegraph.py"
+        self.assertEqual(os.path.normcase(os.path.normpath(os.path.join(HERE, native))),
+                         os.path.normcase(os.path.normpath(os.path.join(HERE, from_git))))
+
+    def test_the_scan_reads_something(self):
+        """The guard on the other side: excluding too much would make it pass by scanning air."""
+        listed = list(NothingShippedNamesItsAuthor().shipped_files())
+        self.assertGreater(len(listed), 4, listed)
+        self.assertTrue(any(p.endswith("codegraph.py") for p in listed))
+        self.assertTrue(any(p.endswith("README.md") for p in listed))
