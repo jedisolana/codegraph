@@ -1952,7 +1952,7 @@ class WhenTheFilesystemSaysNo(Sandbox):
         with open(locked, "w", encoding="utf-8") as f:
             f.write("def secret():\n    return 1\n")
         os.chmod(locked, 0o000)
-        self.addCleanup(os.chmod, locked, 0o644)
+        self.addCleanup(os.chmod, locked, 0o600)
         if os.access(locked, os.R_OK):
             self.skipTest("cannot make a file unreadable here (running as root?)")
         g = self.graph(write=False)
@@ -1975,8 +1975,10 @@ class WhenTheDirectoryIsReadOnly(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         with open(os.path.join(self.dir, "m.py"), "w", encoding="utf-8") as f:
             f.write("def f():\n    return 1\n")
-        os.chmod(self.dir, 0o555)
-        self.addCleanup(os.chmod, self.dir, 0o755)
+        # 0o500, not 0o555: what this test needs is a directory IT cannot write to, and the
+        # group and world bits do nothing for that while making a scanner right to complain.
+        os.chmod(self.dir, 0o500)
+        self.addCleanup(os.chmod, self.dir, 0o700)
         if os.access(self.dir, os.W_OK):
             self.skipTest("cannot make a directory read-only here (running as root?)")
 
