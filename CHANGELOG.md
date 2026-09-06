@@ -4,6 +4,26 @@
 
 First release.
 
+### An attribute on the instance has a class too
+
+`self.db = Database()` in the constructor and `self.db.query()` in the method below it — how
+most object-oriented Python is written, and the shape this tool's own description named as what
+it could not resolve. 14,034 such call sites in the standard library, none of them answerable.
+
+The type is written down in three places and none was read: the constructor call, an annotation
+on the assignment, and a bare annotation in the class body. All three now are, scanned from the
+whole class body before any method is visited — a method that uses an attribute is often
+written above the `__init__` that sets it, and reading them as the methods go past would give
+an answer that depended on the order somebody wrote the file in.
+
+An attribute assigned two different classes gets no type: which one a call reaches depends on
+which branch ran. 1,759 more edges resolve, `TYPED` grows by 30%, and the resolution rate goes
+from 0.414 to 0.423 — the largest single move of the day.
+
+The scan walks statement bodies rather than every node. Descending into expressions as well
+walked most of the file a second time and cost a sixth of the build; assignments are statements,
+so it never needed to.
+
 ### `Optional[Client]` is a Client
 
 A subscripted annotation was skipped wholesale, on the sound reasoning that `Dict[str, Client]`

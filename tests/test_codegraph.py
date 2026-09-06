@@ -2853,6 +2853,112 @@ class OptionalIsNotAContainer(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.Client.go"), [])
 
 
+class AnAttributeOnTheInstanceHasAClassToo(Sandbox):
+    """`self.db = Database()` in the constructor, `self.db.query()` in the method below it.
+
+    That is how most object-oriented Python is written, and `self.a.b()` was named in this
+    tool's own description of what it could not resolve: 14,034 such call sites in the standard
+    library, none of them answerable. The type is written down in three places and none was
+    read - the constructor call, an annotation on the assignment, and a bare annotation in the
+    class body.
+    """
+
+    HEAD = ("class Database:\n"
+            "    def query(self): return 1\n"
+            "\n"
+            "class Cache:\n"
+            "    def read(self): return 2\n")
+
+    def build(self, body):
+        self.write("m.py", self.HEAD + "\n" + body)
+        return self.graph()
+
+    def test_an_attribute_built_in_init_is_typed(self):
+        g = self.build("class Service:\n"
+                       "    def __init__(self):\n"
+                       "        self.db = Database()\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.db.query()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), ["m.Service.run"])
+
+    def test_a_method_written_above_the_constructor_still_sees_it(self):
+        """The reason the class body is scanned before any of it is visited. Reading the
+        attribute types as the methods go past would answer this one and no other, and would
+        do it depending on the order somebody happened to write the file in."""
+        g = self.build("class Service:\n"
+                       "    def run(self):\n"
+                       "        return self.db.query()\n"
+                       "\n"
+                       "    def __init__(self):\n"
+                       "        self.db = Database()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), ["m.Service.run"])
+
+    def test_an_annotated_assignment_counts(self):
+        g = self.build("class Service:\n"
+                       "    def __init__(self):\n"
+                       "        self.cache: Cache = build()\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.cache.read()\n"
+                       "\n"
+                       "def build(): return Cache()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Cache.read"), ["m.Service.run"])
+
+    def test_a_bare_class_body_annotation_counts(self):
+        """`db: Database` with no value at all - the class states the type and assigns it
+        somewhere the tool cannot see, which is the whole point of writing it."""
+        g = self.build("class Service:\n"
+                       "    db: Database\n"
+                       "\n"
+                       "    def __init__(self, db):\n"
+                       "        self.db = db\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.db.query()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), ["m.Service.run"])
+
+    def test_an_attribute_holding_two_classes_is_typed_as_neither(self):
+        """Which one a call reaches depends on which branch ran. Answering with the first one
+        seen would be a coin flip wearing a confidence label."""
+        g = self.build("class Service:\n"
+                       "    def __init__(self, flag):\n"
+                       "        if flag:\n"
+                       "            self.thing = Database()\n"
+                       "        else:\n"
+                       "            self.thing = Cache()\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.thing.query()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), [])
+
+    def test_a_nested_class_keeps_its_own_self(self):
+        """`self` inside a class defined within a class is the inner one's."""
+        g = self.build("class Outer:\n"
+                       "    class Inner:\n"
+                       "        def __init__(self):\n"
+                       "            self.db = Database()\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.db.query()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), [])
+
+    def test_an_attribute_assigned_inside_a_branch_is_still_found(self):
+        """Assignments are statements and hide inside `if`, `try` and `with`. The scan walks
+        statement bodies rather than every node, which is a sixth of the build on a large
+        tree - and it has to keep reaching them."""
+        g = self.build("class Service:\n"
+                       "    def __init__(self):\n"
+                       "        try:\n"
+                       "            self.db = Database()\n"
+                       "        except OSError:\n"
+                       "            raise\n"
+                       "\n"
+                       "    def run(self):\n"
+                       "        return self.db.query()\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Database.query"), ["m.Service.run"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

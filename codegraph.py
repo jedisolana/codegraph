@@ -296,6 +296,7 @@ def _defs_and_calls(path, mod):
 
         def __init__(self):
             self._route = {}
+            self.atypes = [{}]                                  # per-class attribute->class, so self.db.query() resolves
             self._call_funcs = set()                            # ids of Attribute nodes that ARE a call's func, so the reader below does not count `c.f()` twice
             self.scope = [mod]                                  # qualified-name stack: module -> class -> func
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
@@ -437,6 +438,9 @@ def _defs_and_calls(path, mod):
             defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
                          "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
+            # Scanned from the whole class body up front: a method that uses an attribute is
+            # often written above the __init__ that assigns it.
+            self.atypes.append(_self_attr_types(node))
             # A class body is a scope: `class A: config = 1` then config.dumps() in that body
             # is the attribute, not the imported module, and it used to resolve into the module.
             # A METHOD does not see class attributes, so the frame comes back off around every
@@ -450,6 +454,7 @@ def _defs_and_calls(path, mod):
                 else:
                     self.visit(c)
             self.bound.pop()
+            self.atypes.pop()
             self.classes.pop(); self.scope.pop()
 
         def _decorators(self, node):
@@ -813,6 +818,12 @@ def _defs_and_calls(path, mod):
                         edge["super_from"] = a0.id
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
+                elif (isinstance(fn, ast.Attribute) and _is_self_attr(fn.value)
+                      and self.atypes[-1].get(fn.value.attr)):
+                    # self.db.query() - a collaborator held on the instance, which is how most
+                    # object-oriented Python is written and was the one shape named in this
+                    # tool's own description of its blind spot.
+                    edge["recv_type"] = self.atypes[-1][fn.value.attr]
                 if not method and self.vtypes[-1].get(callee):
                     # c(1) where c is a Client. Calling an INSTANCE runs its __call__, and the
                     # call site never writes that name - the same shape as __init__, and the
@@ -964,6 +975,63 @@ def _annotated_class(ann):
             real = [p for p in elts if not _is_none_annotation(p)]
             return _annotated_class(real[0]) if len(real) == 1 else None
     return None
+
+
+def _is_self_attr(node):
+    return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id in ("self", "cls"))
+
+
+def _self_attr_types(cls_node):
+    """attribute name -> the class it holds, for one class body.
+
+    `self.db = Database()` in `__init__` and `self.db.query()` in the method below it is the
+    ordinary shape of object-oriented Python, and `self.a.b()` was this tool's own stated blind
+    spot: 14,034 such call sites in the standard library, none of them resolvable. The type is
+    written down in three places and none was being read - the constructor call, an annotation
+    on the assignment, and a bare annotation in the class body.
+
+    Read from the WHOLE class body before any method is visited, because a method that uses an
+    attribute may be written above the `__init__` that sets it.
+
+    An attribute assigned two different classes gets none: which one a call reaches depends on
+    which branch ran, and answering that with the first one seen is a guess.
+    """
+    out, dead = {}, set()
+
+    def note(name, cls):
+        if name in dead: return
+        if name in out and out[name] != cls: dead.add(name); out.pop(name, None)
+        else: out[name] = cls
+
+    # Only where a STATEMENT can be. An assignment is a statement, so descending into every
+    # expression as well walks most of the file a second time for nothing - it cost a sixth of
+    # the build on a large tree.
+    BODIES = ("body", "orelse", "finalbody", "handlers", "cases")
+
+    def walk(node):
+        for field in BODIES:
+            for child in getattr(node, field, None) or ():
+                if isinstance(child, ast.ClassDef):
+                    continue                               # its `self` is not this one
+                if isinstance(child, ast.AnnAssign) and _is_self_attr(child.target):
+                    c = _annotated_class(child.annotation) or _called_class(child.value)
+                    if c: note(child.target.attr, c)
+                elif isinstance(child, ast.Assign):
+                    c = _called_class(child.value)
+                    if c:
+                        for tg in child.targets:
+                            if _is_self_attr(tg): note(tg.attr, c)
+                walk(child)
+
+    for stmt in cls_node.body:                             # class body: `db: Database`
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            c = _annotated_class(stmt.annotation)
+            if c: note(stmt.target.id, c)
+    for stmt in cls_node.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            walk(stmt)
+    return out
 
 
 def _called_class(value):
