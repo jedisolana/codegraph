@@ -4830,3 +4830,82 @@ class TheNeverCalledListWasOnlyEverACount(Sandbox):
                            capture_output=True, text=True, timeout=180)
         self.assertEqual(json.loads(j.stdout)["results"],
                          [{"id": "m.alone", "at": "m.py:1", "called_by_python": False}])
+
+
+class AnAnswerYouCanScope(Sandbox):
+    """Written after using this on a real shipped repository for the first time rather than on
+    a fixture. `unused` returned 337 lines of which 293 were test methods - unittest calls
+    those by reflection, so every one looks dead - and `blast` was 17 tests out of 25. A list
+    that is seven-eighths noise is one nobody reads twice."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(os.path.join("app", "core.py"),
+                   "def shared():\n    return 1\n"
+                   "def orphan():\n    return 2\n"
+                   "def user():\n    return shared()\n")
+        self.write(os.path.join("tests", "test_core.py"),
+                   "from app.core import shared\n"
+                   "class T:\n"
+                   "    def test_one(self):\n        return shared()\n"
+                   "    def test_two(self):\n        return shared()\n")
+        self.write(os.path.join("app", "__init__.py"), "")
+        self.write(os.path.join("tests", "__init__.py"), "")
+        codegraph.build([self.dir])
+
+    def run_it(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                              cwd=self.dir, capture_output=True, text=True, timeout=180)
+
+    def lines(self, *args):
+        r = self.run_it(*args)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+    def test_exclude_drops_a_whole_corner_of_the_tree(self):
+        every = self.lines("callers", "app/core.shared")
+        self.assertEqual(len(every), 3)                      # one real caller, two test methods
+        scoped = self.lines("callers", "app/core.shared", "--exclude", "tests/*")
+        self.assertEqual(scoped, ["app/core.user"])
+
+    def test_only_keeps_one_corner(self):
+        self.assertEqual(self.lines("callers", "app/core.shared", "--only", "tests/*"),
+                         ["tests/test_core.T.test_one", "tests/test_core.T.test_two"])
+
+    def test_unused_is_readable_once_the_tests_are_out(self):
+        every = self.lines("unused")
+        self.assertTrue(any("test_one" in ln for ln in every), "unittest methods look dead")
+        scoped = self.lines("unused", "--exclude", "tests/*")
+        self.assertEqual([ln.split()[0] for ln in scoped], ["app/core.orphan", "app/core.user"])
+
+    def test_it_works_on_the_other_verbs_too(self):
+        for verb in ("blast", "sites", "impact", "where", "find"):
+            with self.subTest(verb):
+                arg = "shared" if verb in ("where", "find") else "app/core.shared"
+                out = self.run_it(verb, arg, "--exclude", "tests/*")
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertNotIn("tests/", out.stdout, verb)
+
+    def test_the_json_is_scoped_the_same_way(self):
+        r = self.run_it("impact", "app/core.shared", "--exclude", "tests/*", "--json")
+        got = json.loads(r.stdout)
+        self.assertEqual(got["callers"], ["app/core.user"])
+        self.assertEqual([s["caller"] for s in got["sites"]], ["app/core.user"])
+
+    def test_both_at_once(self):
+        # Filtered down to nothing still SAYS so - blank output is a worse answer than "(none)".
+        self.assertEqual(self.lines("unused", "--only", "app/*", "--exclude", "*core*"), ["(none)"])
+
+    def test_a_pattern_that_is_missing_is_a_usage_error(self):
+        r = self.run_it("unused", "--exclude")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage:", r.stderr)
+
+    def test_impact_puts_one_thing_on_one_line(self):
+        """Comma-joining seven callers and fourteen sites produced a wrapped wall of text.
+        Each site is paired with the caller it sits in, which is the pair you act on."""
+        out = self.run_it("impact", "app/core.shared").stdout
+        self.assertIn("callers of app/core.shared:", out)
+        self.assertIn("\n  app/core.user\n", out)
+        self.assertRegex(out, r"\n  app/core\.py:\d+  app/core\.user\n")
+        self.assertIn("codegraph blast app/core.shared to list them", out)

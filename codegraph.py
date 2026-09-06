@@ -30,6 +30,8 @@ than no blast radius at all.
   codegraph --help             this text
   --json                       any query, answered as JSON instead of prose - including
                                the refusals, and including the blast radius by name
+  --only PAT / --exclude PAT   keep or drop results by module, glob-matched:
+                               `--exclude 'tests/*'` is the one you will want first
 
 Exit codes: 0 answered, 1 the name is unknown here or a search matched nothing, 2 the name
 matches several definitions or the command was malformed.
@@ -37,6 +39,7 @@ matches several definitions or the command was malformed.
 import ast
 import builtins
 import contextlib
+import fnmatch
 import glob
 import hashlib
 import json
@@ -1670,6 +1673,12 @@ def load(fresh=True):
     return g
 
 
+def _module_of(node_id):
+    """The module an id belongs to: everything before the first dot after the last slash."""
+    head, _, tail = node_id.rpartition("/")
+    return (head + "/" if head else "") + tail.split(".")[0]
+
+
 def _files(g):
     """module id -> the file to open, relative to the directory the GRAPH lives in.
 
@@ -2124,6 +2133,30 @@ def _main(argv=None):
     # gives the same answers to whatever is going to parse them.
     as_json = "--json" in a
     a = [x for x in a if x != "--json"]
+    # --only and --exclude, because the first real use of `unused` on a shipped repository
+    # returned 337 lines of which 293 were test methods. unittest calls those by reflection, so
+    # every one of them looks dead, and a list that is seven-eighths noise is one nobody reads
+    # twice. Patterns are globs over the module id: `tests/*`, `*test*`, `boardofdirectors/*`.
+    keep_pat, drop_pat = [], []
+    rest = []
+    it = iter(a)
+    for tok in it:
+        if tok in ("--only", "--exclude"):
+            try: pat = next(it)
+            except StopIteration:
+                print(f"usage: codegraph ... {tok} <pattern>", file=sys.stderr); return 2
+            (keep_pat if tok == "--only" else drop_pat).append(pat)
+        else:
+            rest.append(tok)
+    a = rest
+
+    def wanted(module):
+        """True if this module survives --only and --exclude."""
+        if keep_pat and not any(fnmatch.fnmatch(module, p) for p in keep_pat): return False
+        return not any(fnmatch.fnmatch(module, p) for p in drop_pat)
+
+    def keep_ids(ids):
+        return [i for i in ids if wanted(_module_of(i))]
     # Every query verb takes a name. Forgetting it used to be an IndexError traceback - the
     # first thing a new user sees when they type a command from memory.
     NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
@@ -2173,7 +2206,7 @@ def _main(argv=None):
         g = load()
         t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        found = callers_of(g, t) if a[0] == "callers" else calls_from(g, t)
+        found = keep_ids(callers_of(g, t) if a[0] == "callers" else calls_from(g, t))
         if as_json: _emit({"query": a[0], "target": t[0] if isinstance(t, list) else t,
                            "results": found})
         else: print("\n".join(found) or "(none)")
@@ -2181,13 +2214,13 @@ def _main(argv=None):
         g = load()
         t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        found = blast_radius(g, t)
+        found = keep_ids(blast_radius(g, t))
         if as_json: _emit({"query": "blast", "target": t[0] if isinstance(t, list) else t,
                            "results": found})
         else: print("\n".join(found) or "(none)")
     elif a[0] == "where":
         g = load()
-        hits = where(g, a[1])
+        hits = [(i, loc) for i, loc in where(g, a[1]) if wanted(_module_of(i))]
         if not hits and _describe(g, a[1])[0] == "module":
             # Every other verb explains this; `where` used to answer "(not found)" about a
             # module sitting right there in the graph.
@@ -2198,7 +2231,7 @@ def _main(argv=None):
         else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(not found)")
         if not hits: return 1                    # a search that matched nothing, like grep
     elif a[0] == "find":
-        hits = find(load(), a[1])
+        hits = [(i, loc) for i, loc in find(load(), a[1]) if wanted(_module_of(i))]
         if as_json: _emit({"query": "find", "results": [{"id": i, "at": loc} for i, loc in hits]})
         else: print("\n".join(f"{i}  {loc}" for i, loc in hits) or "(none)")
         if not hits: return 1
@@ -2206,7 +2239,7 @@ def _main(argv=None):
         g = load()
         t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
-        found = sites(g, t)
+        found = [(loc, c) for loc, c in sites(g, t) if wanted(_module_of(c))]
         if as_json: _emit({"query": "sites", "target": t[0] if isinstance(t, list) else t,
                            "results": [{"at": loc, "caller": c} for loc, c in found]})
         else: print("\n".join(f"{loc}  {c}" for loc, c in found) or "(none)")
@@ -2243,6 +2276,10 @@ def _main(argv=None):
         t, rc = _one_target(g, a[1], as_json)
         if t is None: return rc
         im = impact(g, t)
+        im = {"callers": keep_ids(im["callers"]),
+              "sites": [(loc, c) for loc, c in im["sites"] if wanted(_module_of(c))],
+              "blast": keep_ids(im["blast"]),
+              "unresolved": [(loc, c) for loc, c in im["unresolved"] if wanted(_module_of(c))]}
         if as_json:
             # The prose says how MANY the blast radius holds; an agent asking what breaks needs
             # to be told WHICH, and the library has always returned them. Nothing is truncated
@@ -2254,10 +2291,18 @@ def _main(argv=None):
                    "blast": im["blast"],
                    "unresolved": [{"at": loc, "caller": c} for loc, c in im["unresolved"]]})
             return 0
-        print("callers:", ", ".join(im["callers"]) or "(none)")
-        print("sites:  ", ", ".join(f"{l}" for l, c in im["sites"]) or "(none)")
+        # One per line. Comma-joining seven callers and fourteen sites produced a wrapped
+        # wall of text that nobody reads, which is what it looked like the first time this was
+        # used on a real repository rather than a fixture.
+        name = t[0] if isinstance(t, list) else t
+        print(f"callers of {name}:")
+        for c in im["callers"] or ["(none)"]: print(f"  {c}")
+        print("sites:")
+        for loc, c in im["sites"]: print(f"  {loc}  {c}")
+        if not im["sites"]: print("  (none)")
         n = len(im["blast"])
-        print(f"blast:   {n} function{'' if n == 1 else 's'} could be affected")
+        print(f"blast:   {n} function{'' if n == 1 else 's'} could be affected"
+              + (f"   (codegraph blast {name} to list them)" if n else ""))
         if im["unresolved"]:
             u = im["unresolved"]
             one = len(u) == 1
@@ -2265,7 +2310,7 @@ def _main(argv=None):
                   f"this name and could not be resolved - {', '.join(loc for loc, _ in u[:4])}"
                   + (" ..." if len(u) > 4 else ""))
     elif a[0] == "unused":
-        rows = unused(load())
+        rows = [r for r in unused(load()) if wanted(_module_of(r[0]))]
         if as_json:
             _emit({"query": "unused",
                    "results": [{"id": i, "at": loc, "called_by_python": d} for i, loc, d in rows]})
