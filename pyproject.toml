@@ -3,12 +3,13 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codegraph"
+name = "jedi-codegraph"
 version = "0.1.0"
 description = "Ask your Python codebase who calls what, and what breaks if you change it. One stdlib file, no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
+authors = [{ name = "jedisolana" }]
 keywords = ["call-graph", "static-analysis", "refactoring", "blast-radius", "ast", "code-intelligence"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -22,6 +23,7 @@ classifiers = [
 Homepage = "https://github.com/jedisolana/codegraph"
 Repository = "https://github.com/jedisolana/codegraph"
 Issues = "https://github.com/jedisolana/codegraph/issues"
+Author = "https://x.com/jedisolana"
 
 [project.scripts]
 codegraph = "codegraph:_main"

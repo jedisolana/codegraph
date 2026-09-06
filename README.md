@@ -267,6 +267,15 @@ curl -O https://raw.githubusercontent.com/jedisolana/codegraph/main/codegraph.py
 If you'd rather have it on your PATH:
 
 ```bash
+pipx install jedi-codegraph
+```
+
+The prefix is not decoration — `codegraph` on PyPI belongs to somebody else, and PyPI reads
+hyphens as if they weren't there. The command is still `codegraph`.
+
+Or straight from `main`, for changes that are not in a release yet:
+
+```bash
 pipx install git+https://github.com/jedisolana/codegraph
 ```
 
