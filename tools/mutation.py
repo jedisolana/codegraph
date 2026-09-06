@@ -11,7 +11,9 @@ behaviour nothing is checking.
     python3 tools/mutation.py 200 7      # ...with a particular seed
 
 It edits codegraph.py in place and puts it back, so it refuses to start unless git says the
-tree is clean, and it verifies the file byte for byte before it exits.
+tree is clean, and it verifies the file byte for byte before it exits. A full run takes hours;
+do that on a `git clone` of the repository rather than the copy you are working in, because
+while it runs the file on disk is a broken one.
 """
 import ast
 import hashlib
@@ -79,8 +81,19 @@ def clean_tree():
 
 
 def main(argv):
-    want = int(argv[0]) if argv else 60
-    seed = int(argv[1]) if len(argv) > 1 else 0
+    if any(a in ("-h", "--help") for a in argv):
+        print(__doc__.strip())
+        return 0
+    try:
+        want = int(argv[0]) if argv else 60
+        seed = int(argv[1]) if len(argv) > 1 else 0
+    except ValueError:
+        # It used to raise the ValueError itself, so `--help` - the first thing anybody types
+        # at an unfamiliar script - answered with a traceback out of int().
+        sys.exit(f"usage: mutation.py [count] [seed]   both whole numbers; got {' '.join(argv)!r}\n"
+                 f"       mutation.py --help           what this does and why")
+    if want < 1:
+        sys.exit("a run of no mutations proves nothing")
     if not clean_tree():
         sys.exit("codegraph.py has uncommitted changes - commit or stash them first, because "
                  "this rewrites the file and an interrupted run would be hard to tell apart")

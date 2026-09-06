@@ -3054,8 +3054,8 @@ class TheStatsBlockInTheReadmeIsRealOutput(unittest.TestCase):
             self.assertEqual(
                 actual[key], want,
                 f"README says {key} = {want}, the tool says {actual[key]}.\n"
-                f"    The block measures this whole repository, so adding a test moves it.\n"
-                f"    Refresh it with:  codegraph build . ")
+                f"    The block measures this whole repository, so any .py change moves it.\n"
+                f"    Refresh it with:  python3 tools/readme_stats.py")
 
     def test_the_block_adds_up(self):
         """Independent of the tool: a hand-edited block can be stale AND self-consistent, so
