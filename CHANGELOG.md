@@ -4,6 +4,17 @@
 
 First release.
 
+### A class nested inside a class is still a type
+
+`i = Outer.Inner()` then `i.method()`: the construction resolved and the method did not.
+Resolving a dotted type name only ever read the part before the dot as a module, so
+`Outer.Inner` found nothing, the variable was left untyped, and every call on it afterwards
+came back unresolved. The constructor edge landed perfectly throughout, which is what made it
+hard to see — the class was obviously known, and the next line was a blind spot.
+
+A module-qualified `svc.Client()` still wins, since that reading is tried first; the nested
+class is the fallback for when there is no module by that name.
+
 ### Constructing an object runs `__new__` too
 
 The constructor edge exists because `impact __init__` on a class built in twenty places used to

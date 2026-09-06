@@ -2727,6 +2727,67 @@ class TheCommitMessageHookRefusesWhatCannotBeTakenBack(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class AClassNestedInsideAClassIsStillAType(Sandbox):
+    """`i = Outer.Inner()` then `i.method()` - the construction resolved and the method did not.
+
+    Resolving a dotted type name only ever read the first part as a MODULE, so `Outer.Inner`
+    found nothing, the variable was left untyped, and every call on it afterwards came back
+    unresolved. The constructor edge landed perfectly the whole time, which is what made this
+    hard to see: the class was clearly known, and the line after it was a blind spot.
+    """
+
+    def test_a_variable_built_from_a_nested_class_is_typed(self):
+        self.write("m.py", "class Outer:\n"
+                           "    class Inner:\n"
+                           "        def method(self):\n"
+                           "            return 1\n"
+                           "\n"
+                           "def use():\n"
+                           "    i = Outer.Inner()\n"
+                           "    return i.method()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Outer.Inner.method"), ["m.use"])
+
+    def test_the_construction_itself_always_resolved(self):
+        """The control that shows which half was broken."""
+        self.write("m.py", "class Outer:\n"
+                           "    class Inner:\n"
+                           "        def __init__(self):\n"
+                           "            pass\n"
+                           "\n"
+                           "def use():\n"
+                           "    return Outer.Inner()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Outer.Inner.__init__"), ["m.use"])
+
+    def test_a_module_qualified_class_still_wins(self):
+        """The reading that already worked, and must keep working: `svc.Client()` where `svc`
+        is an imported module. A class of the same name must not steal it."""
+        self.write("svc.py", "class Client:\n"
+                             "    def get(self):\n"
+                             "        return 1\n")
+        self.write("m.py", "import svc\n"
+                           "\n"
+                           "def use():\n"
+                           "    c = svc.Client()\n"
+                           "    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.get"), ["m.use"])
+
+    def test_a_dotted_name_that_is_neither_types_nothing(self):
+        """The negative half. `thing.Widget()` where `thing` is a parameter names no class the
+        file can see, and guessing at one is how a blast radius points at the wrong code."""
+        self.write("m.py", "class Widget:\n"
+                           "    def go(self):\n"
+                           "        return 1\n"
+                           "\n"
+                           "def use(thing):\n"
+                           "    w = thing.Widget()\n"
+                           "    return w.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Widget.go"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

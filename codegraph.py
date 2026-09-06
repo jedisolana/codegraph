@@ -1226,7 +1226,15 @@ def build(dirs=None, write=True):
             who, cname = rt.rsplit(".", 1)
             where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
             cid = by_modname.get((where_, cname)) if where_ else None
-            return [cid] if cid and kind_of.get(cid) == "class" else []
+            if cid and kind_of.get(cid) == "class":
+                return [cid]
+            # `Outer.Inner()`: the part before the dot is a CLASS in this module, not a module.
+            # Only the module reading was tried, so a variable built from a nested class got no
+            # type at all and every method call on it after that went unresolved - while the
+            # construction itself resolved perfectly, which is what made it look fine.
+            outer = cls_ids.get(srcmod, {}).get(who)
+            nested = f"{outer}.{cname}" if outer else None
+            return [nested] if nested and kind_of.get(nested) == "class" else []
         real = mod_orig.get(srcmod, {}).get(rt, rt)              # from svc import Client as C
         scoped = (cls_ids.get(srcmod, {}).get(rt)
                   or by_modname.get((mod_from.get(srcmod, {}).get(rt), real))
