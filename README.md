@@ -78,6 +78,11 @@ most-edited method in Python.
 edges. In the standard library 2,780 definitions are reached only this way, and 98% of them
 used to report no caller at all.
 
+Iteration counts however it is written — a `for` statement, a comprehension, a generator
+expression, `a, b = r`, `[*r]`, `yield from r`. And `x += y` runs `__iadd__` when the class has
+one and `__add__` when it does not, which is decided against the class rather than guessed at
+the line.
+
 **Reading a property runs it**, and writes no parentheses doing so — `c.endpoint` is a call
 with nothing in the syntax to say so. Attribute reads are counted wherever the receiver can be
 typed, the same reach a method call has: `self` and `cls` inside a class, or a local whose
@@ -242,6 +247,9 @@ Static analysis, honestly labelled:
   `with open(p) as f` and `with self.lock` name no typed local, so neither is recorded. When
   the class *is* known and does not have the method, the edge is `EXTERNAL` rather than
   "cannot tell" — `for row in rows` on a `list` subclass runs code outside the tree.
+- **An augmented assignment picks the method the interpreter would.** `x += y` resolves to
+  `__iadd__` if the class has one and to `__add__` if it does not — never to both, since only
+  one of them runs.
 - **A reflected operator is not followed.** `a + b` records `a.__add__`; Python's fallback to
   `b.__radd__` happens only when the first returns `NotImplemented`, which is a runtime answer.
 - **A property read needs a receiver the file can type.** `self.thing` and `c.thing` where `c`
@@ -348,7 +356,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 424 more. Grouped, because a list of every one of them stopped being
+The test suite adds 435 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

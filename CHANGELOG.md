@@ -4,6 +4,23 @@
 
 First release.
 
+### Iteration counts however it is written
+
+`for x in r` was recorded and `[x for x in r]` was not — the same operation, two spellings,
+two different answers. The statement form turned out to be under half of it: the standard
+library writes 11,571 `for` statements against 15,322 comprehension clauses, unpackings,
+star-expansions, `yield from`s and augmented assignments, none of which produced an edge.
+
+All of them do now, including the second and later clauses of a comprehension, which run in the
+comprehension's own scope rather than the enclosing one.
+
+`x += y` needed deciding rather than guessing: it runs `__iadd__` when the class defines one
+and falls back to `__add__` when it does not, and which of those is a fact about the class, not
+about the line being parsed. Both names are carried through resolution and the reachable one is
+kept — `__add__` appears in nearly four times as many standard-library files as `__iadd__`, so
+the fallback is the common case. When a class has both, only `__iadd__` is credited, because
+only `__iadd__` runs.
+
 ### The language calls things the source never names
 
 `with r:` runs `__enter__` and `__exit__`. `for x in r` runs `__iter__`. `len(r)` runs

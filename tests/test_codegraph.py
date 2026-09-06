@@ -2245,6 +2245,110 @@ class TheLanguageCallsThingsTheSourceNeverNames(Sandbox):
         self.assertEqual(got, ["EXTERNAL"], f"expected EXTERNAL, got {got}")
 
 
+class IterationCountsHoweverItIsWritten(Sandbox):
+    """`for x in r` was recorded and `[x for x in r]` was not - the same operation, two
+    spellings, two different answers.
+
+    The statement form is under half of it: the standard library writes 11,571 `for` statements
+    against 15,322 comprehension clauses, unpackings, star-expansions and augmented
+    assignments, none of which produced an edge.
+    """
+
+    HEAD = ("class R:\n"
+            "    def __iter__(self): return iter([])\n"
+            "    def __iadd__(self, o): return self\n")
+
+    def build(self, body):
+        self.write("m.py", self.HEAD + "\n" + body)
+        return self.graph()
+
+    def test_a_comprehension_iterates(self):
+        g = self.build("def use():\n    r = R()\n    return [x for x in r]\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_a_generator_expression_iterates(self):
+        g = self.build("def use():\n    r = R()\n    return sum(x for x in r)\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_a_dict_comprehension_iterates(self):
+        g = self.build("def use():\n    r = R()\n    return {x: 1 for x in r}\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_the_second_clause_of_a_comprehension_iterates_too(self):
+        """Only the first iterable runs in the enclosing scope; the rest run inside the
+        comprehension's own. Both are iterations, and a version that walked only the first
+        would pass every test above."""
+        self.write("m.py", self.HEAD + "\n"
+                   "class S:\n"
+                   "    def __iter__(self): return iter([])\n"
+                   "\n"
+                   "def use():\n"
+                   "    r = R()\n"
+                   "    s = S()\n"
+                   "    return [(a, b) for a in r for b in s]\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.S.__iter__"), ["m.use"])
+
+    def test_unpacking_iterates(self):
+        g = self.build("def use():\n    r = R()\n    a, b = r\n    return a, b\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_a_plain_assignment_does_not(self):
+        """The negative half: `x = r` binds a name and iterates nothing."""
+        g = self.build("def use():\n    r = R()\n    x = r\n    return x\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), [])
+
+    def test_a_star_expansion_iterates_but_a_star_target_does_not(self):
+        """`[*r]` iterates. In `a, *b = r` the star is a TARGET being filled, and the single
+        iteration belongs to the unpacking - counting both would report it twice."""
+        g = self.build("def spread():\n    r = R()\n    return [*r]\n"
+                       "\n"
+                       "def target():\n    r = R()\n    a, *b = r\n    return a, b\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.spread", "m.target"])
+        sites = [e for e in g["calls"]
+                 if e.get("dst") == "m.R.__iter__" and e["src"] == "m.target"]
+        self.assertEqual(len(sites), 1, f"the unpacking was counted twice: {sites}")
+
+    def test_yield_from_iterates(self):
+        g = self.build("def use():\n    r = R()\n    yield from r\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_an_augmented_assignment_runs_the_in_place_method(self):
+        g = self.build("def use():\n    r = R()\n    r += 1\n    return r\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iadd__"), ["m.use"])
+
+    def test_it_falls_back_to_the_plain_operator_when_there_is_no_in_place_one(self):
+        """`x += y` on a class with only `__add__` runs `__add__`. Which name the interpreter
+        reaches is a fact about the class, so it cannot be decided while parsing the line -
+        and `__add__` appears in nearly four times as many standard-library files as
+        `__iadd__`, so this is the common case."""
+        self.write("m.py", "class OnlyAdd:\n"
+                           "    def __add__(self, o): return self\n"
+                           "\n"
+                           "def use():\n"
+                           "    x = OnlyAdd()\n"
+                           "    x += 1\n"
+                           "    return x\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.OnlyAdd.__add__"), ["m.use"])
+
+    def test_the_in_place_method_wins_when_the_class_has_both(self):
+        """The other half of the fallback, and the one that keeps it honest: crediting both
+        would say `__add__` has a caller when the interpreter never reaches it."""
+        self.write("m.py", "class Both:\n"
+                           "    def __add__(self, o): return self\n"
+                           "    def __iadd__(self, o): return self\n"
+                           "\n"
+                           "def use():\n"
+                           "    x = Both()\n"
+                           "    x += 1\n"
+                           "    return x\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Both.__iadd__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.Both.__add__"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
