@@ -2349,6 +2349,168 @@ class IterationCountsHoweverItIsWritten(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.Both.__add__"), [])
 
 
+class TwoCallsAreOneEdgeOnlyIfTheyLandInTheSamePlace(Sandbox):
+    """One method holding `super(A, self).run()` and `super(C, self).run()` produced ONE edge.
+
+    Edges were deduplicated on (caller, receiver, name), and neither super writes a receiver,
+    so the two collapsed. The survivor kept the other one's line number as one of its own call
+    sites: the tool lost a caller and invented a site in the same breath, and reported both
+    with confidence. Two edges are the same relationship only when they resolve to the same
+    place, so everything that decides that belongs in the key.
+    """
+
+    def test_two_supers_in_one_method_are_two_edges(self):
+        self.write("m.py", "class A:\n"
+                           "    def run(self): return 'a'\n"
+                           "\n"
+                           "class B:\n"
+                           "    def run(self): return 'b'\n"
+                           "\n"
+                           "class C(A, B):\n"
+                           "    def run(self):\n"
+                           "        x = super(A, self).run()\n"
+                           "        y = super(C, self).run()\n"
+                           "        return x, y\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.A.run"), ["m.C.run"])
+        self.assertEqual(codegraph.callers_of(g, "m.B.run"), ["m.C.run"])
+
+    def test_neither_edge_claims_the_other_ones_line(self):
+        """The half a caller list cannot show. `sites` promises the exact places to edit, and
+        the merged edge offered two lines for a call that happens on one of them."""
+        self.write("m.py", "class A:\n"
+                           "    def run(self): return 'a'\n"
+                           "\n"
+                           "class B:\n"
+                           "    def run(self): return 'b'\n"
+                           "\n"
+                           "class C(A, B):\n"
+                           "    def run(self):\n"
+                           "        x = super(A, self).run()\n"
+                           "        y = super(C, self).run()\n"
+                           "        return x, y\n")
+        g = self.graph()
+        lines = {e["dst"]: e["lines"] for e in g["calls"] if e["callee"] == "run"}
+        self.assertEqual(lines, {"m.B.run": [9], "m.A.run": [10]})
+
+    def test_the_same_call_written_twice_is_still_one_edge(self):
+        """The control. Splitting on everything would be as wrong as merging on nothing:
+        calling the same helper three times is one relationship with three sites."""
+        self.write("m.py", "def helper(): return 1\n"
+                           "\n"
+                           "def use():\n"
+                           "    helper()\n"
+                           "    helper()\n"
+                           "    helper()\n")
+        g = self.graph()
+        edges = [e for e in g["calls"] if e.get("dst") == "m.helper"]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["lines"], [4, 5, 6])
+
+    def test_no_field_escapes_the_identity_tuple(self):
+        """The key is a written list because deriving it costs a fifth of the build. The
+        failure mode of a written list is forgetting to add to it, and the symptom is an edge
+        quietly swallowing another - so the list is checked rather than trusted."""
+        seen = set()
+        for rel in ("codegraph.py", "tests/test_codegraph.py", "tools/mutation.py"):
+            _defs, edges, *_rest = codegraph._defs_and_calls(
+                os.path.join(HERE, rel), os.path.basename(rel)[:-3])
+            for e in edges:
+                seen.update(e.keys())
+        escaped = seen - set(codegraph.EDGE_IDENTITY) - {"line", "lines"}
+        self.assertEqual(escaped, set(),
+                         f"an edge carries {escaped}, which nothing distinguishes it by")
+        self.assertGreater(len(seen), 8, "the scan produced almost no edges to check")
+
+
+class ThingsCalledWhenAClassOrAStringIsBuilt(Sandbox):
+    """More calls with no call syntax, found by asking what else the language runs on its own.
+
+    `class Child(Base)` runs `Base.__init_subclass__`. Building a dataclass runs
+    `__post_init__` from an `__init__` that is generated and therefore is not in the graph at
+    all. An f-string placeholder runs `__format__`. In the standard library those three had 2
+    of 45, 5 of 25 and 3 of 29 definitions with a caller.
+    """
+
+    def test_defining_a_subclass_calls_init_subclass(self):
+        self.write("m.py", "class Base:\n"
+                           "    def __init_subclass__(cls, **kw): pass\n"
+                           "\n"
+                           "class Child(Base):\n"
+                           "    pass\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Base.__init_subclass__"), ["m"])
+
+    def test_a_class_does_not_call_its_own_init_subclass(self):
+        """It is looked up on the order AFTER the new class, exactly as `super()` is - Python
+        does not run a class's own `__init_subclass__` when defining it."""
+        self.write("m.py", "class Solo:\n"
+                           "    def __init_subclass__(cls, **kw): pass\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Solo.__init_subclass__"), [])
+
+    def test_building_a_dataclass_calls_post_init(self):
+        self.write("m.py", "import dataclasses\n"
+                           "\n"
+                           "@dataclasses.dataclass\n"
+                           "class Point:\n"
+                           "    x: int\n"
+                           "    def __post_init__(self): pass\n"
+                           "\n"
+                           "def make():\n"
+                           "    return Point(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Point.__post_init__"), ["m.make"])
+
+    def test_a_class_that_writes_its_own_init_is_not_counted_twice(self):
+        """Only a generated `__init__` is invisible. A class that writes one calls
+        `__post_init__` in the open, and crediting the construction site as well would invent
+        a caller that is not there."""
+        self.write("m.py", "class Manual:\n"
+                           "    def __init__(self):\n"
+                           "        self.__post_init__()\n"
+                           "    def __post_init__(self): pass\n"
+                           "\n"
+                           "def make():\n"
+                           "    return Manual()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Manual.__post_init__"), ["m.Manual.__init__"])
+
+    def test_an_f_string_formats_its_value(self):
+        self.write("m.py", "class F:\n"
+                           "    def __format__(self, spec): return 'f'\n"
+                           "\n"
+                           "def use():\n"
+                           "    f = F()\n"
+                           "    return f'{f}'\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.F.__format__"), ["m.use"])
+
+    def test_the_r_conversion_runs_repr_instead(self):
+        self.write("m.py", "class F:\n"
+                           "    def __format__(self, spec): return 'f'\n"
+                           "    def __repr__(self): return 'r'\n"
+                           "\n"
+                           "def use():\n"
+                           "    f = F()\n"
+                           "    return f'{f!r}'\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.F.__repr__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.F.__format__"), [])
+
+    def test_a_class_with_no_format_falls_back_to_str(self):
+        """object.__format__ with an empty spec calls str(), so a class that defines only
+        __str__ is what an f-string actually reaches - the same fallback shape as `x += y`."""
+        self.write("m.py", "class S:\n"
+                           "    def __str__(self): return 's'\n"
+                           "\n"
+                           "def use():\n"
+                           "    s = S()\n"
+                           "    return f'{s}'\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.S.__str__"), ["m.use"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

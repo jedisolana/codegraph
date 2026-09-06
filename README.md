@@ -78,6 +78,10 @@ most-edited method in Python.
 edges. In the standard library 2,780 definitions are reached only this way, and 98% of them
 used to report no caller at all.
 
+Defining `class Child(Base)` runs `Base.__init_subclass__`. Building a dataclass runs
+`__post_init__`, from an `__init__` that is generated and so is nowhere in the graph. An
+f-string placeholder runs `__format__`, or `__repr__` for `{x!r}`.
+
 Iteration counts however it is written — a `for` statement, a comprehension, a generator
 expression, `a, b = r`, `[*r]`, `yield from r`. And `x += y` runs `__iadd__` when the class has
 one and `__add__` when it does not, which is decided against the class rather than guessed at
@@ -356,7 +360,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 435 more. Grouped, because a list of every one of them stopped being
+The test suite adds 446 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

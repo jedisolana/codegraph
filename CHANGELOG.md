@@ -4,6 +4,33 @@
 
 First release.
 
+### Two calls were one edge even when they landed in different places
+
+Call edges were deduplicated on (caller, receiver, name). A method holding
+`super(A, self).run()` and `super(C, self).run()` collapsed into a single edge — neither super
+writes a receiver, so the two looked identical. The survivor pointed at one target and took the
+other's line number as one of its own call sites, so `callers` lost a caller and `sites` gained
+a place where nothing is called. Both answers came back confident.
+
+Two edges are the same relationship only when they resolve to the same place, so the key is now
+everything an edge carries except where it was written. The list is written out rather than
+derived — deriving it cost a fifth of the build on a large tree — and a test parses files
+exercising every edge shape and fails if any field escapes it, because the failure mode of a
+hand-written list is forgetting to add to it and the symptom is silence.
+
+### Three more things the language runs on its own
+
+`class Child(Base)` runs `Base.__init_subclass__` — looked up on the order *after* the new
+class, the way `super()` is, so a class never calls its own. Building a dataclass runs
+`__post_init__` from a generated `__init__` that is not in the graph at all; a class that
+writes its own `__init__` is left alone, since it calls `__post_init__` in the open and
+counting both would invent a caller. An f-string placeholder runs `__format__`, `{x!r}` runs
+`__repr__`, and a class defining neither falls back to `__str__` the way `x += y` falls back
+to `__add__`.
+
+In the standard library those had 2 of 45, 5 of 25 and 3 of 29 definitions with a caller. They
+now have 38, 22 and 4, and `__repr__` went from 40 to 59 of 391.
+
 ### Iteration counts however it is written
 
 `for x in r` was recorded and `[x for x in r]` was not — the same operation, two spellings,

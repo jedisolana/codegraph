@@ -425,6 +425,16 @@ def _defs_and_calls(path, mod):
                 name = _annotated_class(b)
                 if name and not any(name.split(".")[0] in v for v, _d in self.bound):
                     bases.append(name)
+            if node.bases:
+                # Writing `class Child(Base)` RUNS `Base.__init_subclass__(cls)`. Nothing at
+                # the class statement writes that name, so 45 definitions in the standard
+                # library had two callers between them. It is looked up the way `super()` is -
+                # on the order AFTER the new class, never on the new class itself - which is
+                # exactly what the super_of field already means here.
+                edges.append({"src": self.owner[-1], "mod": mod, "callee": "__init_subclass__",
+                              "recv": None, "method": True, "kind": "CALL", "syntax": True,
+                              "super_of": self._qual(node.name),
+                              "line": getattr(node, "lineno", 0)})
             defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
                          "line": node.lineno, "bases": bases})
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
@@ -634,6 +644,19 @@ def _defs_and_calls(path, mod):
             self._syntax_call(node.iter, "__aiter__", getattr(node, "lineno", 0))
             self.generic_visit(node)
 
+        def visit_FormattedValue(self, node):
+            """`f"{x}"` runs `x.__format__('')`, and `!r` and `!s` run `__repr__` and
+            `__str__` instead. A class that defines no `__format__` inherits object's, which
+            calls `__str__` - the same fallback shape as `__iadd__`, and decided the same way,
+            against the class rather than at the line. The standard library writes 6,960 of
+            these placeholders, and `__repr__` is its most-defined method of all."""
+            name = {114: "__repr__", 115: "__str__"}.get(node.conversion)
+            line = getattr(node, "lineno", 0)
+            if name: self._syntax_call(node.value, name, line)
+            elif node.conversion in (-1, None):
+                self._syntax_call(node.value, "__format__", line, alt="__str__")
+            self.generic_visit(node)
+
         def visit_AugAssign(self, node):
             """`x += y` runs `__iadd__` when the class has one and falls back to `__add__`
             when it does not - and which of the two is a fact about the class, not about this
@@ -818,9 +841,20 @@ def _defs_and_calls(path, mod):
     # "every call site - the exact places to edit", and refactoring from a list that is
     # missing two of three is how you break a codebase with a tool bought to prevent that.
     # The relationship is deduplicated; the places are all kept.
+    # The key is EVERY field except the line, and it has to be: it decides which edges are
+    # the same relationship, and an edge carries a dozen fields that decide where it resolves.
+    # Keyed on (caller, receiver, name) alone, one method holding `super(A, self).run()` and
+    # `super(C, self).run()` produced a single edge - two different targets, and the survivor
+    # took the other one's line number as one of its own call sites. So the tool lost a caller
+    # and invented a site, in the same breath, and said nothing.
+    #
+    # Listed rather than derived, because sorting a dict per edge costs a fifth of the build
+    # on a large tree. The failure mode of a list is forgetting to add to it, and the symptom
+    # of that is silence - so a test parses a file exercising every edge shape and fails if any
+    # field escapes this tuple.
     seen = {}
     for e in edges:
-        k = (e["src"], e.get("recv"), e["callee"])
+        k = tuple(e.get(f) for f in EDGE_IDENTITY)
         if k in seen:
             seen[k]["lines"].append(e["line"])
         else:
@@ -832,6 +866,15 @@ def _defs_and_calls(path, mod):
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules)
 
+
+# Two call edges are the same relationship only when they would resolve to the same place.
+# Everything an edge carries except WHERE IT WAS WRITTEN therefore belongs in its identity:
+# keyed on (caller, receiver, name) alone, one method holding `super(A, self).run()` and
+# `super(C, self).run()` collapsed into a single edge - the tool lost one caller and handed the
+# survivor the other one's line number as a call site, silently.
+EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", "recv_path",
+                 "recv_local", "callee_local", "encl_class", "recv_type", "invoke_type",
+                 "super_of", "super_from", "alt", "syntax", "attr_read")
 
 # Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
 # built from ast.Call nodes cannot see any of them: in the standard library 2,780 definitions
@@ -1416,6 +1459,18 @@ def build(dirs=None, write=True):
                 if (c + ".__init__") in def_ids:
                     ctor.append({**e, "dst": c + ".__init__", "confidence": "CONSTRUCTOR"})
                     break
+            else:
+                # No `__init__` anywhere in the order, and yet the class takes arguments: a
+                # dataclass, whose `__init__` is generated and so is not in this graph. What IS
+                # here is `__post_init__`, which that generated code calls - and which reported
+                # five callers across twenty-five definitions. Only when there is no explicit
+                # `__init__`: a class that writes its own calls `__post_init__` in the open,
+                # and counting it twice would invent a caller.
+                for c in _mro(e["dst"], bases_of, mro_cache):
+                    if (c + ".__post_init__") in def_ids:
+                        ctor.append({**e, "dst": c + ".__post_init__",
+                                     "confidence": "CONSTRUCTOR"})
+                        break
     calls.extend(ctor)
     # A function defined twice in one module - the `try: from fast import x / except: def x`
     # pattern - produced TWO nodes sharing one id. Python binds the last one, so that is the
