@@ -3017,6 +3017,56 @@ class OneAnswerForWhatAReceiverIs(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.Conn.__enter__"), [])
 
 
+class TheStatsBlockInTheReadmeIsRealOutput(unittest.TestCase):
+    """The README published a `stats` block as this tool's output, and eight of its eleven
+    numbers were wrong.
+
+    Nothing had ever run it. The block was true when it was written and drifted every time
+    resolution improved, which is the same failure as the test count that sat at 159 while the
+    suite grew to 249 - a number in prose is a claim, and a claim nobody checks is a claim that
+    goes stale silently. Worse here, because the block is the evidence for the paragraph
+    underneath it.
+
+    The example was moved onto this repository so it can be regenerated rather than believed.
+    It moves when the tool's resolution moves, and that is exactly when it should be re-read.
+    """
+
+    def test_every_number_in_the_block_is_what_the_tool_says(self):
+        import re
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        block = re.search(r"```json\n(\{.*?\n\})\n```", readme, re.S)
+        self.assertIsNotNone(block, "the README no longer publishes a stats block")
+        claimed = json.loads(block.group(1))
+
+        out = os.path.join(tempfile.mkdtemp(), "g.json")
+        self.addCleanup(shutil.rmtree, os.path.dirname(out), ignore_errors=True)
+        env = {**os.environ, "CODEGRAPH_OUT": out,
+               "CODEGRAPH_CACHE": os.path.join(os.path.dirname(out), "c.json")}
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", HERE],
+                           capture_output=True, text=True, timeout=300, env=env,
+                           cwd=os.path.dirname(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        actual = json.loads(r.stdout)
+
+        for key, want in claimed.items():
+            self.assertIn(key, actual, f"the README publishes {key!r}, which stats no longer reports")
+            self.assertEqual(actual[key], want,
+                             f"README says {key} = {want}, the tool says {actual[key]}")
+
+    def test_the_block_adds_up(self):
+        """Independent of the tool: a hand-edited block can be stale AND self-consistent, so
+        this is not sufficient - but a block that contradicts itself is beyond stale."""
+        import re
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            block = re.search(r"```json\n(\{.*?\n\})\n```", f.read(), re.S)
+        d = json.loads(block.group(1))
+        self.assertEqual(sum(d["edge_confidence"].values()), d["call_edges"],
+                         "the confidence counts do not sum to the edge count")
+        self.assertAlmostEqual(d["resolved_to_one_def"] / d["could_have_been_resolved"],
+                               d["resolution_rate"], places=3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

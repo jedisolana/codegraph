@@ -111,21 +111,23 @@ nine of every ten "cannot tell" edges were `.get()`, `.items()`, `.join()` and `
 it could not type. Builtins and library calls are excluded, since counting them would only
 measure how much of the standard library you happen to use:
 
+Run on this repository, so you can reproduce it — `codegraph build . && codegraph stats`:
+
 ```json
 {
-  "call_edges": 2694,
-  "call_sites": 3590,
-  "edge_confidence": {"EXTERNAL": 1347, "QUALIFIED": 536, "BUILTIN": 389, "LOCAL": 197,
-                      "SELF-METHOD": 78, "UNTYPED": 76, "CONSTRUCTOR": 57, "INHERITED": 10,
-                      "TYPED": 3, "CLASS": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 882,
-  "could_have_been_resolved": 958,
-  "resolution_rate": 0.921
+  "call_edges": 3725,
+  "call_sites": 4971,
+  "edge_confidence": {"EXTERNAL": 1967, "INHERITED": 601, "BUILTIN": 431,
+                      "SELF-METHOD": 297, "QUALIFIED": 257, "LOCAL": 116,
+                      "UNTYPED": 52, "CONSTRUCTOR": 3, "TYPED": 1, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 1275,
+  "could_have_been_resolved": 1327,
+  "resolution_rate": 0.961
 }
 ```
 
-That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.961 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 96%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
@@ -360,7 +362,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 485 more. Grouped, because a list of every one of them stopped being
+The test suite adds 487 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
