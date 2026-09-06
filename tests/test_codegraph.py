@@ -29,6 +29,17 @@ import codegraph
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def samefile_key(path):
+    """One spelling for a path, so a git-printed one and an OS-printed one compare equal.
+
+    git prints forward slashes on every platform. Windows prints backslashes. Joining the
+    first onto a Windows root gives `D:\a\repo\tests/test_codegraph.py`, which is a different
+    STRING from the same file's os.path.abspath - and comparing those two strings has now
+    broken this suite twice on Windows and never once here.
+    """
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
 class Sandbox(unittest.TestCase):
     """Each test gets its own tree and its own output location, so nothing writes into the repo."""
 
@@ -2096,7 +2107,7 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
         # os.path.abspath(__file__) produces. The self-exclusion below then missed, this file
         # scanned itself, and found its own list of forbidden markers. Green on two machines,
         # red on the third.
-        me = os.path.normcase(os.path.normpath(os.path.abspath(__file__)))
+        me = samefile_key(__file__)
         tracked = subprocess.run([shutil.which("git") or "git", "ls-files", "-z"],
                                  cwd=HERE, capture_output=True, text=True)
         if tracked.returncode == 0 and tracked.stdout:
@@ -2109,8 +2120,7 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                            if d not in self.SKIP_DIRS and not d.endswith(".egg-info")]
                 paths += [os.path.join(root, n) for n in names]
         for full in paths:
-            if (os.path.normcase(os.path.normpath(full)) == me
-                    or os.path.splitext(full)[1].lower() not in self.TEXT):
+            if samefile_key(full) == me or os.path.splitext(full)[1].lower() not in self.TEXT:
                 continue
             if os.path.isfile(full):
                 yield full
@@ -4995,8 +5005,9 @@ class ItSurvivesBeingUsedOnItself(unittest.TestCase):
     def test_the_generated_graph_is_not_a_shipped_file(self):
         scan = NothingShippedNamesItsAuthor()
         listed = set(scan.shipped_files())
+        listed = {samefile_key(p) for p in listed}
         for name in ("codegraph.json", "codegraph.cache.json"):
-            self.assertNotIn(os.path.join(HERE, name), listed,
+            self.assertNotIn(samefile_key(os.path.join(HERE, name)), listed,
                              f"{name} is generated output, not something this repository ships")
 
     def test_what_it_scans_is_what_git_tracks(self):
@@ -5004,9 +5015,10 @@ class ItSurvivesBeingUsedOnItself(unittest.TestCase):
                                  cwd=HERE, capture_output=True, text=True)
         if tracked.returncode != 0:
             self.skipTest("not a git checkout")
-        known = {os.path.join(HERE, p) for p in tracked.stdout.split("\0") if p}
+        known = {samefile_key(os.path.join(HERE, p)) for p in tracked.stdout.split("\0") if p}
         for path in NothingShippedNamesItsAuthor().shipped_files():
-            self.assertIn(path, known, f"{path} is not tracked and should not be scanned")
+            self.assertIn(samefile_key(path), known,
+                          f"{path} is not tracked and should not be scanned")
 
     def test_a_build_here_leaves_the_repository_answerable(self):
         """End to end: build a graph in this very directory, then ask it something."""
@@ -5040,17 +5052,15 @@ class TheScanExcludesItselfOnEveryPlatform(unittest.TestCase):
     is not what os.path.abspath produces. Green on macOS and Linux, red on Windows."""
 
     def test_this_file_is_never_scanned(self):
-        me = os.path.normcase(os.path.normpath(os.path.abspath(__file__)))
-        listed = {os.path.normcase(os.path.normpath(p))
-                  for p in NothingShippedNamesItsAuthor().shipped_files()}
-        self.assertNotIn(me, listed)
+        listed = {samefile_key(p) for p in NothingShippedNamesItsAuthor().shipped_files()}
+        self.assertNotIn(samefile_key(__file__), listed)
 
     def test_a_mixed_separator_path_still_matches_itself(self):
         """The comparison, isolated from the filesystem: the two spellings of one path."""
         native = os.path.join("tests", "test_codegraph.py")
         from_git = "tests/test_codegraph.py"
-        self.assertEqual(os.path.normcase(os.path.normpath(os.path.join(HERE, native))),
-                         os.path.normcase(os.path.normpath(os.path.join(HERE, from_git))))
+        self.assertEqual(samefile_key(os.path.join(HERE, native)),
+                         samefile_key(os.path.join(HERE, from_git)))
 
     def test_the_scan_reads_something(self):
         """The guard on the other side: excluding too much would make it pass by scanning air."""
