@@ -2679,18 +2679,32 @@ class TheCommitMessageHookRefusesWhatCannotBeTakenBack(unittest.TestCase):
     """
 
     HOOK = os.path.join(HERE, ".githooks", "commit-msg")
+    # Run it THROUGH bash rather than as an executable. Windows has no shebang: handing a
+    # shell script to CreateProcess raises "WinError 193, %1 is not a valid Win32 application",
+    # which is what the first version of this class did on three of the nine CI jobs. Git for
+    # Windows runs hooks under its own bundled bash, so bash is what actually runs this in
+    # anger on every platform, and it is what the test should use.
+    BASH = shutil.which("bash")
 
     def check(self, text, env=None):
         path = os.path.join(tempfile.mkdtemp(), "COMMIT_EDITMSG")
         self.addCleanup(shutil.rmtree, os.path.dirname(path), ignore_errors=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
-        return subprocess.run([self.HOOK, path], capture_output=True, text=True, timeout=60,
-                              env={**os.environ, **(env or {})})
+        return subprocess.run([self.BASH, self.HOOK, path], capture_output=True, text=True,
+                              timeout=60, env={**os.environ, **(env or {})})
 
-    def test_the_hook_is_executable(self):
+    def setUp(self):
+        if not self.BASH:
+            self.skipTest("no bash to run a git hook with")
+
+    def test_the_hook_is_in_the_repository_and_marked_executable(self):
         self.assertTrue(os.path.exists(self.HOOK), "the hook is not in the repository")
-        self.assertTrue(os.access(self.HOOK, os.X_OK), "the hook is not executable")
+        mode = subprocess.run([shutil.which("git") or "git", "ls-files", "-s",
+                               ".githooks/commit-msg"], cwd=HERE, capture_output=True, text=True)
+        # git records the mode itself, which is the one that survives a clone on any platform.
+        self.assertTrue(mode.stdout.startswith("100755"),
+                        f"git has it as {mode.stdout.split()[0] if mode.stdout else 'absent'}, not 100755")
 
     def test_it_refuses_a_message_with_a_character_outside_ascii(self):
         r = self.check("Subject line\n\nand a test\u5df2 checked\n")
