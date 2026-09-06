@@ -43,18 +43,33 @@ This is the part that matters, and it is why the tool is worth having rather tha
 
 Every call edge carries a confidence label:
 
-| label | meaning |
-|---|---|
-| `SELF-METHOD` | `self.helper()` — resolved inside the enclosing class |
-| `TYPED` | `x = Foo()`, `x = svc.Foo()`, or an annotation that names the class outright — `def send(c: Client)`, `def send(c: svc.Client)`. The method is looked for up the inheritance order, so an inherited one is found and an override wins. Which `Foo` is decided by what this file defines or imports; refused when two branches give `x` two types, when a later line rebinds it to something unnameable, and when two classes answer to the name |
-| `INHERITED` | `self.method()` or `super().method()` where the method lives on a base class |
-| `CLASS` | `Parent.method()` — the receiver is a class in this module |
-| `QUALIFIED` | `thing.load()` where `thing` is a module this file actually imported — and is not shadowed by a local name of its own |
-| `LOCAL` | a bare call to a function in the same module |
-| `CONSTRUCTOR` | `Client()` — the second, equally real edge to the `__init__` it runs, inherited one included |
-| `TYPED` (again) | `c(1)` where `c` is a known `Client` — calling an instance runs its `__call__`, and the call site never writes that name |
-| `AMBIGUOUS` | **several** definitions match — the candidates are listed, nothing is picked |
-| `EXTERNAL` | a builtin, the stdlib, a library, or a method on an object it cannot type |
+| label | what it means | resolved? |
+|---|---|---|
+| `LOCAL` | a bare call to a function this scope can see — the same module, or a function it is nested inside | yes |
+| `QUALIFIED` | `thing.load()`, where `thing` is a module this file actually imported | yes |
+| `SELF-METHOD` | `self.helper()`, resolved inside the enclosing class | yes |
+| `INHERITED` | `self.method()` or `super().method()`, where the method lives on a base class | yes |
+| `CLASS` | `Parent.method()` — the receiver is a class in this module | yes |
+| `TYPED` | the receiver's class is known: `x = Foo()`, `x = svc.Foo()`, or an annotation that says so | yes |
+| `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__init__` it runs | yes |
+| `AMBIGUOUS` | several definitions match; the candidates are listed and none is picked | no |
+| `BUILTIN` | `len()`, `open()`, `sorted()` — certainly not yours | no |
+| `EXTERNAL` | a library, the stdlib, or a method whose name nothing in your tree defines | no |
+| `UNTYPED` | the receiver could not be typed, and the target might be yours | no |
+
+Two of those deserve the detail the table cannot hold.
+
+**`TYPED`** decides *which* `Foo` by what the file defines or imports, never by a tree-wide
+name search. It looks the method up the inheritance order, so an inherited one is found and an
+override wins. It refuses when two branches give `x` two types, when a later line rebinds it to
+something it cannot name, and when two classes answer to the name. Calling an instance —
+`c(1)` where `c` is a `Client` — resolves to that class's `__call__`, since the call site never
+writes the name.
+
+**`CONSTRUCTOR` and `INHERITED`** exist because of the same problem: some calls never mention
+what they run. `Client()` runs an `__init__`; `super().save()` runs a parent's `save`; `c(1)`
+runs a `__call__`. Without those edges the tool answers "nothing depends on this" about the
+most-edited method in Python.
 
 Most call-graph tools guess and hand you one answer. This one refuses. An `AMBIGUOUS` edge is
 a real result: it means the question does not have a single answer, and a blast radius that
@@ -98,6 +113,7 @@ The number this README first published was 0.29, over a denominator that swept i
 impossible call. Two things moved it: resolution bugs fixed with tests, and then that
 denominator being made to mean something. Both directions are in `CHANGELOG.md`, with the
 count of fabricated edges each one removed.
+
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
 every real way a bare name reaches a definition had a rule of its own, it fired fifteen times
@@ -188,10 +204,12 @@ Static analysis, honestly labelled:
 - **`super()` resolves against the class it is written in.** Python's own order for that
   class - so a diamond lands where the interpreter lands. What static analysis cannot know is
   that `B.m`'s `super()` goes to `C` when `B` is reached through a `D(B, C)` instance.
-- **Inheritance is resolved by name, not by import.** `self.method()` follows Python's own
-  method order — C3 linearisation, so a diamond resolves where the interpreter resolves it —
-  when the bases are classes it can see — same module, or a uniquely-named class anywhere in the tree.
-  A base imported under an alias, or built by a metaclass, is not followed.
+- **A base class is found the way any other class name is** — defined in this module, or
+  imported into it, before any tree-wide search; an alias (`from x import Base as B`) is
+  followed. Method lookup then uses Python's own order, C3 linearisation, so a diamond resolves
+  where the interpreter resolves it. What is not followed: a base built by a metaclass, a base
+  that is a variable (`V = Generic[T]` then `class C(V)`), and a subscripted one — `Generic[T]`
+  names `Generic`, and a subscript is not a name.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
   say it outright: a parameter's, and a variable's. A container annotation is not its contents,
   so `Dict[str, Client]` stays a dict. A name rebound to anything the tool cannot name loses its
@@ -235,8 +253,10 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 A suite that never fails is not evidence of anything, so it is checked the other way round.
 `tools/mutation.py` breaks the tool one small way at a time — flips a comparison, swaps an
 `and` for an `or`, drops a `not`, moves a number by one — and runs the suite against each
-change. Every one of them should make something go red. **208 mutations, 208 caught, none
-survived.**
+change. Every one of them should make something go red. **All 710 mutations the file admits:
+710 caught, none survived.** Two of them do not make the suite fail but make it never finish —
+flip the comparison that ends a `while` — and those are caught by a timeout and counted apart,
+because "hung" and "failed" are different facts.
 
 Which name shadows which is the question everything else rests on, so it is not only
 checked against fixtures: `symtable` is CPython's own scope analysis, and on the versions
@@ -274,63 +294,32 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 371 more: the CLI and its error messages, the on-disk contract, cache
-invalidation, corrupt-file recovery, dangling symlinks and self-linked directories, inheritance
-and cyclic class hierarchies, blast-radius completeness on a twelve-deep chain, import cycles three modules
-long, a 1,200-deep import chain, decorators, redefined functions, overlapping
-directory arguments, two trees whose folders share a name, three calls to one function
-from one place, eight builds racing each other, files with a
-byte-order mark, a symlink pointing back into the tree, a graph built
-by an older copy of the tool, two functions that share a name, a misspelled
-name that must not answer "nothing depends on this",
-and every verb crossed with every state the graph can be in,
-plus the graph's own invariants checked against real codebases,
-eighteen syntactic positions a call can hide in,
-and a local name shadowing an imported module,
-a class, or a function of the same name,
-a diamond hierarchy checked against the interpreter's own MRO,
-the ordinary ways to import a submodule,
-a name re-exported through a package's __init__,
-an unreadable file and a read-only directory,
-a help request that must not exit non-zero,
-a bare invocation that must not build your home directory,
-every verb checked against the help text that is supposed to list it,
-every shipped file checked for a private origin story,
-a constructor whose callers never write its name,
-a half-qualified `Class.method` that has to mean the one you named,
-two decorators whose `wrapper`s are different functions,
-a generated file too deeply nested to walk,
-a file restored from a backup with the timestamp it used to have,
-a dangling symlink that must not make every query rebuild,
-a blank argument, which is a missing one rather than a pattern matching everything,
-a class name that two files answer to,
-a repository holding both thing.py and thing/__init__.py,
-a variable reassigned to something the tool cannot name,
-a helper nested in one function that a second function must not reach,
-a loop variable at the top of a file with the same name as an import,
-a module that imports itself,
-a codegraph.json that is valid JSON and not a graph,
-a class attribute with the same name as an import,
-two trees whose call sites have to name files that exist,
-an instance that is called rather than a method on it,
-a package that has to be able to name its own importers,
-and a star import, which is a binding and not a name spelled "*"
-— plus the three promises SECURITY.md makes about this file: no network, no execution,
-nothing but the standard library,
-a skip message on a machine whose code and temp directory are on different drives,
-a rename that Windows refuses while another process is reading the file,
-a second build that has to reach the same graph as the first,
-a hand-written tree walk checked node type by node type against the standard one,
-every way Python has of binding a name, one at a time,
-a resolution pass that must not depend on the order its edges arrive in,
-the scope analysis checked against the one CPython's own compiler does,
-a base class named the two ways Python lets you name one,
-a class defined inside the very function that builds one,
-a base class that is really a local variable holding a generic alias,
-an import written as `import_module("pkg.widget")`,
-a graph that carries what a question needs and not the machinery that answered it,
-and `rows.append(1)` in a tree that has no `append`, beside one that does
-— and codegraph reading its own source.
+The test suite adds 374 more. Grouped, because a list of every one of them stopped being
+readable a long time before it stopped growing:
+
+- **Python's own rules**, which are where the wrong answers come from: what shadows what — a
+  parameter, a lambda's argument, a comprehension variable, a class attribute, a `match`
+  capture, a loop target at the top of a file; which `Client` an import means when two files
+  define one; `super()` through a diamond, checked against the interpreter's own order;
+  `from x import y as z`; a star import; a conditional import that has two answers; a base
+  class that is really a variable.
+- **Calls that never write the name they call** — a constructor, an inherited method, a
+  `__call__`, a `super()`. Each of those once returned "nothing depends on this" about code
+  that is called constantly.
+- **Trees that fight back** — dangling symlinks, a symlink into the tree, a self-linked
+  directory, an unreadable file, a read-only directory, a byte-order mark, a file too deeply
+  nested for the interpreter to walk, folders with dots in their names, two trees whose
+  folders share a name, eight builds racing each other.
+- **The graph on disk** — cache invalidation by size *and* timestamp, a file restored from a
+  backup with the timestamp it used to have, deletion (which changes nobody's mtime), a graph
+  built by an older copy of the tool, an interrupted write, valid JSON that is not a graph,
+  and a second build that has to reach the same graph as the first.
+- **Both doors** — every verb crossed with every state the graph can be in, the library
+  refusing exactly what the command line refuses, exit codes, and a misspelled name that must
+  never answer "nothing depends on this".
+- **Its own claims** — the counts in this file, the example above, the promises in
+  `SECURITY.md` (no network, no execution, nothing but the standard library), the label table
+  further up, and every shipped file checked for a private origin story.
 
 ## Licence
 

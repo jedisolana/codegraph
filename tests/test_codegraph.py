@@ -4635,3 +4635,45 @@ class UntypedMeansItMightBeYours(Sandbox):
         s = codegraph.stats(self.graph(write=False))
         self.assertEqual(s["could_have_been_resolved"], 1)
         self.assertEqual(s["resolution_rate"], 1.0)
+
+
+class TheReadmeListsEveryLabel(unittest.TestCase):
+    """The label table is the front page's whole claim, and it drifts: it once listed `TYPED`
+    twice, described `LOCAL` as same-module only after it learned to see enclosing functions,
+    still called `EXTERNAL` "a method on an object it cannot type" after that became `UNTYPED`,
+    and omitted `BUILTIN` and `UNTYPED` altogether. Nothing was checking it."""
+
+    def readme_labels(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            text = f.read()
+        start = text.index("| label |")
+        end = text.index("\n\n", start)
+        rows = [r for r in text[start:end].splitlines() if r.startswith("| `")]
+        return {re.match(r"\| `([A-Z-]+)`", r).group(1) for r in rows}
+
+    def test_the_table_and_the_tool_agree(self):
+        known = TheGraphKeepsItsOwnInvariants.LABELS
+        listed = self.readme_labels()
+        self.assertEqual(listed - known, set(), "the README lists a label the tool cannot emit")
+        self.assertEqual(known - listed, set(), "the tool emits a label the README omits")
+
+    def test_each_label_is_listed_once(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            text = f.read()
+        start = text.index("| label |")
+        rows = [r for r in text[start:text.index("\n\n", start)].splitlines() if r.startswith("| `")]
+        names = [re.match(r"\| `([A-Z-]+)`", r).group(1) for r in rows]
+        self.assertEqual(sorted(names), sorted(set(names)), "a label is in the table twice")
+
+    def test_the_table_says_which_ones_resolve(self):
+        """A reader scanning it should not have to infer that from the prose."""
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            text = f.read()
+        start = text.index("| label |")
+        rows = [r for r in text[start:text.index("\n\n", start)].splitlines() if r.startswith("| `")]
+        answers = {re.match(r"\| `([A-Z-]+)`", r).group(1): r.rstrip("| ").rsplit("|", 1)[1].strip()
+                   for r in rows}
+        for label in TheGraphKeepsItsOwnInvariants.UNRESOLVED:
+            self.assertEqual(answers[label], "no", label)
+        for label in TheGraphKeepsItsOwnInvariants.LABELS - TheGraphKeepsItsOwnInvariants.UNRESOLVED:
+            self.assertEqual(answers[label], "yes", label)
