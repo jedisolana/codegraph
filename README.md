@@ -116,7 +116,7 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 ```json
 {
   "call_edges": 3801,
-  "call_sites": 5067,
+  "call_sites": 5070,
   "edge_confidence": {"EXTERNAL": 2023, "INHERITED": 601, "BUILTIN": 444, "SELF-METHOD": 299,
                       "QUALIFIED": 257, "LOCAL": 119, "UNTYPED": 54, "CONSTRUCTOR": 3,
                       "TYPED": 1, "AMBIGUOUS": 0},

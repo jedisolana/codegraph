@@ -9,6 +9,13 @@ behaviour nothing is checking.
     python3 tools/mutation.py            # a sample of sixty
     python3 tools/mutation.py 200        # a bigger sample
     python3 tools/mutation.py 200 7      # ...with a particular seed
+    python3 tools/mutation.py 839 0 250  # ...skipping the first 250 of it
+
+The third number is where to start, and it exists because a full pass takes hours and hours is
+long enough to be killed - by a machine running short of memory, or by whoever needs the
+laptop. The sample is drawn from the seed before anything is skipped, so the same count and
+seed always describe the same list, and a run that stopped after 250 continues with `250`
+rather than starting again.
 
 It edits codegraph.py in place and puts it back, so it refuses to start unless git says the
 tree is clean, and it verifies the file byte for byte before it exits. A full run takes hours;
@@ -88,11 +95,12 @@ def main(argv):
     try:
         want = int(argv[0]) if argv else 60
         seed = int(argv[1]) if len(argv) > 1 else 0
+        start = int(argv[2]) if len(argv) > 2 else 0
     except ValueError:
         # It used to raise the ValueError itself, so `--help` - the first thing anybody types
         # at an unfamiliar script - answered with a traceback out of int().
-        sys.exit(f"usage: mutation.py [count] [seed]   both whole numbers; got {' '.join(argv)!r}\n"
-                 f"       mutation.py --help           what this does and why")
+        sys.exit(f"usage: mutation.py [count] [seed] [start]   whole numbers; got {' '.join(argv)!r}\n"
+                 f"       mutation.py --help                    what this does and why")
     if want < 1:
         sys.exit("a run of no mutations proves nothing")
     marker_path = os.path.join(os.path.dirname(TARGET), ".mutation-running")
@@ -114,21 +122,35 @@ def main(argv):
     before = hashlib.sha256(text.encode()).hexdigest()
     backup = os.path.join(tempfile.mkdtemp(), "codegraph.py")
     shutil.copy(TARGET, backup)
+
+    every = list(candidates(ast.parse(text)))
+    random.seed(seed)
+    # Sample first, THEN skip. Drawing a shorter sample for a later slice would draw a
+    # different set, and the point of the third argument is that the list does not move.
+    sample = random.sample(every, min(want, len(every)))
+    drawn = len(sample)
+    if start:
+        if start >= drawn:
+            sys.exit(f"nothing to do: the sample is {drawn} long and starts at {start}")
+        sample = sample[start:]
+    print(f"{len(every)} possible mutations; trying {len(sample)}"
+          + (f" (of {drawn}, skipping the first {start})" if start else ""), flush=True)
+    survivors, hung, killed, t0 = [], [], 0, time.time()
+    tried = 0
+
     # A breadcrumb, because the restore below is in a `finally` and a `finally` does not run
     # when the process is killed - which is how a long run actually ends when a machine runs
     # short of memory. What it leaves behind is not one flipped comparison: every mutation is
     # written back with ast.unparse, so the file on disk has lost the shebang and every comment
     # in it. That is a 2,500-line diff and nothing on screen to say why.
+    #
+    # Written on the LAST line before the try that removes it. An earlier version wrote it
+    # beside the backup, several exits higher up, so `mutation.py 10 0 99` - which does nothing
+    # at all - left the breadcrumb behind and the next run reported a crash that never
+    # happened. A marker for "this is in progress" has to be created where the progress does.
     marker = os.path.join(os.path.dirname(TARGET), ".mutation-running")
     with open(marker, "w", encoding="utf-8") as fh:
         fh.write(f"{backup}\n{before}\n")
-
-    every = list(candidates(ast.parse(text)))
-    random.seed(seed)
-    sample = random.sample(every, min(want, len(every)))
-    print(f"{len(every)} possible mutations; trying {len(sample)}", flush=True)
-    survivors, hung, killed, t0 = [], [], 0, time.time()
-    tried = 0
     try:
         for kind, line, detail in sample:
             m = Mutator(kind, line)

@@ -9,3 +9,6 @@ venv/
 # this tool's own output, when run inside its own repo
 codegraph.json
 codegraph.cache.json
+
+# left behind only by a mutation run that was killed; the harness explains it on the next start
+.mutation-running
