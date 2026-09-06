@@ -4,6 +4,25 @@
 
 First release.
 
+### The language calls things the source never names
+
+`with r:` runs `__enter__` and `__exit__`. `for x in r` runs `__iter__`. `len(r)` runs
+`__len__`, `r[k] = v` runs `__setitem__`, `1 in r` runs `r`'s `__contains__`. Not one of them
+is an `ast.Call` on the method, so none produced an edge — `impact __exit__` on a context
+manager answered that changing it would break nothing. `unused` had annotated these
+"(python calls this one)" all along, so the category was known and the edge still missing.
+
+Statement forms, subscripts, operators, comparisons and the builtins that are a method in
+disguise (`len`, `str`, `iter`, `next`, `hash`, `bool`, `abs`, …) now all resolve, through the
+same inheritance order as a method call and with the same requirement: a receiver the file can
+put a class to. Against the standard library that is 1,148 new edges, and definitions reached
+this way that have a caller went from 45 to 353.
+
+Where the class is known and simply does not have the method — `for row in rows` on a `list`
+subclass — the edge is `EXTERNAL`, not "cannot tell". Recording it as unknown claimed the
+target might be in the tree and pulled the resolution rate down with cases nobody could win;
+labelled truthfully, the rate goes up rather than down.
+
 ### Reading a property is a call
 
 `c.endpoint` on a `@property` runs a function, and there is nothing in the syntax to say so —

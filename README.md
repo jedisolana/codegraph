@@ -71,6 +71,13 @@ what they run. `Client()` runs an `__init__`; `super().save()` runs a parent's `
 runs a `__call__`. Without those edges the tool answers "nothing depends on this" about the
 most-edited method in Python.
 
+**The language calls things the source never names.** `with r:` runs `__enter__` and
+`__exit__`; `for x in r` runs `__iter__`; `len(r)` runs `__len__`; `r[k]`, `r[k] = v` and
+`del r[k]` are three different methods; `r + 1` runs `__add__` and `1 in r` runs `r`'s
+`__contains__` — the one case where the receiver is the operand on the right. All of these are
+edges. In the standard library 2,780 definitions are reached only this way, and 98% of them
+used to report no caller at all.
+
 **Reading a property runs it**, and writes no parentheses doing so — `c.endpoint` is a call
 with nothing in the syntax to say so. Attribute reads are counted wherever the receiver can be
 typed, the same reach a method call has: `self` and `cls` inside a class, or a local whose
@@ -231,6 +238,12 @@ Static analysis, honestly labelled:
 - **A decorator is counted as a call** — `@register` is an edge from the enclosing scope, since
   that is where it runs. But a decorator that *replaces* the function with a different one is
   not followed through: calls to the decorated name still point at the original `def`.
+- **A call made by syntax needs a receiver the file can type**, the same as a written one.
+  `with open(p) as f` and `with self.lock` name no typed local, so neither is recorded. When
+  the class *is* known and does not have the method, the edge is `EXTERNAL` rather than
+  "cannot tell" — `for row in rows` on a `list` subclass runs code outside the tree.
+- **A reflected operator is not followed.** `a + b` records `a.__add__`; Python's fallback to
+  `b.__radd__` happens only when the first returns `NotImplemented`, which is a runtime answer.
 - **A property read needs a receiver the file can type.** `self.thing` and `c.thing` where `c`
   is annotated or was built here both resolve; a bare `x.thing` on an untyped `x` does not, the
   same way `x.method()` does not. Every typed attribute read is recorded while parsing and
@@ -335,7 +348,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 414 more. Grouped, because a list of every one of them stopped being
+The test suite adds 424 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

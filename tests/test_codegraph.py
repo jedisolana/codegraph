@@ -2134,6 +2134,117 @@ class ReadingAPropertyRunsIt(Sandbox):
         self.assertIn("m.Cfg.never", [u[0] for u in codegraph.unused(g)])
 
 
+class TheLanguageCallsThingsTheSourceNeverNames(Sandbox):
+    """`with r:` runs `__enter__`. `for x in r` runs `__iter__`. `len(r)` runs `__len__`.
+
+    None of these is an ast.Call on the method, so a graph built from call nodes recorded no
+    edge for any of them: 2,780 definitions in the standard library are reached only this way,
+    and 98% of them reported no caller. `unused` already annotated them "(python calls this
+    one)" - the tool knew the category existed and still answered `impact __exit__` with
+    "nothing depends on this".
+
+    Same reach as a written method call: the receiver has to be `self`/`cls` in a class, or a
+    local whose class is known.
+    """
+
+    HEAD = ("class R:\n"
+            "    def __enter__(self): return self\n"
+            "    def __exit__(self, *a): return False\n"
+            "    def __iter__(self): return iter([])\n"
+            "    def __len__(self): return 0\n"
+            "    def __getitem__(self, k): return k\n"
+            "    def __setitem__(self, k, v): pass\n"
+            "    def __delitem__(self, k): pass\n"
+            "    def __add__(self, o): return o\n"
+            "    def __neg__(self): return self\n"
+            "    def __eq__(self, o): return True\n"
+            "    def __contains__(self, o): return True\n"
+            "    def __str__(self): return ''\n")
+
+    def build(self, body):
+        self.write("m.py", self.HEAD + "\n" + body)
+        return self.graph()
+
+    def test_a_with_block_calls_enter_and_exit(self):
+        g = self.build("def use():\n    r = R()\n    with r:\n        pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__enter__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__exit__"), ["m.use"])
+
+    def test_a_for_loop_calls_iter(self):
+        g = self.build("def use():\n    r = R()\n    for _ in r:\n        pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__iter__"), ["m.use"])
+
+    def test_the_three_subscript_forms_are_three_different_methods(self):
+        g = self.build("def use():\n    r = R()\n    r[1]\n    r[2] = 3\n    del r[4]\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__getitem__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__setitem__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__delitem__"), ["m.use"])
+
+    def test_a_builtin_that_is_a_method_in_disguise(self):
+        g = self.build("def use():\n    r = R()\n    return len(r), str(r)\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__len__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__str__"), ["m.use"])
+
+    def test_operators_resolve_on_the_left_operand(self):
+        g = self.build("def use():\n    r = R()\n    return (r + 1), (-r), (r == 2)\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__add__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__neg__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.R.__eq__"), ["m.use"])
+
+    def test_in_reverses_the_operands(self):
+        """The one place in the table where the receiver is on the right: `a in b` runs
+        b.__contains__. Written the other way round this would silently attribute every
+        membership test to the wrong class."""
+        g = self.build("def use():\n    r = R()\n    return 1 in r\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__contains__"), ["m.use"])
+
+    def test_an_async_with_calls_the_async_pair(self):
+        self.write("m.py", "class A:\n"
+                           "    async def __aenter__(self): return self\n"
+                           "    async def __aexit__(self, *a): return False\n"
+                           "\n"
+                           "async def use():\n"
+                           "    a = A()\n"
+                           "    async with a:\n"
+                           "        pass\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.A.__aenter__"), ["m.use"])
+        self.assertEqual(codegraph.callers_of(g, "m.A.__aexit__"), ["m.use"])
+
+    def test_it_resolves_on_self_and_through_a_base_class(self):
+        self.write("m.py", "class Base:\n"
+                           "    def __iter__(self): return iter([])\n"
+                           "\n"
+                           "class Sub(Base):\n"
+                           "    def walk(self):\n"
+                           "        for _ in self:\n"
+                           "            pass\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Base.__iter__"), ["m.Sub.walk"])
+
+    def test_an_untyped_receiver_records_nothing(self):
+        """The negative half. `with thing:` on a parameter nobody annotated is exactly the
+        blind spot a written `thing.method()` has, and inventing an answer here would be worse
+        than the gap - there is more than one class in a tree with an __enter__."""
+        g = self.build("def use(thing):\n    with thing:\n        pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.R.__enter__"), [])
+
+    def test_a_method_the_class_does_not_have_is_external_not_unknown(self):
+        """`for row in rows` where rows subclasses something outside the tree runs an
+        __iter__ that is genuinely not here. Left as UNTYPED it would claim the target might
+        be in the tree and drag the resolution rate down with a case nobody could win."""
+        self.write("m.py", "class Rows(list):\n"
+                           "    pass\n"
+                           "\n"
+                           "def use():\n"
+                           "    r = Rows()\n"
+                           "    for _ in r:\n"
+                           "        pass\n")
+        g = self.graph()
+        got = [e["confidence"] for e in g["calls"] if e["callee"] == "__iter__"]
+        self.assertEqual(got, ["EXTERNAL"], f"expected EXTERNAL, got {got}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

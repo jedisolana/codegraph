@@ -586,6 +586,73 @@ def _defs_and_calls(path, mod):
                 if cls or node.value is not None: self._retype(node.target.id, cls)
             self.generic_visit(node)
 
+        def _syntax_call(self, recv_node, name, line):
+            """Record a call the language makes and the source never writes.
+
+            Same reach as a written method call and no more: `self`/`cls` inside a class, or a
+            local whose class is known. `with open(p) as f` and `with self.lock` name no typed
+            local, so they are not recorded - the receiver has to be something this file can
+            put a class to.
+            """
+            if not isinstance(recv_node, ast.Name) or not self.owner: return
+            recv = recv_node.id
+            edge = {"src": self.owner[-1], "mod": mod, "callee": name, "recv": recv,
+                    "method": True, "kind": "CALL", "syntax": True, "line": line}
+            if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]
+            elif self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]
+            else: return
+            edges.append(edge)
+
+        def _with(self, node, enter, exit_):
+            for item in node.items:
+                self._syntax_call(item.context_expr, enter, getattr(node, "lineno", 0))
+                self._syntax_call(item.context_expr, exit_, getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_With(self, node): self._with(node, "__enter__", "__exit__")
+        def visit_AsyncWith(self, node): self._with(node, "__aenter__", "__aexit__")
+
+        def visit_For(self, node):
+            self._syntax_call(node.iter, "__iter__", getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_AsyncFor(self, node):
+            self._syntax_call(node.iter, "__aiter__", getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node):
+            """`d[k]`, `d[k] = v` and `del d[k]` are three different methods."""
+            name = {ast.Store: "__setitem__", ast.Del: "__delitem__"}.get(
+                type(node.ctx), "__getitem__")
+            self._syntax_call(node.value, name, getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_BinOp(self, node):
+            """The LEFT operand's method is the one Python tries first. It falls back to the
+            right operand's reflected form (`__radd__`) when the left returns NotImplemented,
+            which is a runtime answer and not recorded here."""
+            name = _BINOP_METHOD.get(type(node.op))
+            if name: self._syntax_call(node.left, name, getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_UnaryOp(self, node):
+            name = _UNARY_METHOD.get(type(node.op))
+            if name: self._syntax_call(node.operand, name, getattr(node, "lineno", 0))
+            self.generic_visit(node)
+
+        def visit_Compare(self, node):
+            """`a in b` runs b.__contains__, not a's - the receiver is the operand on the
+            RIGHT, which is the one place in this table where the order flips."""
+            left, line = node.left, getattr(node, "lineno", 0)
+            for op, right in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    self._syntax_call(right, "__contains__", line)
+                else:
+                    name = _COMPARE_METHOD.get(type(op))
+                    if name: self._syntax_call(left, name, line)
+                left = right
+            self.generic_visit(node)
+
         def visit_Attribute(self, node):
             """Reading a property RUNS it, and writes no parentheses doing so.
 
@@ -647,6 +714,12 @@ def _defs_and_calls(path, mod):
                         imports.append({"src": mod, "callee": target, "kind": "IMPORT",
                                         "line": node.lineno, "module_level": len(self.owner) == 1,
                                         "maybe": True})
+            # len(x) IS x.__len__(), and str(x) is x.__str__(). The builtin is written; the
+            # method it runs is not, so the definition looked uncalled.
+            if (isinstance(fn, ast.Name) and fn.id in _BUILTIN_METHOD and node.args
+                    and not any(fn.id in v for v, _ in self.bound)):
+                self._syntax_call(node.args[0], _BUILTIN_METHOD[fn.id],
+                                  getattr(node, "lineno", 0))
             if callee:                                          # attribute this call to its NEAREST enclosing owner (a def, or the module if top-level)
                 # The module is carried, not re-derived. It used to be recovered by splitting
                 # the qualified id on its first dot - which is wrong the moment a DIRECTORY has
@@ -721,6 +794,23 @@ def _defs_and_calls(path, mod):
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules)
 
+
+# Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
+# built from ast.Call nodes cannot see any of them: in the standard library 2,780 definitions
+# are reached this way and 98% of them recorded no caller at all.
+_BINOP_METHOD = {ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__",
+                 ast.Div: "__truediv__", ast.FloorDiv: "__floordiv__", ast.Mod: "__mod__",
+                 ast.Pow: "__pow__", ast.LShift: "__lshift__", ast.RShift: "__rshift__",
+                 ast.BitAnd: "__and__", ast.BitOr: "__or__", ast.BitXor: "__xor__",
+                 ast.MatMult: "__matmul__"}
+_UNARY_METHOD = {ast.USub: "__neg__", ast.UAdd: "__pos__", ast.Invert: "__invert__"}
+_COMPARE_METHOD = {ast.Eq: "__eq__", ast.NotEq: "__ne__", ast.Lt: "__lt__", ast.LtE: "__le__",
+                   ast.Gt: "__gt__", ast.GtE: "__ge__"}
+# a builtin whose whole job is to call one method on its argument
+_BUILTIN_METHOD = {"len": "__len__", "iter": "__iter__", "next": "__next__", "str": "__str__",
+                   "repr": "__repr__", "hash": "__hash__", "bool": "__bool__",
+                   "abs": "__abs__", "format": "__format__", "reversed": "__reversed__",
+                   "dir": "__dir__", "round": "__round__"}
 
 # `@property`, `@cached_property`, and the `@x.setter/.getter/.deleter` that go with them.
 # Anything decorated with one of these is reached by READING an attribute, never by writing
@@ -1237,6 +1327,15 @@ def build(dirs=None, write=True):
     for e in calls:
         if (e["confidence"] == "UNTYPED" and e.get("method")
                 and e["callee"] not in by_name):
+            e["confidence"] = "EXTERNAL"
+    # A call the language makes is only recorded when the receiver's class is known, so an
+    # unresolved one is not the usual "could not tell what this is". The class was named and
+    # its inheritance walked; the method is not on it. `for row in rows` where `rows` subclasses
+    # `list` runs list.__iter__, which is outside the tree - EXTERNAL, exactly what it means.
+    # Left as UNTYPED these would claim the target MIGHT be here and drag the resolution rate
+    # down with cases that were never winnable.
+    for e in calls:
+        if e.get("syntax") and e["confidence"] == "UNTYPED":
             e["confidence"] = "EXTERNAL"
     # An attribute read was recorded wherever the receiver could be typed, because whether the
     # name belongs to a property is not knowable until every file has been parsed. Now it is:
