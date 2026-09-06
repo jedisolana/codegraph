@@ -24,6 +24,7 @@ than no blast radius at all.
   codegraph path <from> <to>   a call path connecting two functions
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
+  codegraph unused             every definition nothing here calls - read the caveat
   codegraph stats              counts, resolution rate, never-called definitions
   codegraph --selftest         32 ground-truth checks, several of them red-first
   codegraph --help             this text
@@ -1992,6 +1993,26 @@ def impact(g, name):
             "blast": blast_radius(g, name), "unresolved": unresolved}
 
 
+def unused(g):
+    """Every function definition nothing in this tree calls, as (id, file:line, called_by_python).
+
+    `stats` has counted these from the start and there was no way to SEE them, which made the
+    number useless: 332 of something you cannot list is not a finding. Checking a real
+    codebase's 44 by hand turned up zero dead functions - they were a dispatch table, names
+    reached from a web page, two handlers the standard library's HTTP server calls by name, and
+    a `__str__`. So the last field is a warning, not a verdict: a dunder is called BY PYTHON,
+    for you, and will always be here.
+    """
+    called = {e["dst"] for e in g["calls"] if e.get("dst")}
+    files = _files(g)
+    out = []
+    for n in g["nodes"]:
+        if n["kind"] == "func" and n["id"] not in called:
+            where_ = f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}"
+            out.append((n["id"], where_, n["name"].startswith("__") and n["name"].endswith("__")))
+    return sorted(out)
+
+
 def stats(g):
     kinds = defaultdict(int)
     for n in g["nodes"]: kinds[n["kind"]] += 1
@@ -2106,7 +2127,7 @@ def _main(argv=None):
     # Every query verb takes a name. Forgetting it used to be an IndexError traceback - the
     # first thing a new user sees when they type a command from memory.
     NEEDS = {"callers": 1, "calls": 1, "blast": 1, "where": 1, "find": 1, "sites": 1,
-             "impact": 1, "deps": 1, "path": 2}
+             "impact": 1, "deps": 1, "path": 2}      # "unused" and "cycles" take no name
     if a and a[0] in NEEDS and (len(a) - 1 < NEEDS[a[0]]
                                 or not all(x.strip() for x in a[1:1 + NEEDS[a[0]]])):
         # A BLANK argument is a missing one. `codegraph find "$NAME"` with NAME unset used to
@@ -2243,6 +2264,20 @@ def _main(argv=None):
             print(f"unsure:  {len(u)} call site{'' if one else 's'} {'uses' if one else 'use'} "
                   f"this name and could not be resolved - {', '.join(loc for loc, _ in u[:4])}"
                   + (" ..." if len(u) > 4 else ""))
+    elif a[0] == "unused":
+        rows = unused(load())
+        if as_json:
+            _emit({"query": "unused",
+                   "results": [{"id": i, "at": loc, "called_by_python": d} for i, loc, d in rows]})
+        else:
+            print("\n".join(f"{i}  {loc}" + ("   (python calls this one)" if d else "")
+                             for i, loc, d in rows) or "(none)")
+            if rows:
+                sys.stdout.flush()   # or the caveat lands above the list it is about, since
+                                     # stderr is unbuffered and stdout is not when piped
+                print(f"\n{len(rows)} definition(s) nothing here calls. Not the same as dead: a "
+                      f"dispatch table,\na plugin registry, a web route or a framework callback "
+                      f"all look like this.", file=sys.stderr)
     elif a[0] == "stats": print(json.dumps(stats(load()), indent=2))
     else:
         print(__doc__)

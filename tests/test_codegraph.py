@@ -4773,3 +4773,60 @@ class TheCommandLineCanAnswerInData(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "app.mid")
         self.assertEqual(self.run_it("callers", "app.top").stdout.strip(), "(none)")
         self.assertEqual(self.run_it("callers", "leaf").returncode, 2)
+
+
+class TheNeverCalledListWasOnlyEverACount(Sandbox):
+    """`stats` has reported `never_called_in_tree` from the start and there was no way to SEE
+    the list, which made the number useless - 332 of something you cannot enumerate is not a
+    finding. Checking one real codebase's 44 by hand turned up zero dead functions: a dispatch
+    table, names reached from a web page, two handlers the standard library's HTTP server calls
+    by name, and a `__str__`. So the verb warns rather than accuses."""
+
+    def test_it_lists_what_stats_only_counted(self):
+        self.write("m.py", "def used():\n    return 1\n"
+                           "def unused_one():\n    return 2\n"
+                           "def caller():\n    return used()\n")
+        g = self.graph(write=False)
+        rows = codegraph.unused(g)
+        self.assertEqual([i for i, _at, _d in rows], ["m.caller", "m.unused_one"])
+        self.assertEqual(codegraph.stats(g)["never_called_in_tree"], len(rows))
+
+    def test_it_says_where(self):
+        self.write("m.py", "def alone():\n    return 1\n")
+        (_id, at, _d), = codegraph.unused(self.graph(write=False))
+        self.assertEqual(at, "m.py:1")
+
+    def test_a_constructor_that_is_built_is_not_in_it(self):
+        """The list is only worth reading because the calls that never write a name - an
+        __init__, a super(), a __call__ - are edges now."""
+        self.write("m.py", "class Client:\n"
+                           "    def __init__(self):\n        pass\n"
+                           "\n"
+                           "def make():\n    return Client()\n")
+        ids = [i for i, _a, _d in codegraph.unused(self.graph(write=False))]
+        self.assertNotIn("m.Client.__init__", ids)
+        self.assertIn("m.make", ids)
+
+    def test_a_dunder_is_flagged_as_pythons_business(self):
+        self.write("m.py", "class Thing:\n"
+                           "    def __str__(self):\n        return 'x'\n"
+                           "    def helper(self):\n        return 1\n")
+        rows = {i: d for i, _a, d in codegraph.unused(self.graph(write=False))}
+        self.assertTrue(rows["m.Thing.__str__"], "Python calls this one for you")
+        self.assertFalse(rows["m.Thing.helper"])
+
+    def test_the_caveat_reaches_the_person_reading_it(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "m.py"), "w", encoding="utf-8") as f:
+            f.write("def alone():\n    return 1\n")
+        cg = os.path.join(HERE, "codegraph.py")
+        subprocess.run([sys.executable, cg, "build", "."], cwd=d, capture_output=True, timeout=180)
+        r = subprocess.run([sys.executable, cg, "unused"], cwd=d,
+                           capture_output=True, text=True, timeout=180)
+        self.assertIn("m.alone", r.stdout)
+        self.assertIn("Not the same as dead", r.stderr)
+        j = subprocess.run([sys.executable, cg, "unused", "--json"], cwd=d,
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(json.loads(j.stdout)["results"],
+                         [{"id": "m.alone", "at": "m.py:1", "called_by_python": False}])

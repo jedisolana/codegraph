@@ -137,6 +137,7 @@ codegraph find <substr>      fuzzy symbol search
 codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers, `import_module("x")` included
 codegraph cycles             import cycles of any length, including a module importing itself
+codegraph unused             every definition nothing here calls — read the caveat
 codegraph stats              counts, resolution rate, never-called definitions
 codegraph --selftest         32 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
@@ -314,7 +315,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 380 more. Grouped, because a list of every one of them stopped being
+The test suite adds 385 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
