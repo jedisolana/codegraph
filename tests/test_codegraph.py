@@ -2665,6 +2665,54 @@ class ConstructingRunsNewAsWellAsInit(Sandbox):
         self.assertEqual(made_up, [])
 
 
+class TheCommitMessageHookRefusesWhatCannotBeTakenBack(unittest.TestCase):
+    """A stray CJK character landed mid-word in a commit message here and went out on a push.
+
+    It is invisible in a terminal at a glance and survives any review that reads for meaning
+    rather than for bytes. A commit message cannot be corrected after a push without rewriting
+    history, and that removes nothing - the original stays fetchable by SHA - so the only place
+    to catch it is before the commit exists.
+
+    The hook is tested because the first version of it used `grep -P`, which BSD grep does not
+    have, and the failure was swallowed: it reported success on every message. A guard that
+    cannot run and says nothing is worse than no guard, because it is also believed.
+    """
+
+    HOOK = os.path.join(HERE, ".githooks", "commit-msg")
+
+    def check(self, text, env=None):
+        path = os.path.join(tempfile.mkdtemp(), "COMMIT_EDITMSG")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), ignore_errors=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return subprocess.run([self.HOOK, path], capture_output=True, text=True, timeout=60,
+                              env={**os.environ, **(env or {})})
+
+    def test_the_hook_is_executable(self):
+        self.assertTrue(os.path.exists(self.HOOK), "the hook is not in the repository")
+        self.assertTrue(os.access(self.HOOK, os.X_OK), "the hook is not executable")
+
+    def test_it_refuses_a_message_with_a_character_outside_ascii(self):
+        r = self.check("Subject line\n\nand a test\u5df2 checked\n")
+        self.assertEqual(r.returncode, 1, f"the hook accepted it: {r.stdout} {r.stderr}")
+        self.assertIn("U+5DF2", r.stderr, "it did not name the character it objected to")
+
+    def test_it_accepts_an_ordinary_message(self):
+        r = self.check("Subject line\n\nand a test already checked\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_git_scaffolding_is_not_the_message(self):
+        """Everything after a `#` is stripped before the message is stored, and the template
+        git writes there is not always ASCII."""
+        r = self.check("Subject line\n# a comment with \u00e9 in it\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_there_is_a_way_past_it(self):
+        """A guard with no override gets uninstalled the first time it is wrong."""
+        r = self.check("Subject\n\n\u5df2\n", env={"CODEGRAPH_ALLOW_UTF8": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

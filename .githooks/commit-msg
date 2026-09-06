@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Refuse a commit message carrying a character outside ASCII.
+#
+# A stray CJK character once landed in the middle of a word here - "and a test<X> checked" -
+# and went out on a push. It is invisible in a terminal at a glance, it survives every review
+# that reads for meaning rather than for bytes, and a commit message cannot be corrected
+# afterwards without rewriting history, which removes nothing: the old commit stays fetchable
+# by SHA. So the only place to catch it is before the commit exists.
+#
+# Every one of this repository's messages is plain ASCII already, so this costs nothing. Where
+# prose wants a dash or a quotation mark, the ASCII one reads the same in a terminal.
+#
+# Written with python3 rather than `grep -P`, which BSD grep - the grep on a Mac - does not
+# have. The first version of this hook used it, and because the failure was swallowed the hook
+# reported success on every message: a guard that cannot run and says nothing is worse than no
+# guard, because it is also believed.
+#
+# Install:   git config core.hooksPath .githooks
+# Skip once: CODEGRAPH_ALLOW_UTF8=1 git commit ...
+set -e
+
+[ -n "$CODEGRAPH_ALLOW_UTF8" ] && exit 0
+
+exec python3 - "$1" <<'PY'
+import sys
+
+with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
+    # Comment lines are git's own scaffolding and never reach the stored message.
+    lines = [(n, l.rstrip("\n")) for n, l in enumerate(f, 1) if not l.startswith("#")]
+
+bad = [(n, l, [c for c in l if ord(c) > 127]) for n, l in lines if any(ord(c) > 127 for c in l)]
+if not bad:
+    sys.exit(0)
+
+print("commit-msg: the message carries characters outside ASCII:", file=sys.stderr)
+for n, line, chars in bad:
+    shown = " ".join(f"{c!r} (U+{ord(c):04X})" for c in dict.fromkeys(chars))
+    print(f"  line {n}: {shown}", file=sys.stderr)
+    print(f"    {line.strip()[:96]}", file=sys.stderr)
+print("", file=sys.stderr)
+print("  A commit message cannot be fixed after a push without rewriting history,", file=sys.stderr)
+print("  and that leaves the original fetchable by SHA anyway.", file=sys.stderr)
+print("  Use the ASCII spelling, or CODEGRAPH_ALLOW_UTF8=1 git commit ... to override.", file=sys.stderr)
+sys.exit(1)
+PY
