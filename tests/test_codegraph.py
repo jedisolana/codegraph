@@ -2959,6 +2959,64 @@ class AnAttributeOnTheInstanceHasAClassToo(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "m.Database.query"), ["m.Service.run"])
 
 
+class OneAnswerForWhatAReceiverIs(Sandbox):
+    """`self.conn.__len__()` resolved and `len(self.conn)` did not. Same object, same line of
+    reasoning, two answers.
+
+    Instance-attribute types were taught to written method calls and to nothing else, so the
+    calls the language makes from syntax - `with`, `for`, a subscript, a builtin, a property
+    read - all went back to being blind on exactly the receivers that had just been solved.
+    Every one of them now asks the same question in the same place.
+    """
+
+    HEAD = ("class Conn:\n"
+            "    def __enter__(self): return self\n"
+            "    def __exit__(self, *a): return False\n"
+            "    def __iter__(self): return iter([])\n"
+            "    def __len__(self): return 0\n"
+            "    def __getitem__(self, k): return k\n"
+            "\n"
+            "class Cfg:\n"
+            "    @property\n"
+            "    def endpoint(self): return 'x'\n"
+            "\n"
+            "class Service:\n"
+            "    def __init__(self):\n"
+            "        self.conn = Conn()\n"
+            "        self.cfg = Cfg()\n")
+
+    def build(self, body):
+        self.write("m.py", self.HEAD + body)
+        return self.graph()
+
+    def test_a_with_block_on_an_attribute(self):
+        g = self.build("\n    def go(self):\n        with self.conn:\n            pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__enter__"), ["m.Service.go"])
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__exit__"), ["m.Service.go"])
+
+    def test_iterating_an_attribute(self):
+        g = self.build("\n    def go(self):\n        for _ in self.conn:\n            pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__iter__"), ["m.Service.go"])
+
+    def test_a_builtin_on_an_attribute(self):
+        g = self.build("\n    def go(self):\n        return len(self.conn)\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__len__"), ["m.Service.go"])
+
+    def test_subscripting_an_attribute(self):
+        g = self.build("\n    def go(self):\n        return self.conn[0]\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__getitem__"), ["m.Service.go"])
+
+    def test_a_property_on_an_attribute(self):
+        g = self.build("\n    def go(self):\n        return self.cfg.endpoint\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Cfg.endpoint"), ["m.Service.go"])
+
+    def test_an_attribute_with_no_known_class_still_says_nothing(self):
+        """The negative half: an attribute the class never assigns has no type, and `with`
+        on it must not reach for whichever class happens to define __enter__."""
+        g = self.build("\n    def go(self):\n        with self.mystery:\n            pass\n")
+        self.assertEqual(codegraph.callers_of(g, "m.Conn.__enter__"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

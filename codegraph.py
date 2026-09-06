@@ -613,6 +613,26 @@ def _defs_and_calls(path, mod):
                 if cls or node.value is not None: self._retype(node.target.id, cls)
             self.generic_visit(node)
 
+        def _receiver_type(self, node):
+            """What class a receiver expression has, when this file can say so.
+
+            Three shapes and no more: `self`/`cls` inside a class, a local whose class is
+            known, and `self.<attribute>` whose class the class body states. Everything that
+            resolves a receiver goes through here, because the alternative is what happened -
+            written calls learned about instance attributes and `with self.conn`, `len(self.x)`
+            and `self.cfg.endpoint` did not, so the same object was typed on one line and not
+            the next.
+            """
+            if isinstance(node, ast.Name):
+                if node.id in ("self", "cls") and self.classes:
+                    return ("encl_class", self.classes[-1])
+                cls = self.vtypes[-1].get(node.id)
+                return ("recv_type", cls) if cls else None
+            if _is_self_attr(node):
+                cls = self.atypes[-1].get(node.attr)
+                return ("recv_type", cls) if cls else None
+            return None
+
         def _syntax_call(self, recv_node, name, line, alt=None):
             """Record a call the language makes and the source never writes.
 
@@ -621,14 +641,14 @@ def _defs_and_calls(path, mod):
             local, so they are not recorded - the receiver has to be something this file can
             put a class to.
             """
-            if not isinstance(recv_node, ast.Name) or not self.owner: return
-            recv = recv_node.id
-            edge = {"src": self.owner[-1], "mod": mod, "callee": name, "recv": recv,
+            if not self.owner: return
+            got = self._receiver_type(recv_node)
+            if not got: return
+            edge = {"src": self.owner[-1], "mod": mod, "callee": name,
+                    "recv": recv_node.id if isinstance(recv_node, ast.Name) else None,
                     "method": True, "kind": "CALL", "syntax": True, "line": line}
             if alt: edge["alt"] = alt
-            if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]
-            elif self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]
-            else: return
+            edge[got[0]] = got[1]
             edges.append(edge)
 
         def _with(self, node, enter, exit_):
@@ -733,16 +753,16 @@ def _defs_and_calls(path, mod):
             attribute is not a property at all. Edges that turn out not to point at a property
             are dropped once every definition is known.
             """
-            if (isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name)
+            if (isinstance(node.ctx, ast.Load) and self.owner
                     and id(node) not in self._call_funcs):
-                recv = node.value.id
-                edge = {"src": self.owner[-1], "mod": mod, "callee": node.attr, "recv": recv,
-                        "method": True, "kind": "CALL", "attr_read": True,
-                        "line": getattr(node, "lineno", 0)}
-                if recv in ("self", "cls") and self.classes:
-                    edge["encl_class"] = self.classes[-1]; edges.append(edge)
-                elif self.vtypes[-1].get(recv):
-                    edge["recv_type"] = self.vtypes[-1][recv]; edges.append(edge)
+                got = self._receiver_type(node.value)
+                if got:
+                    edge = {"src": self.owner[-1], "mod": mod, "callee": node.attr,
+                            "recv": node.value.id if isinstance(node.value, ast.Name) else None,
+                            "method": True, "kind": "CALL", "attr_read": True,
+                            "line": getattr(node, "lineno", 0)}
+                    edge[got[0]] = got[1]
+                    edges.append(edge)
             self.generic_visit(node)
 
         def visit_Call(self, node):

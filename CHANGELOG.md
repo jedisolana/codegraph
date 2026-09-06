@@ -4,6 +4,19 @@
 
 First release.
 
+### One answer for what a receiver is
+
+`self.conn.__len__()` resolved and `len(self.conn)` did not — the same object, the same line of
+reasoning, two answers. Instance-attribute types were taught to written method calls and to
+nothing else, so `with self.conn`, `for x in self.conn`, `self.conn[0]` and
+`self.cfg.endpoint` all went back to being blind on exactly the receivers that had just been
+solved.
+
+Every place that needs a receiver's class now asks one function, which knows the three shapes
+this file can answer for: `self`/`cls`, a local whose class is known, and `self.<attribute>`.
+An attribute the class never assigns still has no type, and `with` on it does not reach for
+whichever class happens to define `__enter__`.
+
 ### An attribute on the instance has a class too
 
 `self.db = Database()` in the constructor and `self.db.query()` in the method below it — how
