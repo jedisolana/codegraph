@@ -27,7 +27,9 @@ import contextlib
 import hashlib
 import os
 import random
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -79,6 +81,85 @@ class Mutator(ast.NodeTransformer):
             self.done = True
             return ast.copy_location(ast.Constant(value=node.value + 1), node)
         return node
+
+
+# A mutant that loops does not just waste ninety seconds - it ALLOCATES while it spins, and
+# nothing here bounds that. Two of them were left running on a 16GB machine and reached 460GB
+# and 422GB of address space between them, which pushed every byte of swap out and took the
+# whole desktop down with it.
+#
+# Two separate failures produced that, and both are fixed below:
+#
+#   1. the child outlived its parent.  `subprocess.run(timeout=)` kills the child when the
+#      TIMEOUT fires, but nothing kills it when the HARNESS ITSELF is killed - a Ctrl-C, a
+#      `pkill`, an out-of-memory kill. The child is then orphaned onto init and, being an
+#      infinite loop, never stops. It is started in its own session now and the whole group
+#      is killed, from the timeout path and from a signal handler both.
+#   2. nothing capped what it could allocate.  A ceiling is what makes a runaway mutant fail
+#      instead of taking the machine with it - waiting ninety seconds is far too long to
+#      notice 400GB of address space being asked for.
+CHILD_MEMORY_CAP = 4 * 1024 ** 3          # generous for a test suite, fatal to a runaway loop
+_running: list[subprocess.Popen] = []
+
+
+def _cap_child():
+    """Runs in the child between fork and exec."""
+    os.setsid()                            # its own process group, so the whole tree is killable
+    with contextlib.suppress(Exception):
+        resource.setrlimit(resource.RLIMIT_AS, (CHILD_MEMORY_CAP, CHILD_MEMORY_CAP))
+
+
+def _kill_group(proc):
+    """Kill the child AND anything it started. The suite runs the CLI as a subprocess, so
+    killing only the direct child leaves grandchildren behind."""
+    with contextlib.suppress(Exception):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=10)
+
+
+# The child watches for its own parent dying. A signal handler covers Ctrl-C and an ordinary
+# `pkill`, and covers nothing at all against SIGKILL - which cannot be caught, and which is
+# what an out-of-memory kill and an impatient `kill -9` both send. The parent is then gone and
+# an infinite-loop mutant runs until the machine does. Nothing outside the child can fix that,
+# so the child checks: reparented onto init means the harness is dead and there is no one left
+# to report to.
+CHILD = """
+import os, sys, threading, time, unittest
+def _orphan_watch():
+    while True:
+        if os.getppid() == 1:
+            os._exit(137)
+        time.sleep(2)
+threading.Thread(target=_orphan_watch, daemon=True).start()
+unittest.main(module=None, argv=["mutant", "discover", "-s", "tests", "-q", "--failfast"])
+"""
+
+
+def _run_suite(timeout):
+    """The suite, in its own process group, under a memory ceiling, killed as a group."""
+    proc = subprocess.Popen([sys.executable, "-c", CHILD],
+                            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, preexec_fn=_cap_child)
+    _running.append(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        raise
+    finally:
+        if proc in _running:
+            _running.remove(proc)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def _on_signal(signum, _frame):
+    """Do not leave a spinning child behind on the way out."""
+    for proc in list(_running):
+        _kill_group(proc)
+    sys.exit(128 + signum)
 
 
 def clean_tree():
@@ -151,6 +232,9 @@ def main(argv):
     marker = os.path.join(os.path.dirname(TARGET), ".mutation-running")
     with open(marker, "w", encoding="utf-8") as fh:
         fh.write(f"{backup}\n{before}\n")
+    for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(_sig, _on_signal)
     try:
         for kind, line, detail in sample:
             m = Mutator(kind, line)
@@ -168,9 +252,7 @@ def main(argv):
             # and the tool loops for ever. At ten minutes each, one of those ended a run of
             # seven hundred by raising TimeoutExpired straight through this harness.
             try:
-                r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests",
-                                    "-q", "--failfast"],
-                                   cwd=ROOT, capture_output=True, text=True, timeout=90)
+                r = _run_suite(90)
             except subprocess.TimeoutExpired:
                 hung.append((line, kind, detail))
                 killed += 1          # a change that makes it spin for ever is one somebody notices
