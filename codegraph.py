@@ -838,6 +838,15 @@ def _defs_and_calls(path, mod):
                         edge["super_from"] = a0.id
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
                 elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
+                elif (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Call)
+                      and not edge.get("super_of") and _called_class(fn.value)):
+                    # `Leg("stock", 100).payoff(110)` - the class is written at the call site,
+                    # in the same expression, and was read only when it went through a variable
+                    # first. So `x = Leg(...)` then `x.payoff()` resolved and the one-liner did
+                    # not, and `unused` then reported `Leg.payoff` as called by nothing while
+                    # three lines called it. Found by running this tool over somebody else's
+                    # codebase; the standard library writes the shape 944 times.
+                    edge["recv_type"] = _called_class(fn.value)
                 elif (isinstance(fn, ast.Attribute) and _is_self_attr(fn.value)
                       and self.atypes[-1].get(fn.value.attr)):
                     # self.db.query() - a collaborator held on the instance, which is how most

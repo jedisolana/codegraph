@@ -115,18 +115,18 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3819,
-  "call_sites": 5091,
-  "edge_confidence": {"EXTERNAL": 2037, "INHERITED": 601, "BUILTIN": 445, "SELF-METHOD": 299,
-                      "QUALIFIED": 257, "LOCAL": 122, "UNTYPED": 54, "CONSTRUCTOR": 3,
-                      "TYPED": 1, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1283,
-  "could_have_been_resolved": 1337,
-  "resolution_rate": 0.96
+  "call_edges": 3835,
+  "call_sites": 5102,
+  "edge_confidence": {"EXTERNAL": 2048, "INHERITED": 603, "BUILTIN": 445, "SELF-METHOD": 299,
+                      "QUALIFIED": 259, "LOCAL": 123, "UNTYPED": 50, "TYPED": 5,
+                      "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
+  "resolved_to_one_def": 1292,
+  "could_have_been_resolved": 1342,
+  "resolution_rate": 0.963
 }
 ```
 
-That 0.96 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.963 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 96%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -324,7 +324,7 @@ A suite that never fails is not evidence of anything, so it is checked the other
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 839 mutations.** A full pass is hours of work, so it is run deliberately
+**The file admits 841 mutations.** A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two mutations do not make the suite fail but make
@@ -367,7 +367,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 489 more. Grouped, because a list of every one of them stopped being
+The test suite adds 490 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

@@ -1556,23 +1556,47 @@ class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
 
 
 class ImpactSaysWhatItCouldNotResolve(Sandbox):
-    """`impact start` reported no callers while Engine().start() sat in another file. Each edge
-    was labelled honestly; the ANSWER was false reassurance, which is the one thing a pre-edit
-    view must never give."""
+    """`impact start` reported no callers while a call to it sat in another file. Each edge was
+    labelled honestly; the ANSWER was false reassurance, which is the one thing a pre-edit view
+    must never give.
+
+    The fixture used to be `Engine().start()`, which is now resolved outright - the class is
+    written at the call site and reading it is no longer optional. What stands in its place is
+    the shape still genuinely out of reach: a receiver that came back from a function whose
+    return type nobody wrote down. The feature this class covers is what `impact` says when it
+    cannot tell, so the fixture has to be something it actually cannot tell.
+    """
 
     def setUp(self):
         super().setUp()
         os.makedirs(os.path.join(self.dir, "pkg"))
         self.write("pkg/lib.py", "class Engine:\n    def start(self):\n        return 1\n"
                                  "def helper():\n    return 1\n")
-        self.write("main.py", "from pkg.lib import Engine\ndef go():\n"
-                              "    return Engine().start()\n")
+        self.write("main.py", "from pkg.lib import Engine\n"
+                              "def make():\n    return Engine()\n"
+                              "def go():\n    return make().start()\n")
         self.g = self.graph()                            # written, so the CLI tests can read it
 
     def test_unresolved_uses_of_the_name_are_reported(self):
         im = codegraph.impact(self.g, "pkg/lib.Engine.start")
         self.assertEqual(im["callers"], [])
-        self.assertEqual([loc for loc, _ in im["unresolved"]], ["main.py:3"])
+        self.assertEqual([loc for loc, _ in im["unresolved"]], ["main.py:5"])
+
+    def test_a_method_called_straight_off_a_constructor_resolves(self):
+        """`Leg("stock", 100).payoff(110)` names its class in the same expression, and that was
+        read only when it went through a variable first - so the one-liner resolved to nothing
+        and `unused` called the method dead while three lines called it.
+
+        Found by running this tool over somebody else's codebase rather than its own; the
+        standard library writes the shape 944 times.
+        """
+        self.write("m.py", "class Leg:\n"
+                           "    def payoff(self, s):\n        return s\n"
+                           "\n"
+                           "def use():\n    return Leg().payoff(110)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Leg.payoff"), ["m.use"])
+        self.assertNotIn("m.Leg.payoff", [u[0] for u in codegraph.unused(g)])
 
     def test_a_function_nothing_touches_reports_nothing_extra(self):
         self.assertEqual(codegraph.impact(self.g, "pkg/lib.helper")["unresolved"], [])
@@ -1582,7 +1606,7 @@ class ImpactSaysWhatItCouldNotResolve(Sandbox):
                            cwd=self.dir, capture_output=True, text=True, timeout=180)
         self.assertIn("unsure:", r.stdout)
         self.assertIn("1 call site uses this name", r.stdout)
-        self.assertIn("main.py:3", r.stdout)
+        self.assertIn("main.py:5", r.stdout)
 
     def test_naming_a_module_points_at_the_right_command(self):
         """It IS in the graph - "never heard of it" was simply false."""
