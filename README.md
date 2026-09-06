@@ -5,9 +5,9 @@
 One file. No dependencies. Nothing but the standard library.
 
 ```bash
-curl -O https://raw.githubusercontent.com/jedisolana/codegraph/main/codegraph.py
-python3 codegraph.py build .
-python3 codegraph.py impact _paid_ok
+pipx install jedi-codegraph
+codegraph build .
+codegraph impact _paid_ok
 ```
 
 ```
@@ -302,17 +302,15 @@ output instead of hidden in it.
 The point is that you don't have to:
 
 ```bash
-curl -O https://raw.githubusercontent.com/jedisolana/codegraph/main/codegraph.py
+pipx install jedi-codegraph
 ```
 
-If you'd rather have it on your PATH:
+The distribution is **`jedi-codegraph`**, not `codegraph` — that name belongs to somebody else
+on PyPI, and PyPI reads hyphens as if they weren't there. The command it installs is
+`codegraph`, and `pip install jedi_codegraph` reaches the same package.
 
-```bash
-pipx install git+https://github.com/jedisolana/codegraph
-```
-
-On PyPI it will be `jedi-codegraph`, not `codegraph` — that name belongs to somebody else, and
-PyPI reads hyphens as if they weren't there. The command is `codegraph` either way.
+It is still one file with no dependencies, so copying `codegraph.py` out of an installed
+package and dropping it into a repository works exactly as well.
 
 Python 3.9+. Tested on Linux, macOS and Windows.
 
