@@ -267,17 +267,11 @@ curl -O https://raw.githubusercontent.com/jedisolana/codegraph/main/codegraph.py
 If you'd rather have it on your PATH:
 
 ```bash
-pipx install jedi-codegraph
-```
-
-The prefix is not decoration — `codegraph` on PyPI belongs to somebody else, and PyPI reads
-hyphens as if they weren't there. The command is still `codegraph`.
-
-Or straight from `main`, for changes that are not in a release yet:
-
-```bash
 pipx install git+https://github.com/jedisolana/codegraph
 ```
+
+On PyPI it will be `jedi-codegraph`, not `codegraph` — that name belongs to somebody else, and
+PyPI reads hyphens as if they weren't there. The command is `codegraph` either way.
 
 Python 3.9+. Tested on Linux, macOS and Windows.
 
@@ -327,7 +321,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 404 more. Grouped, because a list of every one of them stopped being
+The test suite adds 406 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

@@ -4,6 +4,18 @@
 
 First release.
 
+### Installing it
+
+The distribution is **`jedi-codegraph`**. `codegraph` on PyPI belongs to an unrelated project,
+and there is no hyphenated spelling to fall back on: PyPI compares a proposed name against the
+existing ones with `-`, `_` and `.` removed, so every arrangement of those letters collides.
+The command, the module and the import are all still `codegraph`.
+
+Releases are cut by tagging. The workflow calls the same test matrix the branch runs rather
+than copying it, refuses a tag that disagrees with the version, refuses a wheel that carries
+the metadata but not the tool or its entry point, and uploads through Trusted Publishing - so
+no API token exists to leak or rotate.
+
 ### What it does
 
 - `impact <name>` — the pre-edit view: who calls it, every call site as `file:line`, and the

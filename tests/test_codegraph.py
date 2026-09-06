@@ -2156,6 +2156,23 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                 self.assertIsNone(year.search(line),
                                   f"{os.path.relpath(full, HERE)}:{n} carries a year: {line.strip()[:70]}")
 
+    def test_the_licence_names_the_handle_and_nobody_else(self):
+        """A sibling repository shipped a licence copyrighting `freeboard contributors` - a
+        project name from before it was renamed. It survived every scrub, because a scan that
+        hunts forbidden words and a year does not notice a plausible-looking name that is
+        simply the wrong one. The only way to check a licence is to say what it must say."""
+        with open(os.path.join(HERE, "LICENSE"), encoding="utf-8") as f:
+            claims = [ln.strip() for ln in f if ln.strip().lower().startswith("copyright")]
+        self.assertEqual(claims, ["Copyright (c) jedisolana"])
+
+    def test_the_metadata_names_an_author(self):
+        """An empty author field is not neutral: the package page then describes the tool and
+        credits nobody, which is how a first upload quietly loses its attribution."""
+        with open(os.path.join(HERE, "pyproject.toml"), encoding="utf-8") as f:
+            toml = f.read()
+        self.assertIn('authors = [{ name = "jedisolana" }]', toml)
+        self.assertIn("https://x.com/jedisolana", toml)
+
     def test_the_help_text_a_user_prints_is_clean(self):
         """The one string the tool puts on a stranger's screen, checked on its own."""
         low = codegraph.__doc__.lower()
