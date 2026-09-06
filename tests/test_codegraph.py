@@ -3051,8 +3051,11 @@ class TheStatsBlockInTheReadmeIsRealOutput(unittest.TestCase):
 
         for key, want in claimed.items():
             self.assertIn(key, actual, f"the README publishes {key!r}, which stats no longer reports")
-            self.assertEqual(actual[key], want,
-                             f"README says {key} = {want}, the tool says {actual[key]}")
+            self.assertEqual(
+                actual[key], want,
+                f"README says {key} = {want}, the tool says {actual[key]}.\n"
+                f"    The block measures this whole repository, so adding a test moves it.\n"
+                f"    Refresh it with:  codegraph build . ")
 
     def test_the_block_adds_up(self):
         """Independent of the tool: a hand-edited block can be stale AND self-consistent, so
@@ -3207,9 +3210,19 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                     text = f.read()
             except (OSError, UnicodeDecodeError):
                 continue
+            fenced = False
             for n, line in enumerate(text.splitlines(), 1):
-                if "1,849" in line or "236,000" in line:
-                    continue                     # counts, not dates
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                    continue
+                # A fenced block is OUTPUT, not prose. The same distinction the source scan
+                # makes between a comment and a string literal: what dates the work is somebody
+                # writing a date down, not a number that happens to be shaped like one. This
+                # used to be two hardcoded values - "1,849" and "236,000" - which skipped the
+                # whole line they appeared on and needed a new entry every time the tool
+                # reported a count between 1900 and 2099. `"EXTERNAL": 1967` was the next one.
+                if fenced:
+                    continue
                 self.assertIsNone(year.search(line),
                                   f"{os.path.relpath(full, HERE)}:{n} carries a year: {line.strip()[:70]}")
 

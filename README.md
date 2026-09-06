@@ -115,11 +115,11 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3725,
-  "call_sites": 4971,
-  "edge_confidence": {"EXTERNAL": 1967, "INHERITED": 601, "BUILTIN": 431,
-                      "SELF-METHOD": 297, "QUALIFIED": 257, "LOCAL": 116,
-                      "UNTYPED": 52, "CONSTRUCTOR": 3, "TYPED": 1, "AMBIGUOUS": 0},
+  "call_edges": 3727,
+  "call_sites": 4973,
+  "edge_confidence": {"EXTERNAL": 1969, "INHERITED": 601, "BUILTIN": 431, "SELF-METHOD": 297,
+                      "QUALIFIED": 257, "LOCAL": 116, "UNTYPED": 52, "CONSTRUCTOR": 3,
+                      "TYPED": 1, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1275,
   "could_have_been_resolved": 1327,
   "resolution_rate": 0.961
