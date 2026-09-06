@@ -9,9 +9,8 @@ Every call edge carries a CONFIDENCE, because the useful part is knowing when th
 solid. SELF-METHOD, INHERITED, CLASS, TYPED, QUALIFIED, LOCAL and CONSTRUCTOR each pin a call
 to exactly one definition. AMBIGUOUS lists the candidates instead of choosing between them.
 BUILTIN and EXTERNAL say the target is not here; UNTYPED says the receiver could not be typed
-and the target might be. Nothing is
-guessed: a blast radius that quietly picked one of two same-named functions would be worse
-than no blast radius at all.
+and the target might be. Nothing is guessed: a blast radius that quietly picked one of two
+same-named functions would be worse than no blast radius at all.
 
   codegraph build [dir...]     build the graph (default: here); writes codegraph.json
   codegraph impact <name>      callers + call sites + blast radius, and what it could not resolve
