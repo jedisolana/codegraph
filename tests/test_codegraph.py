@@ -139,6 +139,39 @@ class TheOnDiskContract(Sandbox):
         second = json.dumps(self.graph(write=False), sort_keys=False)
         self.assertEqual(first, second)
 
+    def test_two_builds_in_separate_processes_agree_byte_for_byte(self):
+        """The test above runs both builds in ONE process, where the hash seed is fixed - so
+        the one kind of nondeterminism that actually happens is invisible to it.
+
+        Output that depends on the iteration order of a set or a dict is identical every time
+        within a process and differs between them, which is how it reaches a user as "the graph
+        changed and nothing else did". Resolution builds several sets on the way through, so
+        this runs two builds as subprocesses under deliberately different hash seeds.
+        """
+        self.write("x.py", "class A:\n"
+                           "    def __new__(cls): return super().__new__(cls)\n"
+                           "    def __enter__(self): return self\n"
+                           "    def __exit__(self, *a): return False\n"
+                           "    @property\n"
+                           "    def tag(self): return 1\n")
+        self.write("sub/y.py", "from ..x import A\n"
+                               "def use():\n"
+                               "    a = A()\n"
+                               "    with a:\n"
+                               "        return a.tag\n")
+        out = []
+        for seed in ("0", "12345"):
+            env = {**os.environ, "PYTHONHASHSEED": seed,
+                   "CODEGRAPH_OUT": os.path.join(self.dir, f"g{seed}.json"),
+                   "CODEGRAPH_CACHE": os.path.join(self.dir, f"c{seed}.json")}
+            r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "build", "."],
+                               cwd=self.dir, capture_output=True, text=True, timeout=180, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(self.dir, f"g{seed}.json"), encoding="utf-8") as f:
+                out.append(f.read())
+        self.assertEqual(out[0], out[1],
+                         "the graph depends on hash order: identical input, different bytes")
+
     def test_the_cache_is_invalidated_when_the_tool_itself_changes(self):
         """A parser change must not silently reuse yesterday's extraction."""
         self.write("x.py", "def f():\n    return 1\n")
