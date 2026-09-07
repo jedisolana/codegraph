@@ -3275,6 +3275,21 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
     """
 
     SCRIPT = os.path.join(HERE, "tools", "readme_stats.py")
+    README = os.path.join(HERE, "README.md")
+
+    def read(self, path=None):
+        with open(path or self.README, encoding="utf-8") as f:
+            return f.read()
+
+    def write(self, text, path=None):
+        with open(path or self.README, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def keep_readme(self):
+        """Put it back exactly as it was, whatever the test does to it."""
+        original = self.read()
+        self.addCleanup(self.write, original)
+        return original
 
     def run_it(self, *args):
         return subprocess.run([sys.executable, self.SCRIPT, *args], cwd=HERE,
@@ -3282,36 +3297,32 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
 
     def test_check_reports_current_and_changes_nothing(self):
         self.run_it()                    # make it current first; adding tests moves the block
-        before = open(os.path.join(HERE, "README.md"), encoding="utf-8").read()
+        before = self.read()
         r = self.run_it("--check")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("current", r.stdout)
-        self.assertEqual(open(os.path.join(HERE, "README.md"), encoding="utf-8").read(), before,
+        self.assertEqual(self.read(), before,
                          "--check is supposed to report, not edit")
 
     def test_check_notices_a_stale_block_and_still_changes_nothing(self):
         """The half that matters: it has to be able to say no."""
-        path = os.path.join(HERE, "README.md")
-        original = open(path, encoding="utf-8").read()
-        self.addCleanup(lambda: open(path, "w", encoding="utf-8").write(original))
+        path = self.README
+        original = self.keep_readme()
         broken = re.sub(r'"call_edges": \d+', '"call_edges": 999999', original, count=1)
         self.assertNotEqual(broken, original, "the fixture did not actually change the block")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(broken)
+        self.write(broken, path)
         r = self.run_it("--check")
         self.assertEqual(r.returncode, 1, "a stale block must be a non-zero exit")
         self.assertIn("STALE", r.stdout)
-        self.assertEqual(open(path, encoding="utf-8").read(), broken,
+        self.assertEqual(self.read(path), broken,
                          "--check edited the file it was only asked to inspect")
 
     def test_it_repairs_a_stale_block_and_leaves_the_rest_alone(self):
-        path = os.path.join(HERE, "README.md")
-        original = open(path, encoding="utf-8").read()
-        self.addCleanup(lambda: open(path, "w", encoding="utf-8").write(original))
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(re.sub(r'"call_edges": \d+', '"call_edges": 999999', original, count=1))
+        path = self.README
+        original = self.keep_readme()
+        self.write(re.sub(r'"call_edges": \d+', '"call_edges": 999999', original, count=1), path)
         self.assertEqual(self.run_it().returncode, 0)
-        fixed = open(path, encoding="utf-8").read()
+        fixed = self.read(path)
         self.assertNotIn("999999", fixed, "it did not repair the number it was run for")
         # Everything outside its remit has to be byte-identical. Its remit is the block AND the
         # two sentences that quote the rate back - which is deliberate, because a block that
@@ -3329,11 +3340,9 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
             self.fail(f"it changed prose outside the block: {diff[:6]}")
 
     def test_it_says_so_rather_than_guessing_when_the_block_is_gone(self):
-        path = os.path.join(HERE, "README.md")
-        original = open(path, encoding="utf-8").read()
-        self.addCleanup(lambda: open(path, "w", encoding="utf-8").write(original))
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(re.sub(r"```json\n\{.*?\n\}\n```", "", original, count=1, flags=re.S))
+        path = self.README
+        original = self.keep_readme()
+        self.write(re.sub(r"```json\n\{.*?\n\}\n```", "", original, count=1, flags=re.S), path)
         r = self.run_it("--check")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no longer contains", r.stdout + r.stderr)

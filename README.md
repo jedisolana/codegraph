@@ -115,19 +115,19 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3926,
-  "call_sites": 5244,
-  "edge_confidence": {"EXTERNAL": 2095, "INHERITED": 603, "BUILTIN": 452, "SELF-METHOD": 305,
-                      "QUALIFIED": 260, "LOCAL": 125, "UNTYPED": 78, "TYPED": 5,
+  "call_edges": 3920,
+  "call_sites": 5227,
+  "edge_confidence": {"EXTERNAL": 2061, "INHERITED": 603, "BUILTIN": 450, "SELF-METHOD": 315,
+                      "QUALIFIED": 260, "LOCAL": 125, "UNTYPED": 98, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1301,
-  "could_have_been_resolved": 1379,
-  "resolution_rate": 0.943
+  "resolved_to_one_def": 1311,
+  "could_have_been_resolved": 1409,
+  "resolution_rate": 0.93
 }
 ```
 
-That 0.943 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 94%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.93 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
