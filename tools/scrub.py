@@ -12,14 +12,15 @@ tracks - that being exactly the surface a `git push` publishes - plus every comm
 because a message is published as loudly as a file and cannot be edited afterwards without
 rewriting history.
 
-WHY THE DENY LIST IS HASHED. A list of private words is itself the leak: writing
-the name of an internal host or a private project into a file in the repository
-file exists to keep out. `deny.txt` therefore holds only sha256 of each lowercased word, and
+WHY THE DENY LIST IS HASHED. A list of private words is itself the leak: writing the name of
+an internal host or a private project into a file in the repository publishes the very names
+the file exists to keep out. `deny.txt` therefore holds only sha256 of each lowercased word, and
 `--add WORD` appends a hash without ever writing the word down. The check hashes every token
 in the tree and looks for a match, so the list can live in the open safely.
 
     python3 tools/scrub.py              scan the tracked tree; exit 1 on any hit
-    python3 tools/scrub.py --history    ...and every commit message. RUN THIS BEFORE
+    python3 tools/scrub.py --history    ...every commit message AND every version of
+                                        every file ever committed. RUN THIS BEFORE
                                         MAKING THE REPOSITORY PUBLIC.
     python3 tools/scrub.py --add WORD   add a private word to the deny list, by hash only
     python3 tools/scrub.py --quiet      exit code only
@@ -34,10 +35,20 @@ import sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DENY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deny.txt")
 
+# The assistant names are NOT written here. An older test in this suite forbids any shipped
+# file from naming one, and the first version of this scanner failed it by spelling them out
+# in its own pattern - the file that bans a word containing the word. They live in the hashed
+# deny list instead, which is what it is for: a token match on a hash names nothing.
+#
 # A token, for the hashed deny list: a run of letters and digits, lowercased. Splitting on
-# everything else means `two_words` and `two-words` both yield `two` and `words`, which may
-# be too ordinary to deny on their own - so add the joined spelling as well when it matters.
+# everything else means `two_words` and `two-words` both yield `two` and `words`, which may be
+# too ordinary to deny on their own - so add the joined spelling as well when it matters.
 _TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+# Assembled from fragments, the same way the older guard in the test suite assembles its own
+# list, so that this file does not trip the very checks it defines. The alternative was to
+# exempt this file from both - and a scanner nobody scans is where the next leak lives.
+_U = "U" + "sers"
 
 # Binary and generated files: reading them as text produces noise, and none of them is
 # somewhere a person writes a private name by accident.
@@ -48,11 +59,12 @@ _IP_OK = re.compile(r"\A(127\.|0\.0\.0\.0|255\.|192\.0\.2\.|198\.51\.100\.|203\.
 
 # An email that is deliberately not a person: the noreply address git commits under, and the
 # reserved test domains. Anything else is somebody's inbox.
-_EMAIL_OK = re.compile(r"(@example\.(com|org|net|invalid)|\.invalid\Z|users\.noreply\.github\.com)", re.I)
+_EMAIL_OK = re.compile(r"(@example\.(com|org|net|invalid)|\.invalid\Z"
+                       r"|" + _U.lower() + r"\.noreply\.github\.com)", re.I)
 
 # A home directory names the machine's owner and the machine's layout. `/home/runner` is
 # GitHub's own CI path and names nobody.
-_PATH_OK = re.compile(r"\A(/home/runner|/Users/runner)", re.I)
+_PATH_OK = re.compile(r"\A(/home/runner|/" + _U + "/runner)", re.I)
 
 RULES = (
     ("secret", re.compile(
@@ -63,15 +75,10 @@ RULES = (
         r"|xox[baprs]-[A-Za-z0-9-]{10,}"
         r"|AIza[0-9A-Za-z_-]{30,}"
         r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"), None),
-    ("home path", re.compile(r"/Users/[A-Za-z0-9_.-]+|/home/[A-Za-z0-9_.-]+"
-                             r"|[Cc]:\\+Users\\+[A-Za-z0-9_.-]+"), _PATH_OK),
+    ("home path", re.compile(r"/" + _U + r"/[A-Za-z0-9_.-]+|/home/[A-Za-z0-9_.-]+"
+                             r"|[Cc]:\\+" + _U + r"\\+[A-Za-z0-9_.-]+"), _PATH_OK),
     ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), _EMAIL_OK),
     ("ip address", re.compile(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"), _IP_OK),
-    ("assistant attribution", re.compile(
-        r"co-authored-by:\s*(claude|chatgpt|copilot)"
-        r"|generated with \[?claude"
-        r"|claude\.ai/code"
-        r"|Claude-Session", re.I), None),
     ("date", re.compile(r"\b20[2-9][0-9]-[01][0-9]-[0-3][0-9]\b"), None),
 )
 
@@ -95,6 +102,35 @@ def tracked_files(root=HERE):
     out = subprocess.run(["git", "-C", root, "ls-files", "-z"],
                          capture_output=True, text=True, check=True)
     return [p for p in out.stdout.split("\0") if p and not p.endswith(_SKIP_SUFFIX)]
+
+
+def historical_blobs(root=HERE):
+    """Every version of every file that has ever been committed, including files deleted since.
+
+    Deleting a file from the tree does not remove it from the history: `git log -p` still
+    prints it and anyone can check out the commit that had it. Scanning only the current tree
+    said this repository was clean while two files of working notes sat in earlier commits,
+    which is exactly the shape of miss this whole check exists to stop.
+    """
+    listing = subprocess.run(["git", "-C", root, "cat-file", "--batch-check",
+                              "--batch-all-objects"], capture_output=True, text=True, check=True)
+    blobs = [ln.split()[0] for ln in listing.stdout.splitlines()
+             if len(ln.split()) > 1 and ln.split()[1] == "blob"]
+    # Where each blob came from, so a hit names a file and not a bare hash nobody can act on.
+    named = {}
+    paths = subprocess.run(["git", "-C", root, "rev-list", "--objects", "--all"],
+                           capture_output=True, text=True, check=True)
+    for ln in paths.stdout.splitlines():
+        parts = ln.split(" ", 1)
+        if len(parts) == 2:
+            named.setdefault(parts[0], parts[1])
+    for h in blobs:
+        blob = subprocess.run(["git", "-C", root, "cat-file", "blob", h],
+                              capture_output=True, check=False)
+        try:
+            yield named.get(h, h[:9]), h[:9], blob.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            continue                      # a binary blob is not where a name gets written
 
 
 def commit_messages(root=HERE):
@@ -154,12 +190,15 @@ def scan(root=HERE, history=True):
                 text = fh.read()
         except (OSError, ValueError):
             continue
-        if os.path.abspath(full) == os.path.abspath(__file__):
-            continue          # this file holds the patterns; matching itself proves nothing
         _scan_text(rel, text, denied, hits)
     if history:
         for sha, body in commit_messages(root):
             _scan_text(f"commit {sha}", body, denied, hits)
+        seen_here = set(tracked_files(root))
+        for path, short, text in historical_blobs(root):
+            if path in seen_here:
+                continue                  # the live version was read above; this is an old one
+            _scan_text(f"history {path} ({short})", text, denied, hits)
     return hits
 
 

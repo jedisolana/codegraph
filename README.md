@@ -129,13 +129,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4187,
-  "call_sites": 5549,
-  "edge_confidence": {"EXTERNAL": 2209, "INHERITED": 615, "BUILTIN": 479, "SELF-METHOD": 353,
-                      "QUALIFIED": 272, "LOCAL": 140, "UNTYPED": 111, "TYPED": 5,
+  "call_edges": 4209,
+  "call_sites": 5580,
+  "edge_confidence": {"EXTERNAL": 2226, "INHERITED": 615, "BUILTIN": 482, "SELF-METHOD": 354,
+                      "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 111, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1388,
-  "could_have_been_resolved": 1499,
+  "resolved_to_one_def": 1390,
+  "could_have_been_resolved": 1501,
   "resolution_rate": 0.926
 }
 ```
@@ -417,7 +417,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 533 more. Grouped, because a list of every one of them stopped being
+The test suite adds 534 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
@@ -453,15 +453,17 @@ were plain text in files nobody thought to question.
 
 So it is a check that fails, not a habit. `tools/scrub.py` reads every file git tracks — which
 is exactly what a push publishes — for secrets, home directories, real email addresses,
-machine addresses, dates and assistant attribution, and `--history` adds every commit message,
-which is the half people forget because it cannot be edited after the fact.
+machine addresses, dates and assistant attribution. `--history` adds every commit message and
+**every version of every file ever committed** — deleting a file does not remove it from the
+history, and a scan of the tracked tree alone called this repository clean while two files of
+working notes sat in earlier commits.
 
 Private words are matched against **hashes**. A list of secret names written out in a public
 file is the leak it exists to prevent, so `deny.txt` holds only sha256 of each word,
 `--add WORD` never writes the word down, and a hit reports the position rather than the text —
 a CI log on a public repository is public too.
 
-Fourteen of its fifteen tests **plant** the thing being looked for and prove the scan goes red.
+Fifteen of its sixteen tests **plant** the thing being looked for and prove the scan goes red.
 A scrub that has never failed is not evidence that a tree is clean.
 
 A test file that proves a key is caught has to contain a key, so those lines are exempted one

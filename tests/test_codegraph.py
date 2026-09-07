@@ -6756,9 +6756,12 @@ class NothingPrivateGetsPublished(unittest.TestCase):
         self.assertIn("ip address", self.labels())
 
     def test_it_catches_assistant_attribution(self):
+        """Via the hashed deny list rather than a written-out pattern: an older test forbids any
+        shipped file from naming an assistant, and the first version of this scanner failed it
+        by spelling the names into its own regex."""
         self.commit("a.py", "x = 1\n",
                     message="a change\n\nCo-Authored-By: Claude <x@y.invalid>")  # scrub: fixture
-        self.assertIn("assistant attribution", self.labels())
+        self.assertIn("private word", self.labels())
 
     def test_it_catches_a_date(self):
         self.commit("CHANGELOG.md", "## Released 2026-09-07\n")  # scrub: fixture
@@ -6821,3 +6824,20 @@ class NothingPrivateGetsPublished(unittest.TestCase):
             wf = fh.read()
         self.assertIn("scrub.py --history", wf,
                       "the publish workflow must run the history scrub")
+
+    def test_it_reads_deleted_files_out_of_the_history(self):
+        """The hole this nearly shipped with. Deleting a file from the tree does not remove it
+        from the history - `git log -p` still prints it and anyone can check out the commit
+        that had it. A scan of the tracked tree alone called this repository clean while two
+        files of working notes sat in earlier commits."""
+        self.commit("secret_notes.md", "the box lives at /home/someone\n")  # scrub: fixture
+        subprocess.run(["git", "-C", self.dir, "rm", "-q", "secret_notes.md"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.dir, "commit", "-q", "-m", "remove the notes"],
+                       check=True, capture_output=True)
+        self.assertEqual(scrub.scan(self.dir, history=False), [],
+                         "the tree really is clean once the file is deleted")
+        deep = scrub.scan(self.dir, history=True)
+        self.assertIn("home path", {lab for _w, _l, lab, _f in deep},
+                      "the deleted file is still in the history and still readable")
+        self.assertTrue(any(w.startswith("history ") for w, _l, _lab, _f in deep), deep)
