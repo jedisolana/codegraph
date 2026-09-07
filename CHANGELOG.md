@@ -216,11 +216,11 @@ change — a suite that never fails is not evidence of anything. The file admits
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
-A full pass has been run. It covered 841 of them, as the file stood then: all 841 killed,
-none survived. Two of them
-were killed by the timeout rather than by a failing test, because they make the suite never
-finish rather than fail, and "hung" and "failed" are counted apart. The file has grown since,
-so that result is recorded as what it is — a pass over 841, not over the 867 here now.
+A full pass has been run against this file: **867 mutations, 867 killed, none survived.**
+Two of them were killed by the timeout rather than by a failing test, because they make the
+suite never finish rather than fail, and "hung" and "failed" are counted apart. It is re-run
+whenever the file changes — the previous pass covered 841, and a result about an older
+version of a file is not a result about this one.
 
 It edits codegraph.py in place, so it refuses to start unless that file is committed, and it
 verifies it byte for byte before exiting. A run that is killed rather than finished cannot do

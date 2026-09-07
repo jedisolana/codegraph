@@ -372,9 +372,9 @@ A suite that never fails is not evidence of anything, so it is checked the other
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 867 mutations.** The last full pass killed all 841 the file admitted at
-the time, with no survivors; the code has grown since and the pass is due again, so that
-result is not restated here as though it covered this tree. A full pass is hours of work, so it is run deliberately
+**The file admits 867 mutations. A full pass killed every one of them, with no survivors.**
+Against this exact file — the pass is re-run whenever it changes, because a result about an
+older version of a file is not a result about this one. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
