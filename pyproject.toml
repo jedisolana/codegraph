@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jedi-codegraph"
 version = "0.1.0"
-description = "Before you change a Python function, see what else breaks. One file, no dependencies."
+description = "Maps which function calls which across your Python project — connections nobody wrote down. Ask what breaks before you change something and get the exact lines to open. Every answer is labelled with how certain it is, and it refuses to guess rather than sound confident. One file, no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
