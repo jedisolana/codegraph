@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -6872,7 +6873,7 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copyfile(os.path.join(HERE, rel), dst)
             if rel.startswith(".githooks"):
-                os.chmod(dst, 0o755)
+                os.chmod(dst, os.stat(dst).st_mode | stat.S_IXUSR)   # the owner's bit, no more
         # A deny list of its OWN, holding a made-up word. Copying the real one would have meant
         # writing a real private word into this file to test against it - which is the leak,
         # in the test for the leak. It is not a fixture problem that a marker can solve: a
@@ -6984,3 +6985,24 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         self.assertTrue(hits, "the staged-then-abandoned blob is still in the object store")
         self.assertTrue(any("UNREACHABLE" in w and "git gc" in w for w, _l, _lab, _f in hits),
                         [w for w, _l, _lab, _f in hits])
+
+    def test_installing_grants_the_owner_bit_and_nothing_else(self):
+        """CodeQL and ruff both called 0o755 here overly permissive, and they were right: git
+        runs a hook as whoever runs git, so the owner's execute bit is the whole requirement.
+        The justification for the old mode - "a hook that is not 0o755 does not run" - was
+        simply false, and two scanners disagreeing with a justification usually settles it."""
+        import stat as _stat
+        hooks = os.path.join(self.dir, ".githooks")
+        target = os.path.join(hooks, "pre-commit")
+        os.chmod(target, 0o600)                       # owner read/write, nobody can run it
+        real = scrub.HERE
+        scrub.HERE = self.dir
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                scrub.main(["--install-hooks"])
+        finally:
+            scrub.HERE = real
+        mode = os.stat(target).st_mode
+        self.assertTrue(mode & _stat.S_IXUSR, "the owner cannot run the hook, so it will not run")
+        self.assertFalse(mode & _stat.S_IXGRP, "the group does not need to run it")
+        self.assertFalse(mode & _stat.S_IXOTH, "everybody does not need to run it")

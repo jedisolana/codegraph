@@ -57,6 +57,8 @@ ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005", "SIM108"]
 # S607 (a partial executable path): the scrub tool shells out to `git`, found on PATH, which
 # is how every tool that wraps git finds it - pinning an absolute path would break the moment
 # somebody uses a different install, and the alternative the rule wants is not available here.
-# S103 (a permissive mask): a git hook that is not 0o755 does not run, and a hook that silently
-# does not run is the exact failure the hooks exist to prevent.
-"tools/*" = ["S112", "S603", "S607", "S103"]
+# S103 is NOT ignored: it was, with the reasoning that a hook needs 0o755 to run. That was
+# wrong - it needs the OWNER's execute bit, which is one bit, and the installer adds exactly
+# that now. CodeQL raised the same finding independently, and a justification two scanners
+# disagree with is usually just a justification.
+"tools/*" = ["S112", "S603", "S607"]

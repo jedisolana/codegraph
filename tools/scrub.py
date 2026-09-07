@@ -30,6 +30,7 @@ in the tree and looks for a match, so the list can live in the open safely.
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -236,7 +237,11 @@ def main(argv):
         for name in os.listdir(hooks):
             path = os.path.join(hooks, name)
             if os.path.isfile(path):
-                os.chmod(path, 0o755)
+                # ADD the owner's execute bit, rather than writing a whole mode. git runs a
+                # hook as whoever runs git, which is the owner, so that one bit is the entire
+                # requirement - and 0o755 was granting execute to everybody to get it, which
+                # both ruff and CodeQL called out as exactly what it was.
+                os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
         print(f"hooks installed from {hooks}\n"
               f"  pre-commit  refuses a staged tree with anything private in it\n"
               f"  commit-msg  refuses a message with anything private in it")

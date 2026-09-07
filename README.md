@@ -149,9 +149,9 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4280,
-  "call_sites": 5668,
-  "edge_confidence": {"EXTERNAL": 2268, "INHERITED": 615, "BUILTIN": 487, "SELF-METHOD": 373,
+  "call_edges": 4290,
+  "call_sites": 5680,
+  "edge_confidence": {"EXTERNAL": 2278, "INHERITED": 615, "BUILTIN": 487, "SELF-METHOD": 373,
                       "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 116, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1409,
@@ -443,7 +443,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 544 more. Grouped, because a list of every one of them stopped being
+The test suite adds 545 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
