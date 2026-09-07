@@ -322,10 +322,12 @@ A suite that never fails is not evidence of anything, so it is checked the other
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 841 mutations.** A full pass is hours of work, so it is run deliberately
+**The file admits 841 mutations. A full pass killed every one of them, with no survivors.**
+It ran against this commit, in two halves resumed from a fixed seed so both drew the same
+list. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
-checked nowhere drifts in two directions. Two mutations do not make the suite fail but make
+checked nowhere drifts in two directions. Two of the 841 did not make the suite fail but made
 it never finish — flip the comparison that ends a `while` — and those are caught by a timeout
 and counted apart, because "hung" and "failed" are different facts.
 

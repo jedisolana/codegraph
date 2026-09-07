@@ -216,6 +216,10 @@ change — a suite that never fails is not evidence of anything. The file admits
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
+A full pass has now been run against the released tree: **841 mutations, 841 killed, none
+survived.** Two of them were killed by the timeout rather than by a failing test, because they
+make the suite never finish rather than fail, and "hung" and "failed" are counted apart.
+
 It edits codegraph.py in place, so it refuses to start unless that file is committed, and it
 verifies it byte for byte before exiting. A run that is killed rather than finished cannot do
 that — `finally` does not run — and what it leaves behind is not one flipped comparison but the
