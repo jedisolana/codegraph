@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 # Below the path setup on purpose, which is what E402 is about: neither module is importable
 # until sys.path names the directory holding it, and this suite is run from a checkout rather
 # than an install. Moving them up would not be tidier, it would be an ImportError.
+import readme_stats as scrub_stats  # noqa: E402
 import scrub  # noqa: E402
 
 import codegraph  # noqa: E402
@@ -3105,8 +3106,21 @@ class TheStatsBlockInTheReadmeIsRealOutput(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         actual = json.loads(r.stdout)
 
+        # `call_sites` is the one figure that depends on the interpreter: a placeholder inside
+        # a multi-line f-string reported the line the STRING starts on before Python 3.12 and
+        # its own line from 3.12, so the same code is one call site on old Python and two on
+        # new. Nothing else moves. Enforcing it on every version made this suite permanently
+        # red on three of nine CI jobs for a fact about CPython's parser rather than a fact
+        # about this tool - and the note beside the block in the README says so out loud.
+        here = f"{sys.version_info.major}.{sys.version_info.minor}"
         for key, want in claimed.items():
             self.assertIn(key, actual, f"the README publishes {key!r}, which stats no longer reports")
+            if key == "call_sites" and here != scrub_stats.GENERATED_ON:
+                self.assertAlmostEqual(
+                    actual[key], want, delta=max(2, want // 500),
+                    msg=f"call_sites moved further than f-string line attribution explains: "
+                        f"README {want}, this interpreter {actual[key]}")
+                continue
             self.assertEqual(
                 actual[key], want,
                 f"README says {key} = {want}, the tool says {actual[key]}.\n"

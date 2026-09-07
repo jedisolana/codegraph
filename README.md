@@ -149,9 +149,9 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4339,
-  "call_sites": 5744,
-  "edge_confidence": {"EXTERNAL": 2310, "INHERITED": 615, "BUILTIN": 491, "SELF-METHOD": 378,
+  "call_edges": 4343,
+  "call_sites": 5750,
+  "edge_confidence": {"EXTERNAL": 2313, "INHERITED": 615, "BUILTIN": 492, "SELF-METHOD": 378,
                       "QUALIFIED": 272, "LOCAL": 143, "UNTYPED": 122, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1416,
@@ -159,6 +159,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
   "resolution_rate": 0.921
 }
 ```
+
+Measured on CPython 3.14. Every figure above is identical on every supported version except
+`call_sites`, which moves by one: a placeholder inside a **multi-line f-string** reported the
+line the string *starts* on before Python 3.12, and its own real line from 3.12. Same code,
+same edges — one of them is two places to look and the other is one, and the newer answer is
+the more precise. A number that depends on the interpreter is worth saying out loud rather
+than leaving somebody to find.
 
 That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.

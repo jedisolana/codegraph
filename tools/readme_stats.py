@@ -26,6 +26,8 @@ import tempfile
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 README = os.path.join(HERE, "README.md")
 BLOCK = re.compile(r"```json\n(\{.*?\n\})\n```", re.S)
+# The interpreter the committed block was measured on; see the note beside it.
+GENERATED_ON = "3.14"
 
 
 def measure():
@@ -72,8 +74,19 @@ def main(argv):
         sys.exit(f"{target} no longer contains a json stats block")
     d = measure()
     fresh = render(d)
-    if json.loads(found.group(1)) == json.loads(fresh):
-        print("the block is current")
+    have, want = json.loads(found.group(1)), json.loads(fresh)
+    # `call_sites` is the one figure that depends on the interpreter. A placeholder inside a
+    # multi-line f-string reported the line the STRING starts on before Python 3.12 and its own
+    # line from 3.12, so the same code is one call site on old Python and two on new. Nothing
+    # else moves - not edges, not the rate. Enforcing it everywhere means every CI matrix with
+    # more than one Python is permanently red for a fact about CPython's parser.
+    same_python = f"{sys.version_info.major}.{sys.version_info.minor}" == GENERATED_ON
+    drifts = () if same_python else ("call_sites",)
+    if {k: v for k, v in have.items() if k not in drifts} == \
+       {k: v for k, v in want.items() if k not in drifts}:
+        print("the block is current" if same_python
+              else f"the block is current (call_sites not compared: it was measured on "
+                   f"{GENERATED_ON}, this is {sys.version_info.major}.{sys.version_info.minor})")
         return 0
     if check:
         print("the block is STALE - run tools/readme_stats.py to rewrite it")
