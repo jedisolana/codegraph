@@ -395,6 +395,14 @@ it usable:
   where the interpreter resolves it. What is not followed: a base built by a metaclass, a base
   that is a variable (`V = Generic[T]` then `class C(V)`), and a subscripted one — `Generic[T]`
   names `Generic`, and a subscript is not a name.
+- **A mixin's `self` calls belong to whatever it is mixed into, which is not decided here.**
+  `class BaseBytesTest:` declares no base and calls `self.assertEqual`; the file later writes
+  `class BytesTest(BaseBytesTest, unittest.TestCase)` and `class ByteArrayTest(BaseBytesTest,
+  unittest.TestCase)`. At the mixin's own definition there is no base to walk, and the answer
+  depends on a combination made elsewhere - possibly more than one. Those calls stay
+  unresolved rather than being attributed to a class the mixin never names. Measured: after
+  dotted bases were fixed this is what remains of `assertEqual` on the standard library,
+  2,527 of the original 15,872, and every one of them is this shape.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
   say it outright: a parameter's, and a variable's. A container annotation is not its contents,
   so `Dict[str, Client]` stays a dict. A name rebound to anything the tool cannot name loses its
