@@ -1016,8 +1016,18 @@ def _annotated_class(ann):
     """
     if isinstance(ann, ast.Name):
         return ann.id
-    if isinstance(ann, ast.Attribute) and isinstance(ann.value, ast.Name):
-        return f"{ann.value.id}.{ann.attr}"                # svc.Client - a module and a class
+    if isinstance(ann, ast.Attribute):
+        # The WHOLE dotted path, not one level of it. `pkg.base.Case` read as a single
+        # attribute on a single name matched nothing, so a class in a sub-package was not a
+        # base at all and its methods were never in the lookup - and a base written this way
+        # is ordinary in any package deeper than one level.
+        parts, cur = [ann.attr], ann.value
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr); cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+            return ".".join(reversed(parts))               # svc.Client - a module and a class
+        return None                                        # a call, a subscript: not a name
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
         text = ann.value.strip()
         if text.isidentifier():
@@ -1405,7 +1415,30 @@ def build(dirs=None, write=True):
         if "." in rt:
             who, cname = rt.rsplit(".", 1)
             where_ = mod_alias.get(srcmod, {}).get(who) or mod_sub.get(srcmod, {}).get(who)
+            if where_ is None and "." in who:
+                # `import pkg.base` binds only `pkg`; `pkg.base` is an attribute of it, so the
+                # dotted module was in no table and `class B(pkg.base.Case)` had no base at
+                # all. Map the ROOT through the aliases and treat the rest as the path under
+                # it, which is what the interpreter does.
+                root, rest = who.split(".", 1)
+                top = mod_alias.get(srcmod, {}).get(root) or mod_sub.get(srcmod, {}).get(root)
+                if top:
+                    top = top[: -len("/__init__")] if top.endswith("/__init__") else top
+                    cand = f"{top}/{rest.replace('.', '/')}"
+                    where_ = cand if cand in allmods else _real_module(cand)
             cid = by_modname.get((where_, cname)) if where_ else None
+            if cid is None and where_:
+                # The name is not defined in that module, but the module may re-export it -
+                # `unittest/__init__.py` does `from .case import TestCase`, and TestCase lives
+                # in unittest/case.py. Every `self.assertEqual` in every test class in the
+                # standard library went unresolved on exactly this: 15,872 edges, led by the
+                # single most common class statement in Python. The chain was already followed
+                # for `from pkg import Case`; it was never consulted for `import pkg` then
+                # `pkg.Case`.
+                onward = mod_from.get(where_, {}).get(cname)
+                if onward:
+                    real_name = mod_orig.get(where_, {}).get(cname, cname)
+                    cid = by_modname.get((onward, real_name))
             if cid and kind_of.get(cid) == "class":
                 return [cid]
             # `Outer.Inner()`: the part before the dot is a CLASS in this module, not a module.

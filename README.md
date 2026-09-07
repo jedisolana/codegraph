@@ -149,13 +149,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4513,
-  "call_sites": 5991,
-  "edge_confidence": {"EXTERNAL": 2396, "INHERITED": 629, "BUILTIN": 509, "SELF-METHOD": 402,
-                      "QUALIFIED": 292, "LOCAL": 151, "UNTYPED": 126, "TYPED": 5,
+  "call_edges": 4546,
+  "call_sites": 6053,
+  "edge_confidence": {"EXTERNAL": 2418, "INHERITED": 637, "BUILTIN": 511, "SELF-METHOD": 402,
+                      "QUALIFIED": 292, "LOCAL": 152, "UNTYPED": 126, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1482,
-  "could_have_been_resolved": 1608,
+  "resolved_to_one_def": 1491,
+  "could_have_been_resolved": 1617,
   "resolution_rate": 0.922
 }
 ```
@@ -389,7 +389,9 @@ it usable:
   that `B.m`'s `super()` goes to `C` when `B` is reached through a `D(B, C)` instance.
 - **A base class is found the way any other class name is** — defined in this module, or
   imported into it, before any tree-wide search; an alias (`from x import Base as B`) is
-  followed. Method lookup then uses Python's own order, C3 linearisation, so a diamond resolves
+  followed, a dotted one (`pkg.base.Case`) is resolved through the module it names, and a base
+  the package re-exports (`unittest.TestCase`, which lives in `unittest/case.py`) is followed
+  to where it is defined. Method lookup then uses Python's own order, C3 linearisation, so a diamond resolves
   where the interpreter resolves it. What is not followed: a base built by a metaclass, a base
   that is a variable (`V = Generic[T]` then `class C(V)`), and a subscripted one — `Generic[T]`
   names `Generic`, and a subscript is not a name.
@@ -441,9 +443,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 947 mutations. A full pass killed every one of them, with no survivors.**
-Against this exact file — the pass is re-run whenever it changes, because a result about an
-older version of a file is not a result about this one. A full pass is hours of work, so it is run deliberately
+**The file admits 954 mutations.** The last full pass killed all 947 the file admitted then,
+with no survivors; the file has changed since, so that result is stated as what it covered
+rather than restated as though it covered this one. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
@@ -486,7 +488,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 573 more. Grouped, because a list of every one of them stopped being
+The test suite adds 577 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

@@ -7353,3 +7353,79 @@ class WhatAmIAboutToBreak(Sandbox):
         got = codegraph.changed(g, self.diff("app.py", 1), root=self.dir)
         self.assertEqual(got["touched"], [])
         self.assertEqual(got["module_level"], ["app.py:1"])
+
+
+class ABaseWrittenWithDotsIsStillABase(Sandbox):
+    """`class T(unittest.TestCase)` is the most common class statement in Python, and every
+    `self.assertEqual(...)` inside one was unresolved.
+
+    Measured on the standard library, the unresolved-but-winnable calls are led by
+    assertEqual at 15,872, then assertRaises at 5,983, assertTrue, assertFalse, assertIn,
+    subTest, addCleanup - the whole unittest surface, all of them reached through `self` in a
+    class whose base is written with a dot in it.
+
+    Two separate faults, both here:
+
+    1. A base with MORE THAN ONE dot - `pkg.base.Case` - was not captured at all. The name
+       extractor read one level of attribute and gave up, so the class had no bases at all and
+       the method lookup had nothing to walk.
+    2. A base re-exported by a package - `pkg.Case`, where `pkg/__init__` does
+       `from .case import Case` - was captured and then resolved to nothing, because the name
+       is not defined in the package's `__init__` at all. That is exactly the shape of
+       `unittest.TestCase`, which lives in `unittest/case.py`.
+
+    The chain that answers the second already existed for `from pkg import Case`; it just was
+    not consulted for `import pkg` followed by `pkg.Case`.
+    """
+
+    def test_a_base_two_packages_deep_is_captured(self):
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "base.py"),
+                   "class Case:\n    def check(self):\n        return 1\n")
+        self.write("m.py", "import pkg.base\n"
+                           "class B(pkg.base.Case):\n"
+                           "    def run(self):\n        return self.check()\n")
+        g = self.graph()
+        edge, = [e for e in g["calls"] if e["callee"] == "check"]
+        self.assertEqual(edge.get("dst"), "pkg/base.Case.check")
+        self.assertEqual(edge.get("confidence"), "INHERITED")
+
+    def test_a_base_re_exported_by_its_package_resolves(self):
+        """The `unittest.TestCase` shape, in miniature."""
+        self.write(os.path.join("pkg", "case.py"),
+                   "class Case:\n    def check(self):\n        return 1\n")
+        self.write(os.path.join("pkg", "__init__.py"), "from .case import Case\n")
+        self.write("m.py", "import pkg\n"
+                           "class B(pkg.Case):\n"
+                           "    def run(self):\n        return self.check()\n")
+        g = self.graph()
+        edge, = [e for e in g["calls"] if e["callee"] == "check"]
+        self.assertEqual(edge.get("dst"), "pkg/case.Case.check")
+        self.assertEqual(edge.get("confidence"), "INHERITED")
+
+    def test_the_undotted_spelling_still_works(self):
+        """The control. Two spellings of one base must give one answer, and this is the
+        spelling that already did."""
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "base.py"),
+                   "class Case:\n    def check(self):\n        return 1\n")
+        self.write("m.py", "from pkg.base import Case\n"
+                           "class B(Case):\n"
+                           "    def run(self):\n        return self.check()\n")
+        g = self.graph()
+        edge, = [e for e in g["calls"] if e["callee"] == "check"]
+        self.assertEqual(edge.get("dst"), "pkg/base.Case.check")
+
+    def test_a_dotted_name_that_is_not_a_class_here_is_still_refused(self):
+        """The guard. Widening what counts as a base must not start inventing them: a module
+        that has no such class gives no base, rather than a tree-wide name match."""
+        self.write(os.path.join("pkg", "__init__.py"), "")
+        self.write(os.path.join("pkg", "base.py"), "OTHER = 1\n")
+        self.write("elsewhere.py", "class Case:\n    def check(self):\n        return 1\n")
+        self.write("m.py", "import pkg.base\n"
+                           "class B(pkg.base.Case):\n"
+                           "    def run(self):\n        return self.check()\n")
+        g = self.graph()
+        edge, = [e for e in g["calls"] if e["callee"] == "check"]
+        self.assertIsNone(edge.get("dst"),
+                          "it reached across the tree for a class the named module lacks")
