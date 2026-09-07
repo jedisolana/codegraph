@@ -1,8 +1,11 @@
 # codegraph
 
-**Ask your Python codebase what breaks if you change this.**
+**Before you change a function, find out what else breaks.**
 
-One file. No dependencies. Nothing but the standard library.
+You are about to edit `_paid_ok` — the function that decides whether someone has paid. Who
+calls it? Which exact lines do you have to open? What else depends on those?
+
+Ask it:
 
 ```bash
 pipx install jedi-codegraph
@@ -21,28 +24,43 @@ sites:   boardofdirectors/server.py:201, boardofdirectors/server.py:250,
 blast:   19 functions could be affected
 ```
 
-That is a real answer from a real codebase, not a mock-up. Four callers, the nine exact lines
-to open — a caller that checks a gate five times is five places to edit — and the transitive
-radius, before you touch anything.
+Read that as three answers:
 
-## Two reasons to believe it
+- **callers** — four functions call it.
+- **sites** — nine exact lines to open. One of those callers checks the gate five times, so it
+  is five separate edits in one file.
+- **blast** — 19 functions sit downstream. They call it, or call something that does.
 
-**Its tests can fail.** `--selftest` does not only assert the right answer; several of its
-checks are **red-first controls** that prove the naive approach gives the *wrong* one. Two
-modules both define `digest`, and the control shows a name match blames the wrong module's.
-`open(p).write(x)` stays external rather than being attributed to your own `write`. A green
-test that never had a chance of going red is not evidence, and most tools in this space ship
-those. [How it is checked](#proving-itself) — including a full mutation pass, where the tool's
-own code is broken one small way at a time to see whether the suite notices.
+Real output from a real codebase, not a mock-up. One command, before you touch anything.
 
-**It says when it does not know.** Every edge carries a confidence label, and the unresolved
-ones are named rather than guessed at. A call graph that presents a guess as a fact is worse
-than no call graph, because you cannot tell which answers to check. [The labels](#it-tells-you-when-it-doesnt-know).
+**One file. No dependencies. Nothing but the Python standard library.** Copy `codegraph.py`
+into any repo and it works.
 
-## Why
+## Why you can trust the answer
 
-`grep` finds the name. It cannot tell you that two files define a function called `digest` and
-only one of them is the one you are about to break. Ask this for `digest` and it will not guess
+Any tool can print a list. The question is whether to believe it.
+
+**It tells you when it doesn't know.** Every answer is labelled with how it was worked out —
+certain, or a guess it refuses to make. If two files both define `digest`, it names both and
+asks which you meant, instead of picking one. A tool that presents a guess as a fact is worse
+than no tool, because you cannot tell which answers to double-check.
+[See the labels](#it-tells-you-when-it-doesnt-know).
+
+**Its own tests are built to fail.** Most projects ship tests that were green the day they were
+written and could never have gone red. Here, several checks deliberately prove that the obvious
+approach gives the *wrong* answer — so if this tool ever became that naive, the tests would
+catch it.
+
+It is also checked by breaking it on purpose: **867 small sabotages of its own code, one at a
+time, and all 867 made a test fail.** No behaviour goes unwatched.
+[How it is checked](#proving-itself).
+
+## Why not just search for the name?
+
+Because search finds the word, not the meaning.
+
+Two files can both define a function called `digest`. Search shows you both. Only one of them
+is the one you are about to break, and search cannot tell you which. Ask this for `digest` and it will not guess
 either — it names both and waits for you to say which, because merging their callers into one
 answer is how you end up "fixing" a caller of the other one. Your editor's "find references" can, but it
 needs a language server running, and it will not give you the *transitive* answer: who calls the
@@ -53,9 +71,11 @@ one command, from a file you can copy into any repo.
 
 ## It tells you when it doesn't know
 
-This is the part that matters, and it is why the tool is worth having rather than clever.
+This is the part that matters most.
 
-Every call edge carries a confidence label:
+Python is a language where you often cannot tell, just by reading, what a line of code will
+call. So every answer comes with a label saying how it was worked out — and the ones it could
+not work out are listed as exactly that, rather than quietly guessed:
 
 | label | what it means | resolved? |
 |---|---|---|
@@ -161,10 +181,13 @@ them, and those calls were being answered with functions in `_pyrepl`. A name th
 defines nor imports nor stars in is a library, something injected at runtime, or a mistake — and
 saying `EXTERNAL` is the true answer to all three.
 
-## "Nothing calls this" is a claim, so it says why
+## "Nothing calls this" now has to earn it
 
-Run against this repo's own source, `unused` used to name 577 of 734 functions. Every one was
-wrong: 505 unittest methods, 46 fixtures, 22 `visit_*` methods of its own AST walker, a
+Most tools will happily hand you a list of dead code. Then you delete something and the app
+breaks, because a name can be reached in ways nothing spells out as a call.
+
+This one used to get it wrong too. Pointed at its own source, it named 577 of its 734 functions
+as uncalled, and every single one was wrong: 505 unittest methods, 46 fixtures, 22 `visit_*` methods of its own AST walker, a
 callback handed to `signal.signal`, one handed to `subprocess`, an alias assigned to four
 other names. A number that is wrong every time is not conservative, it is broken — and it was
 the headline of `stats`, printed bare, where somebody either deletes live code or stops
@@ -240,8 +263,8 @@ and the next query rebuilds, rather than answering from the version you replaced
 
 ## For an AI agent
 
-An agent that edits code reads it as text and guesses at the consequences. Give it structure
-instead:
+An AI editing your code reads it as text and guesses what else it affects. This replaces the
+guess with an answer:
 
 ```python
 import codegraph
@@ -284,7 +307,9 @@ result, because "nothing depends on this" is the one reply a misspelling must ne
 
 ## What it cannot do
 
-Static analysis, honestly labelled:
+This reads your code without running it, and some things are only decidable while running. Here
+is every one of them, spelled out — because knowing where a tool stops is what makes the rest of
+it usable:
 
 - **Python only.** A file it cannot parse — Python 2, a template, something half-written, or a
   generated one nested deeper than the interpreter's own stack — is named on stderr and left
@@ -335,7 +360,7 @@ Static analysis, honestly labelled:
 Everything it cannot resolve is labelled rather than guessed, so the limits are visible in the
 output instead of hidden in it.
 
-## Why not something else
+## How it compares
 
 - **`grep` / `ctags`** — finds names, not relationships. No transitive answer, and it cannot
   tell two same-named functions apart.
@@ -366,7 +391,8 @@ Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
 
-A suite that never fails is not evidence of anything, so it is checked the other way round.
+Passing tests prove nothing on their own — a test that could never fail is decoration. So this
+is checked backwards: by breaking the tool on purpose and seeing whether the tests notice.
 `tools/mutation.py` breaks the tool one small way at a time — flips a comparison, swaps an
 `and` for an `or`, drops a `not`, moves a number by one — and runs the suite against each
 change. Every one of them should make something go red, and one that does not is the
@@ -446,7 +472,8 @@ readable a long time before it stopped growing:
 
 ## Nothing private gets published
 
-Two leaks got past a careful reading of this repository: a dead project's name survived every
+Reading a file carefully is not a safeguard. It is a habit, and it works right up until the once
+it doesn't. Twice here, something private survived a careful read: a dead project's name survived every
 review of the LICENCE, because the reviews were looking for forbidden words and years, and
 `--help` still named where the tool came from after a full pass had been called clean. Both
 were plain text in files nobody thought to question.
