@@ -149,13 +149,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4546,
-  "call_sites": 6053,
-  "edge_confidence": {"EXTERNAL": 2418, "INHERITED": 637, "BUILTIN": 511, "SELF-METHOD": 402,
-                      "QUALIFIED": 292, "LOCAL": 152, "UNTYPED": 126, "TYPED": 5,
+  "call_edges": 4561,
+  "call_sites": 6071,
+  "edge_confidence": {"EXTERNAL": 2426, "INHERITED": 639, "BUILTIN": 512, "SELF-METHOD": 405,
+                      "QUALIFIED": 293, "LOCAL": 152, "UNTYPED": 126, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1491,
-  "could_have_been_resolved": 1617,
+  "resolved_to_one_def": 1497,
+  "could_have_been_resolved": 1623,
   "resolution_rate": 0.922
 }
 ```
@@ -213,7 +213,7 @@ codegraph unused --all    → all of them, each with the reason it is reached
 | `python calls this` | a dunder. Yours to write, Python's to call. |
 | `named, not called` | a dispatch table, a callback argument, an alias — reached, just not written as a call |
 | `inherited interface` | its class has a base outside the scanned roots, which may call it: `do_GET`, `generic_visit`, `setUp` |
-| `looks dispatched` | the name follows a convention a framework dispatches on |
+| `looks dispatched` | the name follows a convention a framework dispatches on — `test` is the prefix **unittest itself** uses, so `testFoo` counts as well as `test_foo` |
 
 Nothing is hidden — `--all` still prints every row. What changed is that the count means
 something. On this repo it went from 577 to **0**, which is the true answer.
@@ -451,9 +451,10 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 954 mutations. A full pass killed every one of them, with no survivors.**
-Against this exact file — the pass is re-run whenever it changes, because a result about an
-older version of a file is not a result about this one. A full pass is hours of work, so it is run deliberately
+**The file admits 954 mutations.** The last full pass killed every one of them with no
+survivors, and the file has been edited since — the same count, not the same file. The pass is
+re-run whenever it changes, because a result about an older version of a file is not a result
+about this one, and a count that happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
@@ -496,7 +497,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 577 more. Grouped, because a list of every one of them stopped being
+The test suite adds 581 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

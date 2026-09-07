@@ -2772,7 +2772,13 @@ _DISPATCHED_EXACT = frozenset((
     "setUp", "tearDown", "setUpClass", "tearDownClass", "setUpModule", "tearDownModule",
     "runTest", "generic_visit", "main", "handle", "run",
 ))
-_DISPATCHED_PREFIX = ("visit_", "test_", "do_", "on_", "handle_")
+# `test`, not `test_`. unittest.TestLoader().testMethodPrefix IS "test", so every `testFoo`
+# in a TestCase is collected and run exactly like every `test_foo` - and the camelCase spelling
+# is what most of the standard library uses. Matching only the underscored form offered 1,316
+# methods that run on every CI job as safe to delete: a third of the whole list, and the exact
+# false positive this was rewritten to stop, surviving in the half of the convention nobody
+# checked against the library itself. A test pins it to unittest's own value now.
+_DISPATCHED_PREFIX = ("visit_", "test", "do_", "on_", "handle_")
 
 
 def _dispatched_by_convention(name):

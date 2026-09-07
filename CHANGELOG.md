@@ -216,7 +216,8 @@ change — a suite that never fails is not evidence of anything. The file admits
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
-A full pass has been run against this file: **954 mutations, 954 killed, none survived.**
+A full pass has been run: **954 mutations, 954 killed, none survived.** The file has been
+edited since, so the count is the same and the file is not; it is re-run rather than restated.
 Two of them were killed by the timeout rather than by a failing test, because they make the
 suite never finish rather than fail, and "hung" and "failed" are counted apart. It is re-run
 whenever the file changes — the previous pass covered 841, and a result about an older

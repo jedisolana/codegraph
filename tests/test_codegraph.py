@@ -7429,3 +7429,52 @@ class ABaseWrittenWithDotsIsStillABase(Sandbox):
         edge, = [e for e in g["calls"] if e["callee"] == "check"]
         self.assertIsNone(edge.get("dst"),
                           "it reached across the tree for a class the named module lacks")
+
+
+class UnittestRunsTestFooNotJustTestUnderscoreFoo(Sandbox):
+    """A third of the "nothing calls this" list on the standard library was test methods.
+
+    `unittest.TestLoader().testMethodPrefix` is **"test"**, not "test_". Every `testFoo` in a
+    TestCase is collected and run exactly like every `test_foo`, and the older camelCase
+    spelling is what most of the standard library and a great deal of older code uses. Matching
+    only the underscored form meant 1,316 methods that unittest runs on every CI job were
+    offered up as safe to delete - the exact false positive this list was rewritten to stop,
+    surviving in the half of the convention nobody checked against the library itself.
+    """
+
+    # A PLAIN class, deliberately. On a real `unittest.TestCase` subclass every method is
+    # already excused as "inherited interface" - the base is outside the tree and may call
+    # anything - so a fixture built on one cannot isolate the prefix rule at all, and a control
+    # written there would be green whatever the prefix said. This is the mixin shape, which is
+    # also where most of the standard library's camelCase tests actually live.
+    TREE = ("class T:\n"
+            "    def testCamelCase(self):\n        pass\n"
+            "    def test_underscored(self):\n        pass\n"
+            "    def testLog10(self):\n        pass\n"
+            "    def helper_nothing_calls(self):\n        pass\n")
+
+    def rows(self):
+        self.write("t.py", self.TREE)
+        return {i.rsplit(".", 1)[-1]: why for i, _w, why in codegraph.unused(self.graph())}
+
+    def test_the_camelcase_spelling_is_recognised(self):
+        r = self.rows()
+        self.assertTrue(r["testCamelCase"], "unittest runs this one")
+        self.assertTrue(r["testLog10"], "and this one")
+
+    def test_the_underscored_spelling_still_is(self):
+        self.assertTrue(self.rows()["test_underscored"])
+
+    def test_a_method_that_is_not_a_test_is_still_reported(self):
+        """The control. Widening the prefix must not excuse everything in the file."""
+        self.assertFalse(self.rows()["helper_nothing_calls"],
+                         "a helper nothing calls is the finding, and it was hidden")
+
+    def test_the_prefix_is_the_one_unittest_actually_uses(self):
+        """Pinned against the library rather than against a memory of it - which is how it came
+        to be wrong in the first place."""
+        import unittest as _u
+        self.assertTrue(
+            any(p == _u.TestLoader().testMethodPrefix for p in codegraph._DISPATCHED_PREFIX),
+            f"unittest collects {_u.TestLoader().testMethodPrefix!r}; "
+            f"this checks {codegraph._DISPATCHED_PREFIX}")
