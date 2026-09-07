@@ -25,6 +25,7 @@ in the tree and looks for a match, so the list can live in the open safely.
     python3 tools/scrub.py --add WORD   add a private word to the deny list, by hash only
     python3 tools/scrub.py --quiet      exit code only
     python3 tools/scrub.py --fixtures   list every line where this is switched off
+    python3 tools/scrub.py --install-hooks   turn the pre-commit guards on here
 """
 import hashlib
 import os
@@ -219,6 +220,20 @@ def main(argv):
                     fh.write(h + "\n")
                     have.add(h)
         print(f"deny list now holds {len(have)} words (hashed; the words themselves are not stored)")
+        return 0
+    if "--install-hooks" in argv:
+        # Hooks live in the tree; git runs them only when core.hooksPath says so, and that is
+        # local config a clone does not carry. "Present but not installed" is the shape every
+        # guard here has failed in, so it is one command rather than a line in a README.
+        hooks = os.path.join(HERE, ".githooks")
+        subprocess.run(["git", "-C", HERE, "config", "core.hooksPath", ".githooks"], check=True)
+        for name in os.listdir(hooks):
+            path = os.path.join(hooks, name)
+            if os.path.isfile(path):
+                os.chmod(path, 0o755)
+        print(f"hooks installed from {hooks}\n"
+              f"  pre-commit  refuses a staged tree with anything private in it\n"
+              f"  commit-msg  refuses a message with anything private in it")
         return 0
     if "--fixtures" in argv:
         n = 0

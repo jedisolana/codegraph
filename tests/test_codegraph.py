@@ -6943,10 +6943,24 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         r = self.commit(CODEGRAPH_ALLOW_PRIVATE="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_the_repository_actually_has_the_hooks_turned_on(self):
-        """The hooks are in the tree; git only runs them if core.hooksPath says so. A guard
-        that is present and not installed is the shape of every one of these that failed."""
+    def test_the_hooks_are_present_and_executable(self):
+        """True of any checkout, including a fresh clone and a CI runner."""
+        for name in ("pre-commit", "commit-msg"):
+            path = os.path.join(HERE, ".githooks", name)
+            self.assertTrue(os.path.isfile(path), f"{name} is missing")
+            self.assertTrue(os.access(path, os.X_OK), f"{name} is not executable")
+
+    def test_a_working_checkout_has_them_turned_on(self):
+        """The hooks are in the tree; git runs them only if core.hooksPath says so, and that is
+        local config a clone does not carry. Present-but-not-installed is the shape every guard
+        here has failed in, so this is checked rather than assumed.
+
+        Skipped where nothing is committed from - a CI runner clones, tests and throws the
+        checkout away, and failing there would only teach people to ignore this."""
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            self.skipTest("nothing is committed from a CI checkout")
         r = subprocess.run(["git", "-C", HERE, "config", "core.hooksPath"],
                            capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), ".githooks",
-                         "run: git config core.hooksPath .githooks")
+                         "the guards are not switched on here - "
+                         "run: python3 tools/scrub.py --install-hooks")
