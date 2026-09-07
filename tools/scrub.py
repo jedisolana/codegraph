@@ -241,6 +241,10 @@ def main(argv):
                 # hook as whoever runs git, which is the owner, so that one bit is the entire
                 # requirement - and 0o755 was granting execute to everybody to get it, which
                 # both ruff and CodeQL called out as exactly what it was.
+                #
+                # A no-op on Windows, where os.chmod honours only the read-only flag and git
+                # runs hooks without needing an execute bit at all. Harmless there, and doing
+                # it unconditionally keeps one code path rather than two.
                 os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
         print(f"hooks installed from {hooks}\n"
               f"  pre-commit  refuses a staged tree with anything private in it\n"

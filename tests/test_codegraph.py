@@ -6992,6 +6992,13 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         The justification for the old mode - "a hook that is not 0o755 does not run" - was
         simply false, and two scanners disagreeing with a justification usually settles it."""
         import stat as _stat
+        if os.name != "posix":
+            # Windows has no execute bit. os.chmod there honours exactly one thing, the
+            # read-only flag, and whether a file can be run is decided by its extension and
+            # the ACL - so there is no permission here to grant or withhold, and the installer's
+            # chmod is a harmless no-op. Asserting a POSIX mode on Windows is asserting
+            # something the platform does not have. CI found this; a mac cannot.
+            self.skipTest("permission bits are a POSIX idea")
         hooks = os.path.join(self.dir, ".githooks")
         target = os.path.join(hooks, "pre-commit")
         os.chmod(target, 0o600)                       # owner read/write, nobody can run it
