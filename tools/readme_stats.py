@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Rewrite the stats block in README.md with what the tool currently reports.
 
+    python3 tools/readme_stats.py [--check] [PATH]
+
 The README publishes a `stats` block as real output and a test compares every figure to a
 fresh build, because the block used to be hand-written and eight of its eleven numbers had
 drifted. The block measures this whole repository, so adding a test moves it - which makes
@@ -57,11 +59,17 @@ def render(d):
 
 def main(argv):
     check = "--check" in argv
-    with open(README, encoding="utf-8") as f:
+    # A path to work on, defaulting to this repository's README. The tests for this script used
+    # to run it against the real file - which made one of them repair the very thing it was
+    # about to assert, so it could not fail, and left the repository edited by a side effect of
+    # running the suite. The numbers still come from a build of this tree; only the file being
+    # written is allowed to be somewhere else.
+    target = next((a for a in argv if not a.startswith("-")), README)
+    with open(target, encoding="utf-8") as f:
         text = f.read()
     found = BLOCK.search(text)
     if not found:
-        sys.exit("README.md no longer contains a json stats block")
+        sys.exit(f"{target} no longer contains a json stats block")
     d = measure()
     fresh = render(d)
     if json.loads(found.group(1)) == json.loads(fresh):
@@ -74,7 +82,7 @@ def main(argv):
     text = re.sub(r"That 0\.\d+ says", f'That {d["resolution_rate"]} says', text, count=1)
     text = re.sub(r"it placed \d+%", f'it placed {round(d["resolution_rate"] * 100)}%', text,
                   count=1)
-    with open(README, "w", encoding="utf-8") as f:
+    with open(target, "w", encoding="utf-8") as f:
         f.write(text)
     print(f'rewrote the block: call_edges {d["call_edges"]}, rate {d["resolution_rate"]}')
     return 0

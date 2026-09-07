@@ -129,18 +129,18 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4042,
-  "call_sites": 5378,
-  "edge_confidence": {"EXTERNAL": 2125, "INHERITED": 615, "BUILTIN": 462, "SELF-METHOD": 329,
-                      "QUALIFIED": 272, "LOCAL": 130, "UNTYPED": 101, "TYPED": 5,
+  "call_edges": 4187,
+  "call_sites": 5549,
+  "edge_confidence": {"EXTERNAL": 2209, "INHERITED": 615, "BUILTIN": 479, "SELF-METHOD": 353,
+                      "QUALIFIED": 272, "LOCAL": 140, "UNTYPED": 111, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1354,
-  "could_have_been_resolved": 1455,
-  "resolution_rate": 0.931
+  "resolved_to_one_def": 1388,
+  "could_have_been_resolved": 1499,
+  "resolution_rate": 0.926
 }
 ```
 
-That 0.931 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.926 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -417,7 +417,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 517 more. Grouped, because a list of every one of them stopped being
+The test suite adds 533 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
@@ -443,6 +443,30 @@ readable a long time before it stopped growing:
 - **Its own claims** — the counts in this file, the example above, the promises in
   `SECURITY.md` (no network, no execution, nothing but the standard library), the label table
   further up, and every shipped file checked for a private origin story.
+
+## Nothing private gets published
+
+Two leaks got past a careful reading of this repository: a dead project's name survived every
+review of the LICENCE, because the reviews were looking for forbidden words and years, and
+`--help` still named where the tool came from after a full pass had been called clean. Both
+were plain text in files nobody thought to question.
+
+So it is a check that fails, not a habit. `tools/scrub.py` reads every file git tracks — which
+is exactly what a push publishes — for secrets, home directories, real email addresses,
+machine addresses, dates and assistant attribution, and `--history` adds every commit message,
+which is the half people forget because it cannot be edited after the fact.
+
+Private words are matched against **hashes**. A list of secret names written out in a public
+file is the leak it exists to prevent, so `deny.txt` holds only sha256 of each word,
+`--add WORD` never writes the word down, and a hit reports the position rather than the text —
+a CI log on a public repository is public too.
+
+Fourteen of its fifteen tests **plant** the thing being looked for and prove the scan goes red.
+A scrub that has never failed is not evidence that a tree is clean.
+
+A test file that proves a key is caught has to contain a key, so those lines are exempted one
+at a time, in the source, and `--quiet`'s companion `--fixtures` lists every one of them — a
+whole-file exemption would have meant a real key in a test goes unseen for ever.
 
 ## Licence
 

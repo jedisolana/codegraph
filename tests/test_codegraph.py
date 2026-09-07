@@ -22,11 +22,12 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import codegraph
-
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import scrub
 
 
 def samefile_key(path):
@@ -3285,28 +3286,37 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
         with open(path or self.README, "w", encoding="utf-8") as f:
             f.write(text)
 
+    def setUp(self):
+        """A COPY, every time. These tests used to run the script against the repository's own
+        README, which had two consequences worth naming. One of them repaired the block before
+        asserting it was current, so that assertion could never fail - a check with no power to
+        say no. And the suite quietly edited a tracked file as a side effect of running, which
+        is how a genuinely stale README would have been papered over instead of reported."""
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.copy = os.path.join(self.dir, "README.md")
+        shutil.copyfile(self.README, self.copy)
+
     def keep_readme(self):
-        """Put it back exactly as it was, whatever the test does to it."""
-        original = self.read()
-        self.addCleanup(self.write, original)
+        original = self.read(self.copy)
         return original
 
     def run_it(self, *args):
-        return subprocess.run([sys.executable, self.SCRIPT, *args], cwd=HERE,
+        return subprocess.run([sys.executable, self.SCRIPT, *args, self.copy], cwd=HERE,
                               capture_output=True, text=True, timeout=300)
 
     def test_check_reports_current_and_changes_nothing(self):
-        self.run_it()                    # make it current first; adding tests moves the block
-        before = self.read()
+        self.run_it()                    # on the COPY - the repository is not touched
+        before = self.read(self.copy)
         r = self.run_it("--check")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("current", r.stdout)
-        self.assertEqual(self.read(), before,
+        self.assertEqual(self.read(self.copy), before,
                          "--check is supposed to report, not edit")
 
     def test_check_notices_a_stale_block_and_still_changes_nothing(self):
         """The half that matters: it has to be able to say no."""
-        path = self.README
+        path = self.copy
         original = self.keep_readme()
         broken = re.sub(r'"call_edges": \d+', '"call_edges": 999999', original, count=1)
         self.assertNotEqual(broken, original, "the fixture did not actually change the block")
@@ -3317,8 +3327,16 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
         self.assertEqual(self.read(path), broken,
                          "--check edited the file it was only asked to inspect")
 
+    def test_the_committed_readme_is_actually_current(self):
+        """The gate the old arrangement could not have: nothing repairs anything first, so this
+        one is free to go red and say the block needs refreshing."""
+        r = subprocess.run([sys.executable, self.SCRIPT, "--check"], cwd=HERE,
+                           capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0,
+                         "the README block is stale - run: python3 tools/readme_stats.py")
+
     def test_it_repairs_a_stale_block_and_leaves_the_rest_alone(self):
-        path = self.README
+        path = self.copy
         original = self.keep_readme()
         self.write(re.sub(r'"call_edges": \d+', '"call_edges": 999999', original, count=1), path)
         self.assertEqual(self.run_it().returncode, 0)
@@ -3340,7 +3358,7 @@ class TheStatsRefresherOnlyTouchesTheBlock(unittest.TestCase):
             self.fail(f"it changed prose outside the block: {diff[:6]}")
 
     def test_it_says_so_rather_than_guessing_when_the_block_is_gone(self):
-        path = self.README
+        path = self.copy
         original = self.keep_readme()
         self.write(re.sub(r"```json\n\{.*?\n\}\n```", "", original, count=1, flags=re.S), path)
         r = self.run_it("--check")
@@ -6663,3 +6681,143 @@ class TheCountsAreInTheFileNotOnlyOnTheScreen(Sandbox):
     def test_a_graph_loaded_back_still_has_them(self):
         codegraph.build([self.dir])
         self.assertEqual(codegraph.load()["stats"]["func_defs"], 3)
+
+
+class NothingPrivateGetsPublished(unittest.TestCase):
+    """A scrub done by reading passes until the once it does not.
+
+    This repository has been caught by that twice: a dead project's name survived every review
+    of the LICENCE because the reviews looked for forbidden words and years, and `--help` still
+    named where the tool came from after a full pass had been declared clean. Both were plain
+    text in files nobody thought to question.
+
+    So the scrub is a test. Every check below plants the thing it is looking for and proves the
+    scan goes red - a scrub that has never failed is not evidence that a tree is clean, it is
+    evidence that nothing has been checked.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for cmd in (["init", "-q"], ["config", "user.email", "t@example.invalid"],
+                    ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"]):
+            subprocess.run(["git", "-C", self.dir] + cmd, check=True, capture_output=True)
+
+    def commit(self, rel, body, message="a change"):
+        path = os.path.join(self.dir, rel)
+        os.makedirs(os.path.dirname(path) or self.dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        subprocess.run(["git", "-C", self.dir, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.dir, "commit", "-q", "-m", message],
+                       check=True, capture_output=True)
+
+    def hits(self):
+        return scrub.scan(self.dir)
+
+    def labels(self):
+        return {label for _w, _l, label, _f in self.hits()}
+
+    # --- the negative control: a clean tree has to come back empty, or every check below
+    # --- would pass for the wrong reason.
+
+    def test_a_clean_tree_is_clean(self):
+        self.commit("a.py", "def f():\n    return 1\n")
+        self.assertEqual(self.hits(), [])
+
+    # --- the positive controls, one per category.
+
+    def test_it_catches_an_api_key(self):
+        self.commit("conf.py", 'KEY = "sk-' + "a" * 32 + '"\n')  # scrub: fixture
+        self.assertIn("secret", self.labels())
+
+    def test_it_catches_a_github_token(self):
+        self.commit("conf.py", 'T = "ghp_' + "b" * 36 + '"\n')  # scrub: fixture
+        self.assertIn("secret", self.labels())
+
+    def test_it_catches_a_private_key_header(self):
+        self.commit("id.pem", "-----BEGIN RSA PRIVATE KEY-----\n")  # scrub: fixture
+        self.assertIn("secret", self.labels())
+
+    def test_it_catches_a_home_directory(self):
+        self.commit("notes.md", "I ran it from /home/someone/project last night\n")  # scrub: fixture
+        self.assertIn("home path", self.labels())
+
+    def test_it_catches_a_windows_home_directory(self):
+        self.commit("notes.md", r"the path was C:\Users\someone\Desktop" + "\n")  # scrub: fixture
+        self.assertIn("home path", self.labels())
+
+    def test_it_catches_a_real_email(self):
+        self.commit("notes.md", "write to someone@somewhere.co.uk about it\n")  # scrub: fixture
+        self.assertIn("email", self.labels())
+
+    def test_it_catches_a_machine_address(self):
+        self.commit("notes.md", "the box is at 10.1.2.3 over the tunnel\n")  # scrub: fixture
+        self.assertIn("ip address", self.labels())
+
+    def test_it_catches_assistant_attribution(self):
+        self.commit("a.py", "x = 1\n",
+                    message="a change\n\nCo-Authored-By: Claude <x@y.invalid>")  # scrub: fixture
+        self.assertIn("assistant attribution", self.labels())
+
+    def test_it_catches_a_date(self):
+        self.commit("CHANGELOG.md", "## Released 2026-09-07\n")  # scrub: fixture
+        self.assertIn("date", self.labels())
+
+    def test_it_reads_commit_messages_not_only_files(self):
+        """The half of a publication people forget: a message cannot be edited after a push
+        without rewriting history."""
+        self.commit("a.py", "def f():\n    return 1\n",
+                    message="fixed it on the box at /home/someone")  # scrub: fixture
+        where = {w for w, _l, _lab, _f in self.hits()}
+        self.assertTrue(any(w.startswith("commit ") for w in where), self.hits())
+
+    # --- the hashed deny list
+
+    def test_a_private_word_is_caught_without_being_written_down(self):
+        deny = os.path.join(self.dir, "deny.txt")
+        word = "someinternalname"
+        with open(deny, "w", encoding="utf-8") as fh:
+            fh.write(scrub._hash(word) + "\n")
+        self.commit("notes.md", f"the {word} host was rebooted\n")
+        real = scrub.DENY
+        scrub.DENY = deny
+        try:
+            hits = scrub.scan(self.dir)
+        finally:
+            scrub.DENY = real
+        self.assertIn("private word", {lab for _w, _l, lab, _f in hits})
+        self.assertFalse(any(word in str(f) for _w, _l, _lab, f in hits),
+                         "the finding must not reprint the private word - a CI log is public")
+
+    def test_the_deny_list_never_stores_the_word(self):
+        deny = os.path.join(self.dir, "deny.txt")
+        real = scrub.DENY
+        scrub.DENY = deny
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                scrub.main(["--add", "someinternalname"])
+            with open(deny, encoding="utf-8") as fh:
+                written = fh.read()
+        finally:
+            scrub.DENY = real
+        self.assertNotIn("someinternalname", written)
+        self.assertIn(scrub._hash("someinternalname"), written)
+
+    # --- and the thing it is all for
+
+    def test_this_repositorys_tracked_tree_is_clean(self):
+        """The gate that is checked on every commit. A file is fixed by editing it, so there is
+        never a reason for this one to be red."""
+        hits = scrub.scan(HERE, history=False)
+        self.assertEqual(hits, [], "\n".join(f"{w}:{l}  {lab}: {f}" for w, l, lab, f in hits))
+
+    def test_the_history_gate_exists_and_is_wired_to_the_publish_step(self):
+        """The other half cannot be fixed by editing - a commit message changes only by
+        rewriting history - so it is the gate run before this goes public rather than a test
+        that sits red. This asserts the gate is actually wired up, because a gate nobody runs
+        is not a gate."""
+        with open(os.path.join(HERE, ".github", "workflows", "publish.yml"), encoding="utf-8") as fh:
+            wf = fh.read()
+        self.assertIn("scrub.py --history", wf,
+                      "the publish workflow must run the history scrub")

@@ -27,9 +27,19 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the scrub below reads every commit message, so it needs them
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: nothing private, in the tree or in any commit message
+        # An upload cannot be taken back and a public repository cannot be un-read. This is the
+        # same check the suite runs on every commit, plus the half it cannot hold green there:
+        # a commit message is fixed only by rewriting history, so it is checked here, at the
+        # one moment where stopping still costs nothing.
+        run: python tools/scrub.py --history
 
       - name: the tag has to match the version in pyproject.toml
         # Otherwise `git tag v0.1.1` on a tree that still says 0.1.0 uploads 0.1.0 again, PyPI
