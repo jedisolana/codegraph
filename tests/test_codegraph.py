@@ -3880,7 +3880,8 @@ class AGraphKnowsExactlyWhatItRead(Sandbox):
         st = os.stat(path)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("def gamma():\n    return 1\n")
-        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        with contextlib.suppress(OSError, NotImplementedError):   # see the skip above; the
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))   # assertion here needs no clock
         after = codegraph._stamp(path)
         self.assertEqual(after[0], before[0], "the fixture must not change the size")
         self.assertNotEqual(after, before)
@@ -6491,15 +6492,26 @@ class AFileCanChangeWithoutItsTimestampMoving(Sandbox):
     AFTER = "def gamma():\n    return 1\n\ndef caller():\n    return gamma()\n"
 
     def rewrite_holding_the_clock(self, rel, body):
-        """Same bytes count, same mtime to the nanosecond. Only the content moves."""
+        """Same bytes count, same mtime to the nanosecond. Only the content moves.
+
+        A SKIP rather than a failure when the filesystem will not hold a timestamp exactly -
+        FAT rounds to two seconds, and a network mount can round further. The premise of every
+        test below is "the clock did not move"; where the platform cannot arrange that, there
+        is nothing here to check, and asserting it would turn a filesystem's granularity into
+        a red build on a machine nobody can look at.
+        """
         path = os.path.join(self.dir, rel)
         st = os.stat(path)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(body)
-        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        try:
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        except (OSError, NotImplementedError) as ex:      # pragma: no cover - platform
+            self.skipTest(f"this filesystem will not set a timestamp: {ex}")
         after = os.stat(path)
+        if after.st_mtime_ns != st.st_mtime_ns:           # pragma: no cover - platform
+            self.skipTest("this filesystem will not hold a timestamp to the nanosecond")
         self.assertEqual(after.st_size, st.st_size, "the fixture must not change the size")
-        self.assertEqual(after.st_mtime_ns, st.st_mtime_ns, "the fixture must not move the clock")
         return path
 
     def test_a_rebuild_sees_the_new_name(self):
