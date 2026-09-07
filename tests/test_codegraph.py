@@ -7080,3 +7080,24 @@ class TheMutationHarnessCanBeAimed(unittest.TestCase):
         _c, err, _o = self.run_main(["10", "0", "--target", self.target])
         self.assertIn("not in this repository", err)
         self.assertNotIn("uncommitted changes", err)
+
+    def test_a_path_on_another_drive_does_not_raise(self):
+        """os.path.relpath RAISES across Windows drive letters rather than falling back, and a
+        repository on D: with a temp file on C: is the ordinary case on a CI runner. This class
+        of bug has now bitten twice, so it is pinned here rather than left to the next runner
+        to discover - simulated, because a mac has no drive letters to cross."""
+        real = os.path.relpath
+
+        def across_drives(path, start=None):
+            raise ValueError("path is on mount 'C:', start on mount 'D:'")
+
+        os.path.relpath = across_drives
+        try:
+            named = self.mutation._rel(self.target)
+            self.assertEqual(named, os.path.abspath(self.target),
+                             "a path that cannot be made relative is not in the repository")
+            self.assertEqual(self.mutation.clean_tree(self.target), "untracked")
+            _c, err, _o = self.run_main(["10", "0", "--target", self.target])
+            self.assertIn("not in this repository", err)
+        finally:
+            os.path.relpath = real

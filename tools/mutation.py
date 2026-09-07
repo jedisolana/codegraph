@@ -177,6 +177,23 @@ def _on_signal(signum, _frame):
     sys.exit(128 + signum)
 
 
+def _rel(path):
+    """The path as git would name it, or the absolute path when it cannot be one.
+
+    os.path.relpath RAISES on Windows when the two paths are on different drive letters -
+    ValueError, not a fallback - and a repository checked out on D: with a temp file on C: is
+    the ordinary case on a CI runner, not an exotic one. This has now bitten twice.
+
+    A path that cannot be expressed relative to the repository is not in the repository, which
+    is exactly what the caller wants to know, so returning the absolute path is both the safe
+    answer and the true one.
+    """
+    try:
+        return os.path.relpath(path, ROOT)
+    except ValueError:
+        return os.path.abspath(path)
+
+
 def clean_tree(target=None):
     """Whether git can restore the file about to be rewritten, and whether it needs to.
 
@@ -190,7 +207,7 @@ def clean_tree(target=None):
     Returns "clean", "dirty", or "untracked".
     """
     git = shutil.which("git") or "git"
-    rel = os.path.relpath(target or TARGET, ROOT)
+    rel = _rel(target or TARGET)
     r = subprocess.run([git, "status", "--porcelain", "--", rel],
                        cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
@@ -228,7 +245,7 @@ def main(argv):
                  f"       mutation.py --help                    what this does and why")
     if want < 1:
         sys.exit("a run of no mutations proves nothing")
-    rel = os.path.relpath(target, ROOT)
+    rel = _rel(target)
     marker_path = os.path.join(os.path.dirname(target), ".mutation-running")
     if os.path.exists(marker_path):
         # Say what happened, rather than leaving "commit or stash" to be read as advice about
