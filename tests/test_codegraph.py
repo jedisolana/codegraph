@@ -7526,3 +7526,107 @@ class AnInheritedInterfaceCanBeTwoLevelsUp(Sandbox):
         self.write("app.py", "class A(B):\n    def m(self):\n        pass\n"
                              "class B(A):\n    pass\n")
         self.rows()          # the assertion is that this returns at all
+
+
+class ADeclaredReturnTypeIsTheSourceSayingSo(Sandbox):
+    """`def session(...) -> Estimate:` states the answer the inference was reaching around.
+
+    Found on a real repository: `Estimate.human` was on the "nothing calls this" list while
+    `est.human()` ran three times in server.py, because `est = cost.session(...)` left `est`
+    untyped. That is the dangerous direction - a live method offered up as safe to delete.
+
+    An earlier measurement said this was not worth building: the standard library has 592
+    return annotations in total, mostly naming builtins. That was the wrong corpus. The
+    standard library is decades-old code that predates annotations; a modern package annotates
+    a third of its functions, and the value is not the resolution rate anyway - it is that
+    ignoring a type the source states puts working code on a deletion list.
+    """
+
+    TREE = ("svc.py",
+            "class Client:\n"
+            "    def go(self):\n        return 1\n"
+            "\n"
+            "def make() -> Client:\n"
+            "    return Client()\n")
+
+    def build(self, caller):
+        self.write(*self.TREE)
+        self.write("app.py", caller)
+        return self.graph()
+
+    def edge(self, g, name="go"):
+        hits = [e for e in g["calls"] if e["callee"] == name and e["src"].startswith("app.")]
+        return hits[0] if hits else None
+
+    def test_a_call_to_an_annotated_function_types_the_variable(self):
+        g = self.build("import svc\n"
+                       "def use():\n"
+                       "    c = svc.make()\n"
+                       "    return c.go()\n")
+        e = self.edge(g)
+        self.assertEqual(e.get("dst"), "svc.Client.go")
+
+    def test_the_bare_import_spelling_works_too(self):
+        g = self.build("from svc import make\n"
+                       "def use():\n"
+                       "    c = make()\n"
+                       "    return c.go()\n")
+        self.assertEqual(self.edge(g).get("dst"), "svc.Client.go")
+
+    def test_it_reaches_a_method_the_class_inherits(self):
+        self.write("svc.py",
+                   "class Base:\n    def go(self):\n        return 1\n"
+                   "class Client(Base):\n    pass\n"
+                   "def make() -> Client:\n    return Client()\n")
+        self.write("app.py", "import svc\n"
+                             "def use():\n    c = svc.make()\n    return c.go()\n")
+        self.assertEqual(self.edge(self.graph()).get("dst"), "svc.Base.go")
+
+    # --- the guards. Each is a way this could start inventing answers.
+
+    def test_no_annotation_means_no_type(self):
+        self.write("svc.py", "class Client:\n    def go(self):\n        return 1\n"
+                             "def make():\n    return Client()\n")
+        self.write("app.py", "import svc\n"
+                             "def use():\n    c = svc.make()\n    return c.go()\n")
+        self.assertIsNone(self.edge(self.graph()).get("dst"),
+                          "it invented a type the source never stated")
+
+    def test_an_annotation_naming_nothing_here_means_no_type(self):
+        self.write("svc.py", "def make() -> SomethingElse:\n    return 1\n")
+        self.write("app.py", "import svc\n"
+                             "def use():\n    c = svc.make()\n    return c.go()\n")
+        self.assertIsNone(self.edge(self.graph()).get("dst"))
+
+    def test_a_container_return_is_not_its_contents(self):
+        """`-> list[Client]` is a list. Reading Client out of it is how a blast radius ends up
+        pointing at the wrong code - the same rule annotations already follow elsewhere."""
+        self.write("svc.py", "class Client:\n    def go(self):\n        return 1\n"
+                             "def make() -> list[Client]:\n    return []\n")
+        self.write("app.py", "import svc\n"
+                             "def use():\n    c = svc.make()\n    return c.go()\n")
+        self.assertIsNone(self.edge(self.graph()).get("dst"))
+
+    def test_two_different_calls_are_not_a_type(self):
+        """The existing rule, which this must not walk around: two answers is not a type."""
+        self.write("svc.py",
+                   "class A:\n    def go(self):\n        return 1\n"
+                   "class B:\n    def go(self):\n        return 2\n"
+                   "def one() -> A:\n    return A()\n"
+                   "def two() -> B:\n    return B()\n")
+        self.write("app.py", "import svc\n"
+                             "def use(flag):\n"
+                             "    c = svc.one()\n"
+                             "    if flag:\n        c = svc.two()\n"
+                             "    return c.go()\n")
+        self.assertIsNone(self.edge(self.graph()).get("dst"))
+
+    def test_a_later_plain_rebinding_still_clears_it(self):
+        self.write("svc.py", "class Client:\n    def go(self):\n        return 1\n"
+                             "def make() -> Client:\n    return Client()\n")
+        self.write("app.py", "import svc\n"
+                             "def use(other):\n"
+                             "    c = svc.make()\n"
+                             "    c = other\n"
+                             "    return c.go()\n")
+        self.assertIsNone(self.edge(self.graph()).get("dst"))

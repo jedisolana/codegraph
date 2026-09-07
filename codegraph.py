@@ -307,6 +307,11 @@ def _defs_and_calls(path, mod):
             self.owner = [mod]                                  # nearest ENCLOSING owner a call belongs to (module at bottom, so module-level calls are captured too)
             self.classes = []                                   # enclosing class ids, so self.method() resolves within the right class
             self.vtypes = [{}]                                  # per-scope var->ClassName from `x = Foo(...)`, so x.method() resolves to Foo.method (local type inference)
+            # Beside it, and only a FALLBACK: var -> the name of the function that produced it.
+            # `x = make()` looks like a constructor to the reading above, so the class name it
+            # guesses is tried first and this is used when that names no class in the tree -
+            # `make` may DECLARE what it returns, and a declared type is the source saying so.
+            self.ctypes = [{}]
             # The MODULE is a scope too, and it was the only one with no pre-scan: every
             # function got one and the file's own top level got an empty set. So
             # `for config in rows:` or `with open(p) as config:` at top level left config
@@ -510,6 +515,12 @@ def _defs_and_calls(path, mod):
             qid = self._qual(node.name)
             d = {"id": qid, "kind": "func", "name": node.name, "module": mod, "line": node.lineno}
             if _is_property(node): d["prop"] = True
+            # `def make() -> Client:` states the answer the inference was reaching around. Kept
+            # as the NAME the annotation wrote; it is resolved later in this module's scope,
+            # because that is where the name means something. A container - `list[Client]` - is
+            # not its contents, and _annotated_class already refuses those.
+            rt = _annotated_class(node.returns) if node.returns is not None else None
+            if rt: d["returns"] = rt
             defs.append(d)
             self.scope.append(node.name); self.owner.append(qid)
             # A parameter's ANNOTATION is the type, stated outright. `def send(c: Client)` then
@@ -520,10 +531,11 @@ def _defs_and_calls(path, mod):
                         *node.args.kwonlyargs]:
                 cls = _annotated_class(arg.annotation)
                 if cls: seeded[arg.arg] = cls
+            self.ctypes.append({})
             self.vtypes.append(seeded)                          # calls inside this body belong to qid; its own var-type scope
             self.bound.append(_bound_names(node))
             for c in node.body: self.visit(c)
-            self.bound.pop(); self.vtypes.pop(); self.owner.pop(); self.scope.pop()
+            self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
 
         def _comp(self, node):
             """A comprehension shadows INSIDE itself, and nowhere else. The first iterable is
@@ -542,6 +554,7 @@ def _defs_and_calls(path, mod):
                     if isinstance(sub, ast.Name): names.add(sub.id)
             self.bound.append((names, set()))
             self.vtypes.append({k: v for k, v in self.vtypes[-1].items() if k not in names})
+            self.ctypes.append({k: v for k, v in self.ctypes[-1].items() if k not in names})
             for i, gen in enumerate(node.generators):
                 if i:
                     self._syntax_call(gen.iter, "__iter__", getattr(node, "lineno", 0))
@@ -550,7 +563,7 @@ def _defs_and_calls(path, mod):
             for part in ((node.key, node.value) if isinstance(node, ast.DictComp)
                          else (node.elt,)):
                 self.visit(part)
-            self.bound.pop(); self.vtypes.pop()
+            self.bound.pop(); self.vtypes.pop(); self.ctypes.pop()
 
         visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = _comp
 
@@ -569,14 +582,21 @@ def _defs_and_calls(path, mod):
                     params.add(sub.target.id)
             self.bound.append((params, set()))
             self.vtypes.append({k: v for k, v in self.vtypes[-1].items() if k not in params})
+            self.ctypes.append({k: v for k, v in self.ctypes[-1].items() if k not in params})
             self.visit(node.body)
-            self.bound.pop(); self.vtypes.pop()
+            self.bound.pop(); self.vtypes.pop(); self.ctypes.pop()
 
         def visit_FunctionDef(self, node): self._func(node)
         def visit_AsyncFunctionDef(self, node): self._func(node)
 
-        def _retype(self, name, cls):
+        def _retype(self, name, cls, call=None):
             """cls is a class name, or None for "rebound to something I cannot name"."""
+            # The same two-answers rule, applied to the fallback as well: a variable assigned
+            # from two different functions has no declared type either.
+            if name in self.ctypes[-1] and self.ctypes[-1][name] != call:
+                self.ctypes[-1][name] = None
+            else:
+                self.ctypes[-1][name] = call
             if name in self.vtypes[-1] and self.vtypes[-1][name] != cls:
                 # `if c: x = Alpha() else: x = Beta()` then x.go() used to pick whichever
                 # branch was walked last and label it TYPED - right half the time, and
@@ -602,11 +622,15 @@ def _defs_and_calls(path, mod):
             if isinstance(node.value, ast.Constant) and node.value.value is None:
                 return self.generic_visit(node)
             cls = _called_class(node.value)
+            # Carried ALONGSIDE, not instead: `x = make()` is indistinguishable from a
+            # constructor here, so the class reading is tried first and this answers when it
+            # names nothing.
+            call = _returning_call(node.value)
             for tgt in node.targets:
-                if isinstance(tgt, ast.Name): self._retype(tgt.id, cls)
+                if isinstance(tgt, ast.Name): self._retype(tgt.id, cls, call)
                 elif isinstance(tgt, (ast.Tuple, ast.List)):     # a, b = f() - two unknowns
                     for el in tgt.elts:
-                        if isinstance(el, ast.Name): self._retype(el.id, None)
+                        if isinstance(el, ast.Name): self._retype(el.id, None, None)
             self.generic_visit(node)
 
         def visit_AnnAssign(self, node):
@@ -858,7 +882,12 @@ def _defs_and_calls(path, mod):
                     if isinstance(a0, ast.Name):                 # super(Base, self).run()
                         edge["super_from"] = a0.id
                 if recv in ("self", "cls") and self.classes: edge["encl_class"] = self.classes[-1]   # self.method() -> resolve inside this class
-                elif recv and self.vtypes[-1].get(recv): edge["recv_type"] = self.vtypes[-1][recv]      # x.method() where x = Foo() -> resolve to Foo.method (local type inference)
+                elif recv and self.vtypes[-1].get(recv):
+                    edge["recv_type"] = self.vtypes[-1][recv]    # x.method() where x = Foo() -> Foo.method
+                if recv and recv not in ("self", "cls") and self.ctypes[-1].get(recv):
+                    # The fallback, carried whether or not a class name was guessed above.
+                    # Read only if that guess turns out to name nothing.
+                    edge["recv_call"] = self.ctypes[-1][recv]
                 elif (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Call)
                       and not edge.get("super_of") and _called_class(fn.value)):
                     # `Leg("stock", 100).payoff(110)` - the class is written at the call site,
@@ -874,7 +903,7 @@ def _defs_and_calls(path, mod):
                     # object-oriented Python is written and was the one shape named in this
                     # tool's own description of its blind spot.
                     edge["recv_type"] = self.atypes[-1][fn.value.attr]
-                if not method and self.vtypes[-1].get(callee):
+                if not method and isinstance(self.vtypes[-1].get(callee), str):
                     # c(1) where c is a Client. Calling an INSTANCE runs its __call__, and the
                     # call site never writes that name - the same shape as __init__, and the
                     # same answer it used to give: "callers: (none)" for a method being called
@@ -947,8 +976,8 @@ ATTR_IDENTITY = ("src", "callee", "recv", "encl_class", "recv_type")
 ATTR_IDENTITY_MARK = "\0attr"        # so a short key can never collide with a long one
 
 EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", "recv_path",
-                 "recv_local", "callee_local", "encl_class", "recv_type", "invoke_type",
-                 "super_of", "super_from", "alt", "syntax", "attr_read")
+                 "recv_local", "callee_local", "encl_class", "recv_type", "recv_call",
+                 "invoke_type", "super_of", "super_from", "alt", "syntax", "attr_read")
 
 # Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
 # built from ast.Call nodes cannot see any of them: in the standard library 2,780 definitions
@@ -993,6 +1022,23 @@ def _union_parts(ann):
     if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
         return _union_parts(ann.left) + _union_parts(ann.right)
     return [ann]
+
+
+def _returning_call(value):
+    """`x = make()` -> "make", or None when the value is not a plain call.
+
+    A deferred type: which function `make` names is not decidable in this file, so the NAME is
+    carried and the answer looked up after resolution, when the call it belongs to has been
+    resolved like any other.
+    """
+    if not isinstance(value, ast.Call):
+        return None
+    fn = value.func
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute):
+        return fn.attr                           # svc.make() - the resolver matches the callee
+    return None
 
 
 def _annotated_class(ann):
@@ -1744,6 +1790,43 @@ def build(dirs=None, write=True):
     # `method` is a fact about the CALL SITE - was it written `f()` or `x.f()` - not machinery
     # from resolving it, and without it nothing downstream can tell the two apart. `recv` does
     # not answer that: it is None both for a bare call and for `get_thing().f()`.
+    # A DECLARED RETURN TYPE, applied last, because it needs the calls resolved first.
+    # `def session(...) -> Estimate` states outright what `est = cost.session(...)` is, and
+    # ignoring it left `est.human()` unresolved - which put a method that runs three times in
+    # the same program onto the "nothing calls this" list. The dangerous direction.
+    #
+    # It reuses the answers already worked out rather than resolving anything again: the
+    # assignment's own call is an ordinary edge and has already been pointed at a definition.
+    # Look up that definition's declared return class, resolve THAT name in the module the
+    # function was defined in - which is where the name means something - and then ask the
+    # class for the method, through the same MRO walk everything else uses.
+    returns_of = {n["id"]: n["returns"] for n in nodes if n.get("returns")}
+    if returns_of:
+        resolved_in = {}
+        for e in calls:
+            if e.get("dst") and e["dst"] in returns_of:
+                key = (e["src"], e["callee"])
+                # Two different functions of one name reached from one scope is not an answer.
+                resolved_in[key] = None if key in resolved_in and resolved_in[key] != e["dst"] \
+                    else e["dst"]
+        mod_of_def = {n["id"]: n["module"] for n in nodes}
+        for e in calls:
+            if e.get("dst") or not e.get("recv_call"):
+                continue
+            target = resolved_in.get((e["src"], e["recv_call"]))
+            if not target:
+                continue
+            cls_name = returns_of.get(target)
+            hits = _classes_named(cls_name, mod_of_def.get(target, ""), target)
+            if len(hits) != 1:
+                continue
+            for c in _mro(hits[0], bases_of, mro_cache):
+                cand = f"{c}.{e['callee']}"
+                if cand in def_ids:
+                    e["dst"] = cand
+                    e["confidence"] = "TYPED"
+                    break
+
     keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",
             "candidates")
     calls = [{k: e[k] for k in keep if k in e} for e in calls]

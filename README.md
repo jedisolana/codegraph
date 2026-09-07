@@ -149,14 +149,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4579,
-  "call_sites": 6095,
-  "edge_confidence": {"EXTERNAL": 2435, "INHERITED": 643, "BUILTIN": 511, "SELF-METHOD": 408,
-                      "QUALIFIED": 294, "LOCAL": 154, "UNTYPED": 126, "TYPED": 5,
+  "call_edges": 4633,
+  "call_sites": 6171,
+  "edge_confidence": {"EXTERNAL": 2463, "INHERITED": 657, "BUILTIN": 512, "SELF-METHOD": 418,
+                      "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 126, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1507,
-  "could_have_been_resolved": 1633,
-  "resolution_rate": 0.923
+  "resolved_to_one_def": 1532,
+  "could_have_been_resolved": 1658,
+  "resolution_rate": 0.924
 }
 ```
 
@@ -167,7 +167,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.923 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.924 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -404,7 +404,8 @@ it usable:
   dotted bases were fixed this is what remains of `assertEqual` on the standard library,
   2,527 of the original 15,872, and every one of them is this shape.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
-  say it outright: a parameter's, and a variable's. A container annotation is not its contents,
+  say it outright: a parameter's, a variable's, and a function's **declared return type**, so
+  `def make() -> Client` types what `c = make()` holds. A container annotation is not its contents,
   so `Dict[str, Client]` stays a dict. A name rebound to anything the tool cannot name loses its
   type rather than keeping the old one. Nothing beyond that: no return types, no attributes,
   and `with Foo() as c` is not assumed to give you a Foo, because `__enter__` may return
@@ -451,7 +452,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 958 mutations.** The last full pass killed every one of them with no
+**The file admits 987 mutations.** The last full pass killed every one of them with no
 survivors, and the file has been edited since — the same count, not the same file. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
 about this one, and a count that happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
@@ -497,7 +498,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 584 more. Grouped, because a list of every one of them stopped being
+The test suite adds 592 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
