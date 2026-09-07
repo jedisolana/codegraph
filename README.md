@@ -149,13 +149,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4343,
-  "call_sites": 5750,
-  "edge_confidence": {"EXTERNAL": 2313, "INHERITED": 615, "BUILTIN": 492, "SELF-METHOD": 378,
-                      "QUALIFIED": 272, "LOCAL": 143, "UNTYPED": 122, "TYPED": 5,
+  "call_edges": 4490,
+  "call_sites": 5956,
+  "edge_confidence": {"EXTERNAL": 2387, "INHERITED": 625, "BUILTIN": 507, "SELF-METHOD": 400,
+                      "QUALIFIED": 286, "LOCAL": 151, "UNTYPED": 126, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1416,
-  "could_have_been_resolved": 1538,
+  "resolved_to_one_def": 1470,
+  "could_have_been_resolved": 1596,
   "resolution_rate": 0.921
 }
 ```
@@ -221,6 +221,41 @@ something. On this repo it went from 577 to **0**, which is the true answer.
 And the number is still only about **the roots you pointed it at**. A sibling package nobody
 scanned calls plenty of these. `stats` names it `not_called_in_scanned_roots` for that reason.
 
+## Before you commit: what did I just touch?
+
+`impact` answers for a name you already know. The question *before* that one is which names you
+have touched at all — and the answer is sitting in the diff you have not committed yet.
+
+```bash
+git diff | codegraph changed
+```
+
+```
+app/auth.validate_user  (lines 40-44)
+  callers: app/routes.login, app/routes.refresh, app/billing.charge
+  blast:   14 function(s) downstream
+```
+
+It reads the diff on **stdin** rather than running git. This file starts no processes and
+imports nothing outside the standard library — a property people rely on when they copy it into
+their own repository, and not worth spending to save a pipe. A pipe also works with `hg`, `jj`,
+a saved patch, and a pull request fetched by something else.
+
+Three things come back, and the two that are not the main list are the point:
+
+- **touched** — the functions your edits are inside, each with its callers and blast radius.
+- **module level** — changed lines that sit outside every function. Those run on *import* and
+  can reach anything in the file, so they are a bigger question, not a smaller one.
+- **unknown files** — files this graph never read: brand new, or outside the roots you scanned.
+  Answering "nothing depends on this" for a file it never opened is the one reply it must never
+  give quietly.
+
+It walks the hunk **bodies**, not just the `@@` headers. `git diff` prints three lines of
+context either side by default and the header counts them, so trusting the header reports a
+function as changed because a *neighbour* was — the first version of this named `impact` off the
+back of an edit three lines away. Blank lines and comments are dropped too: they change no
+behaviour, and calling a comment a module-level risk is alarming and untrue.
+
 ## The commands
 
 ```
@@ -236,6 +271,7 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers, `import_module("x")` included
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph symbols            every function and class defined here
+codegraph changed            read a diff on stdin; what those edits would break
 codegraph unused             definitions nothing calls AND nothing names
 codegraph unused --all       ...plus the ones reached some other way, each with why
 codegraph stats              counts, resolution rate, definitions nothing reaches
@@ -405,9 +441,10 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 867 mutations. A full pass killed every one of them, with no survivors.**
-Against this exact file — the pass is re-run whenever it changes, because a result about an
-older version of a file is not a result about this one. A full pass is hours of work, so it is run deliberately
+**The file admits 931 mutations.** The last full pass killed all 867 the file admitted then,
+with no survivors, and the file has grown since — so that result is stated as what it covered
+rather than restated as though it covered this one. A result about an older version of a file
+is not a result about this one, and re-running is how the claim gets made again. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
@@ -450,7 +487,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 551 more. Grouped, because a list of every one of them stopped being
+The test suite adds 567 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

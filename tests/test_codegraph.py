@@ -7086,7 +7086,12 @@ class TheMutationHarnessCanBeAimed(unittest.TestCase):
                          "the guard still names one file rather than the one being rewritten")
         self.assertEqual(self.mutation.clean_tree(self.target), "untracked",
                          "a file git has never heard of is not a file with uncommitted changes")
-        self.assertEqual(self.mutation.clean_tree(os.path.join(HERE, "codegraph.py")), "clean")
+        # A TRACKED file is clean or dirty depending on whether it has been edited, which is
+        # not this test's business - asserting "clean" here made the answer depend on the state
+        # of the working tree, so it passed or failed according to whether somebody was
+        # midway through something. The invariant is that a tracked file is never "untracked".
+        self.assertIn(self.mutation.clean_tree(os.path.join(HERE, "codegraph.py")),
+                      ("clean", "dirty"))
 
     def test_a_file_outside_the_repository_is_refused_for_the_real_reason(self):
         """It said "has uncommitted changes", which was false and sent you to commit a file git
@@ -7115,3 +7120,175 @@ class TheMutationHarnessCanBeAimed(unittest.TestCase):
             self.assertIn("not in this repository", err)
         finally:
             os.path.relpath = real
+
+
+class WhatAmIAboutToBreak(Sandbox):
+    """`impact` answers for a name you already know. The question before that one is which
+    names you have touched at all - and the answer is sitting in the diff you have not
+    committed yet.
+
+    It reads the diff on STDIN rather than running git. This file imports nothing but the
+    standard library and starts no processes, which is a property people rely on when they
+    copy it into their own repository, and it is not worth spending to save a pipe. Reading a
+    diff from stdin also works with hg, jj, a patch file, and a pull request fetched by
+    something else.
+    """
+
+    TREE = (
+        ("app.py",
+         "def leaf():\n"                       # 1
+         "    return 1\n"                      # 2
+         "\n"                                  # 3
+         "def mid():\n"                        # 4
+         "    return leaf()\n"                 # 5
+         "\n"                                  # 6
+         "def top():\n"                        # 7
+         "    return mid()\n"                  # 8
+         "\n"                                  # 9
+         "CONSTANT = 3\n"),                    # 10
+    )
+
+    def build(self):
+        for rel, body in self.TREE:
+            self.write(rel, body)
+        return self.graph()
+
+    def diff(self, path, *lines):
+        hunks = "".join(f"@@ -{n},0 +{n},1 @@\n+    pass\n" for n in lines)
+        return f"--- a/{path}\n+++ b/{path}\n{hunks}"
+
+    def test_it_names_the_function_the_changed_line_is_inside(self):
+        g = self.build()
+        got = codegraph.changed(g, self.diff("app.py", 2), root=self.dir)
+        self.assertEqual([t["id"] for t in got["touched"]], ["app.leaf"])
+
+    def test_it_reports_who_that_function_would_break(self):
+        g = self.build()
+        got = codegraph.changed(g, self.diff("app.py", 2), root=self.dir)
+        one, = got["touched"]
+        self.assertEqual(one["callers"], ["app.mid"])
+        self.assertEqual(sorted(one["blast"]), ["app.mid", "app.top"])
+
+    def test_two_functions_touched_are_two_answers(self):
+        g = self.build()
+        got = codegraph.changed(g, self.diff("app.py", 2, 8), root=self.dir)
+        self.assertEqual(sorted(t["id"] for t in got["touched"]), ["app.leaf", "app.top"])
+
+    def test_a_line_outside_every_function_is_reported_apart(self):
+        """Module level is not nothing - it runs on import, and changing it can reach anything
+        in the file. But it is not a function either, so it must not be silently dropped."""
+        g = self.build()
+        got = codegraph.changed(g, self.diff("app.py", 10), root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["module_level"], ["app.py:10"])
+
+    def test_a_file_the_graph_never_saw_is_named_not_ignored(self):
+        """A brand new file, or one outside the scanned roots. Answering "nothing depends on
+        this" for a file it never read is the one reply that must never be silent."""
+        g = self.build()
+        got = codegraph.changed(g, self.diff("brand_new.py", 1), root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["unknown_files"], ["brand_new.py"])
+
+    def test_an_empty_diff_is_an_empty_answer_not_an_error(self):
+        g = self.build()
+        got = codegraph.changed(g, "", root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["unknown_files"], [])
+
+    def test_a_deleted_file_does_not_crash_it(self):
+        g = self.build()
+        d = "--- a/app.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def leaf():\n-    return 1\n"
+        got = codegraph.changed(g, d, root=self.dir)
+        self.assertEqual(got["touched"], [])
+
+    def test_only_python_files_are_looked_at(self):
+        g = self.build()
+        got = codegraph.changed(g, self.diff("notes.md", 1), root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["unknown_files"], [])
+
+    def test_context_lines_are_not_reported_as_changed(self):
+        """`git diff` prints three lines of context either side by default, and the hunk header
+        counts them. Trusting that header said a function had changed because a NEIGHBOUR had -
+        run against this repository it named `impact` off the back of an edit three lines away.
+        A tool for deciding what to re-read must not pad the list."""
+        # The file on disk is the NEW side of the diff - which is what it always is for
+        # uncommitted work, and is worth being explicit about in the fixture.
+        self.write("app.py",
+                   "def leaf():\n    return 1\n\n"
+                   "def mid():\n    return leaf()\n    x = 1\n\n"
+                   "def top():\n    return mid()\n\nCONSTANT = 3\n")
+        g = self.graph()
+        # A real-shaped hunk: two context lines, one addition, one context line.
+        d = ("--- a/app.py\n+++ b/app.py\n"
+             "@@ -4,3 +4,4 @@\n"
+             " def mid():\n"
+             "     return leaf()\n"
+             "+    x = 1\n"
+             " \n")
+        got = codegraph.changed(g, d, root=self.dir)
+        self.assertEqual([t["id"] for t in got["touched"]], ["app.mid"])
+        self.assertEqual(got["touched"][0]["lines"], [6],
+                         "the context lines were counted as changes")
+
+    def test_a_removed_line_does_not_advance_the_new_file_counter(self):
+        """A deletion is not in the new file at all, so counting it shifts every line after it
+        and blames the wrong function."""
+        g = self.build()
+        d = ("--- a/app.py\n+++ b/app.py\n"
+             "@@ -1,3 +1,2 @@\n"
+             " def leaf():\n"
+             "-    x = 0\n"
+             "     return 1\n")
+        got = codegraph.changed(g, d, root=self.dir)
+        self.assertEqual(got["touched"], [], "a pure deletion changes no line in the new file")
+
+    def test_the_cli_reads_a_diff_from_stdin(self):
+        self.build()
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "changed"],
+                           cwd=self.dir, input=self.diff("app.py", 2),
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("app.leaf", r.stdout)
+        self.assertIn("app.mid", r.stdout)
+
+    def test_the_json_form_carries_the_same_answer(self):
+        self.build()
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "changed",
+                            "--json"], cwd=self.dir, input=self.diff("app.py", 2),
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual(got["query"], "changed")
+        self.assertEqual([t["id"] for t in got["touched"]], ["app.leaf"])
+
+    def test_a_comment_only_change_breaks_nothing_and_says_so(self):
+        """It used to land in "module level, runs on import, can reach anything in the file",
+        which is alarming and untrue of a comment. A trailing comment is not in the AST either,
+        so there was no function to attribute it to and nowhere sensible for it to go."""
+        self.write("app.py", "def leaf():\n    return 1\n    # a note\n")
+        g = self.graph()
+        got = codegraph.changed(g, self.diff("app.py", 3), root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["module_level"], [],
+                         "a comment was reported as a module-level risk")
+
+    def test_a_blank_line_is_not_a_change_either(self):
+        self.write("app.py", "def leaf():\n    return 1\n\n\nCONSTANT = 1\n")
+        g = self.graph()
+        got = codegraph.changed(g, self.diff("app.py", 3), root=self.dir)
+        self.assertEqual((got["touched"], got["module_level"]), ([], []))
+
+    def test_a_real_module_level_change_is_still_reported(self):
+        """The control: dropping comments must not drop the thing the category exists for."""
+        self.write("app.py", "def leaf():\n    return 1\n\nCONSTANT = 1\n")
+        g = self.graph()
+        got = codegraph.changed(g, self.diff("app.py", 4), root=self.dir)
+        self.assertEqual(got["module_level"], ["app.py:4"])
+
+    def test_consecutive_lines_are_shown_as_a_range(self):
+        """One edit produced a row of thirty-five line numbers, which nobody reads."""
+        self.assertEqual(codegraph._ranges([1, 2, 3, 7, 9, 10]), "1-3, 7, 9-10")
+        self.assertEqual(codegraph._ranges([5]), "5")
+        self.assertEqual(codegraph._ranges([]), "")

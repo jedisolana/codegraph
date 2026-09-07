@@ -24,6 +24,7 @@ same-named functions would be worse than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph symbols            every function and class defined here
+  codegraph changed            read a diff on stdin; what those edits would break
   codegraph unused             definitions nothing calls AND nothing names
   codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
@@ -2514,6 +2515,179 @@ def impact(g, name):
             "blast": blast_radius(g, name), "unresolved": unresolved}
 
 
+def _diff_lines(diff):
+    """A unified diff -> {path: {line numbers touched in the NEW file}}.
+
+    The BODY is walked, not just the headers. `git diff` prints three lines of context either
+    side by default and the hunk header counts them, so trusting the header alone reports a
+    function as changed because a neighbour was - run against this repository, the first
+    version named `impact` off the back of an edit three lines away. A tool for deciding what
+    to re-read must not pad the list.
+
+    Only `+` lines count. A `-` line is not in the new file at all, so it must not advance the
+    counter either, or every line after a deletion is attributed to the wrong function.
+
+    Works with `git diff`, `git diff -U0`, `hg diff`, a saved patch, or a pull request fetched
+    by something else, because all of them are this format.
+    """
+    out, path, ln = {}, None, None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            p = line[4:].split("\t")[0].strip()
+            ln = None
+            if p == "/dev/null":
+                path = None                     # the file was deleted; there is nothing to read
+                continue
+            path = p[2:] if p.startswith(("a/", "b/")) else p
+            out.setdefault(path, set())
+        elif path is not None and line.startswith("---"):
+            continue                            # the old-file header, and never a body line
+        elif path is not None and line.startswith("@@"):
+            # `@@ -12,3 +14,5 @@` - the third field is the NEW file's range, and the count is
+            # optional, meaning one. Split rather than a regex: this file imports nothing it
+            # can avoid, and a header is three fields separated by spaces.
+            parts = line.split()
+            if len(parts) < 3 or not parts[2].startswith("+"):
+                continue
+            span = parts[2][1:].split(",")
+            try:
+                start = int(span[0])
+                count = int(span[1]) if len(span) > 1 else 1
+            except ValueError:
+                ln = None
+                continue                        # not a hunk header after all
+            ln = start
+            _ = count                           # the header's span is not trusted; see above
+        elif path is not None and ln is not None:
+            if line.startswith("+"):
+                out[path].add(ln)
+                ln += 1
+            elif line.startswith("-") or line.startswith("\\"):
+                pass                            # not in the new file; do not advance
+            else:
+                ln += 1                         # a context line, including the empty one
+    return {k: v for k, v in out.items() if v}
+
+
+def _enclosing_def(path, lines):
+    """The INNERMOST function definition containing each line, as {line: def-line}.
+
+    Innermost, so a change inside a nested helper is attributed to the helper rather than to
+    everything it happens to sit inside. A line that no function contains is left out - module
+    level is a different answer, not a missing one.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        return {}
+    found = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = getattr(node, "end_lineno", None) or node.lineno
+        for ln in lines:
+            if node.lineno <= ln <= end:
+                prev = found.get(ln)
+                # A later, deeper definition wins: both enclose the line, and the one that
+                # starts last is the one written closest to it.
+                if prev is None or node.lineno > prev:
+                    found[ln] = node.lineno
+    return found
+
+
+def _ranges(numbers):
+    """[1,2,3,7,9,10] -> "1-3, 7, 9-10". A function edited in one place produced a row of
+    thirty-five line numbers, which is not something anybody reads."""
+    nums = sorted(numbers)
+    if not nums:
+        return ""
+    out, start, prev = [], nums[0], nums[0]
+    for n in nums[1:] + [None]:
+        if n == prev + 1:
+            prev = n
+            continue
+        out.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = n
+    return ", ".join(out)
+
+
+def _is_code(path, line_no):
+    """Whether a line carries anything that runs. A blank line and a comment do not.
+
+    Read once per file by the caller's loop over a handful of lines; opening the file again per
+    line would be silly on a large diff, but the numbers here are the lines somebody edited,
+    not the lines in the file.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for i, text in enumerate(fh, 1):
+                if i == line_no:
+                    stripped = text.strip()
+                    return bool(stripped) and not stripped.startswith("#")
+    except OSError:
+        return True                             # unreadable: assume it matters, do not drop it
+    return False
+
+
+def changed(g, diff, root="."):
+    """What the edits in a diff would reach, without anybody naming a function first.
+
+    `impact` answers for a name you already know; this finds the names. It reads a diff rather
+    than running git, because this file starts no processes and imports nothing outside the
+    standard library - a property people rely on when they copy it into their own repository,
+    and not worth spending to save a pipe.
+
+    The file it reads is the one ON DISK, which is the NEW side of the diff - true for
+    uncommitted work, and the thing to know if you ever feed it a diff of something else.
+
+    Three lists come back, and the two that are not `touched` are the point. A changed line at
+    module level runs on import and can reach anything in the file; a changed file the graph
+    never read has no answer at all. Folding either into "nothing depends on this" would be the
+    one reply that must never be given quietly.
+    """
+    by_file = {}
+    for n in g["nodes"]:
+        if n["kind"] == "module" and n.get("file"):
+            by_file[os.path.realpath(n["file"])] = n["id"]
+    defs_by_line = {}
+    for n in g["nodes"]:
+        if n["kind"] == "func":
+            defs_by_line[(n["module"], n["line"])] = n["id"]
+
+    touched, module_level, unknown = {}, [], []
+    for rel, lines in sorted(_diff_lines(diff).items()):
+        if not rel.endswith(".py"):
+            continue                            # a README is not a call graph question
+        full = os.path.realpath(os.path.join(root, rel))
+        mid = by_file.get(full)
+        if mid is None:
+            unknown.append(rel)                 # new, unscanned, or outside the roots
+            continue
+        # A blank line or a pure comment changes no behaviour, so it is neither a touched
+        # function nor a module-level risk. It used to fall through to "module level, runs on
+        # import, can reach anything in the file" - which is alarming, and false about a
+        # comment. A trailing comment is not in the AST at all, so it has no enclosing
+        # function to be attributed to either.
+        lines = {ln for ln in lines if _is_code(full, ln)}
+        enclosing = _enclosing_def(full, lines)
+        for ln in sorted(lines):
+            def_line = enclosing.get(ln)
+            node_id = defs_by_line.get((mid, def_line)) if def_line else None
+            if node_id is None:
+                module_level.append(f"{rel}:{ln}")
+            else:
+                touched.setdefault(node_id, set()).add(ln)
+
+    answers = []
+    for node_id in sorted(touched):
+        answers.append({"id": node_id, "lines": sorted(touched[node_id]),
+                        "callers": callers_of(g, node_id),
+                        "blast": blast_radius(g, node_id),
+                        "sites": sites(g, node_id)})
+    return {"touched": answers, "module_level": module_level, "unknown_files": unknown}
+
+
 def symbols(g):
     """Every function and class the tree defines, as (id, file:line, kind).
 
@@ -2904,6 +3078,40 @@ def _main(argv=None):
                    "results": [{"id": i, "at": loc, "kind": k} for i, loc, k in rows]})
         else:
             print("\n".join(f"{i}  {loc}" for i, loc, _k in rows) or "(none)")
+    elif a[0] == "changed":
+        # The diff comes in on STDIN. Nothing here runs git - this file starts no processes -
+        # and a pipe works with hg, jj, a saved patch, or a pull request fetched by something
+        # else, which shelling out to one tool would not.
+        diff = sys.stdin.read() if not sys.stdin.isatty() else ""
+        if not diff.strip():
+            print("nothing on stdin - pipe a diff in:\n"
+                  "  git diff | codegraph changed\n"
+                  "  git diff --cached | codegraph changed", file=sys.stderr)
+            return 2
+        got = changed(load(), diff)
+        if as_json:
+            _emit({"query": "changed", **got})
+        else:
+            for t in got["touched"]:
+                if not wanted(t["id"]):
+                    continue
+                print(f"{t['id']}  (line{'s' if len(t['lines']) > 1 else ''} "
+                      f"{_ranges(t['lines'])})")
+                who = t["callers"]
+                shown = ", ".join(who[:6]) + (f", +{len(who) - 6} more" if len(who) > 6 else "")
+                print("  callers: " + (shown or "(none)"))
+                print(f"  blast:   {len(t['blast'])} function(s) downstream")
+            if not got["touched"]:
+                print("(no changed line is inside a function this graph knows)")
+            sys.stdout.flush()
+            if got["module_level"]:
+                print(f"\n{len(got['module_level'])} changed line(s) at module level, which run "
+                      f"on import and can\nreach anything in the file: "
+                      f"{', '.join(got['module_level'][:6])}", file=sys.stderr)
+            if got["unknown_files"]:
+                print(f"\n{len(got['unknown_files'])} changed file(s) this graph never read, so "
+                      f"there is no answer for\nthem at all: "
+                      f"{', '.join(got['unknown_files'][:6])}", file=sys.stderr)
     elif a[0] == "unused":
         rows = [r for r in unused(load()) if wanted(r[0])]
         # By default the list is the FINDING - the names nothing calls and nothing names.
