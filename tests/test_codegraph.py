@@ -6841,3 +6841,112 @@ class NothingPrivateGetsPublished(unittest.TestCase):
         self.assertIn("home path", {lab for _w, _l, lab, _f in deep},
                       "the deleted file is still in the history and still readable")
         self.assertTrue(any(w.startswith("history ") for w, _l, _lab, _f in deep), deep)
+
+
+class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
+    """The cleanup has been done twice. The second cost a history rewrite, a force-push, and
+    then a delete-and-recreate of the repository - because a rewrite does not make the host
+    forget: the orphaned objects stayed fetchable by their id, and a repository going public
+    would have served them to anyone who asked.
+
+    The only cheap moment is before the commit exists. These prove the hooks actually refuse,
+    which is the half that matters: a hook that cannot run and says nothing is worse than no
+    hook, because it is also believed.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.invalid"],
+                    ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"],
+                    ["config", "core.hooksPath", ".githooks"]):
+            subprocess.run(["git", "-C", self.dir] + cmd, check=True, capture_output=True)
+        # The hooks reach for tools/scrub.py relative to the repository root, so the fixture
+        # repo carries a real copy of both rather than a stub.
+        for rel in (".githooks/pre-commit", ".githooks/commit-msg", "tools/scrub.py"):
+            dst = os.path.join(self.dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(os.path.join(HERE, rel), dst)
+            if rel.startswith(".githooks"):
+                os.chmod(dst, 0o755)
+        # A deny list of its OWN, holding a made-up word. Copying the real one would have meant
+        # writing a real private word into this file to test against it - which is the leak,
+        # in the test for the leak. It is not a fixture problem that a marker can solve: a
+        # marked line still ships the word.
+        self.private_word = "notarealprojectname"
+        with open(os.path.join(self.dir, "tools", "deny.txt"), "w", encoding="utf-8") as fh:
+            fh.write(scrub._hash(self.private_word) + "\n")
+
+    def commit(self, message="a change", **env):
+        subprocess.run(["git", "-C", self.dir, "add", "-A"], check=True, capture_output=True)
+        return subprocess.run(["git", "-C", self.dir, "commit", "-m", message],
+                              capture_output=True, text=True,
+                              env={**os.environ, **env})
+
+    def write(self, rel, body):
+        path = os.path.join(self.dir, rel)
+        os.makedirs(os.path.dirname(path) or self.dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def committed(self):
+        r = subprocess.run(["git", "-C", self.dir, "rev-list", "--all", "--count"],
+                           capture_output=True, text=True)
+        return int(r.stdout.strip() or 0)
+
+    # --- the control: an ordinary commit must still work, or the hook is just breakage.
+
+    def test_an_ordinary_commit_still_goes_through(self):
+        self.write("app.py", "def f():\n    return 1\n")
+        r = self.commit()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.committed(), 1)
+
+    # --- and the half that matters.
+
+    def test_a_file_with_a_home_path_is_refused(self):
+        self.write("notes.md", "it lives in /home/someone/thing\n")  # scrub: fixture
+        r = self.commit()
+        self.assertEqual(r.returncode, 1, "the commit was allowed")
+        self.assertIn("must not be committed", r.stderr)
+        self.assertEqual(self.committed(), 0, "nothing may be recorded when it refuses")
+
+    def test_a_file_with_a_key_is_refused(self):
+        self.write("conf.py", 'K = "ghp_' + "c" * 36 + '"\n')  # scrub: fixture
+        self.assertEqual(self.commit().returncode, 1)
+        self.assertEqual(self.committed(), 0)
+
+    def test_a_private_word_in_the_message_is_refused(self):
+        """The half that forced the second cleanup: one word, in one message."""
+        self.write("app.py", "def f():\n    return 1\n")
+        r = self.commit(message=f"ran it against the {self.private_word} box")
+        self.assertEqual(r.returncode, 1, "the message was allowed through")
+        self.assertEqual(self.committed(), 0)
+
+    def test_a_home_path_in_the_message_is_refused(self):
+        self.write("app.py", "def f():\n    return 1\n")
+        r = self.commit(message="fixed under /home/someone")  # scrub: fixture
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.committed(), 0)
+
+    def test_a_marked_fixture_line_is_allowed_through(self):
+        """Otherwise this suite could not be committed at all."""
+        self.write("t.py", 'BAD = "/home/someone"  # scrub: fixture\n')
+        r = self.commit()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_escape_hatch_works_and_is_deliberate(self):
+        """A guard with no way past it gets deleted the first time it is wrong. This one takes
+        a named environment variable, which nobody types by accident."""
+        self.write("notes.md", "it lives in /home/someone/thing\n")  # scrub: fixture
+        self.assertEqual(self.commit().returncode, 1)
+        r = self.commit(CODEGRAPH_ALLOW_PRIVATE="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_repository_actually_has_the_hooks_turned_on(self):
+        """The hooks are in the tree; git only runs them if core.hooksPath says so. A guard
+        that is present and not installed is the shape of every one of these that failed."""
+        r = subprocess.run(["git", "-C", HERE, "config", "core.hooksPath"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), ".githooks",
+                         "run: git config core.hooksPath .githooks")

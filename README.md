@@ -129,19 +129,19 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4209,
-  "call_sites": 5580,
-  "edge_confidence": {"EXTERNAL": 2226, "INHERITED": 615, "BUILTIN": 482, "SELF-METHOD": 354,
-                      "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 111, "TYPED": 5,
+  "call_edges": 4261,
+  "call_sites": 5642,
+  "edge_confidence": {"EXTERNAL": 2252, "INHERITED": 615, "BUILTIN": 485, "SELF-METHOD": 373,
+                      "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 115, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1390,
-  "could_have_been_resolved": 1501,
-  "resolution_rate": 0.926
+  "resolved_to_one_def": 1409,
+  "could_have_been_resolved": 1524,
+  "resolution_rate": 0.925
 }
 ```
 
-That 0.926 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.925 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
@@ -417,7 +417,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 534 more. Grouped, because a list of every one of them stopped being
+The test suite adds 542 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
@@ -469,6 +469,22 @@ A scrub that has never failed is not evidence that a tree is clean.
 A test file that proves a key is caught has to contain a key, so those lines are exempted one
 at a time, in the source, and `--quiet`'s companion `--fixtures` lists every one of them — a
 whole-file exemption would have meant a real key in a test goes unseen for ever.
+
+**It runs before the commit exists, which is the only cheap moment.** The cleanup here was done
+twice. Both times the tree had been scrubbed by reading it and the reading passed. The second
+one cost a history rewrite, a force-push, and then deleting and recreating the repository —
+because a rewrite does not make the host forget: the orphaned objects stay fetchable by id, and
+a repository going public serves them to anyone who asks. So `.githooks/pre-commit` scans the
+staged tree and `.githooks/commit-msg` scans the message, and both refuse rather than report.
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Eight tests cover them, including the control that an ordinary commit still goes through — a
+guard that blocks everything gets deleted the first week — and the named escape hatch,
+`CODEGRAPH_ALLOW_PRIVATE=1`, because a guard with no way past it gets deleted the first time it
+is wrong.
 
 ## Licence
 

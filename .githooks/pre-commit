@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Refuse a commit that would put something private into this repository.
+#
+# This exists because the cleanup has now been done TWICE. Both times the tree was scrubbed by
+# reading it, both times the reading passed, and both times something private was already sitting
+# in a committed file. The second cleanup cost a full history rewrite, a force-push, and then a
+# delete-and-recreate of the repository - because a rewrite does not make the host forget: the
+# orphaned blobs stayed fetchable by SHA, and a private repository going public would have served
+# them to anyone who asked.
+#
+# The lesson is not "scrub harder". It is that the only cheap moment is before the commit exists.
+# After that every remedy is expensive and none of them is complete.
+#
+# So: the same scan the test suite runs, on the tree as it will be committed, refusing rather
+# than reporting. It costs well under a second.
+#
+# Install:   git config core.hooksPath .githooks
+# Skip once: CODEGRAPH_ALLOW_PRIVATE=1 git commit ...
+#            - and if you ever type that, write down why, because the next person to see this
+#              file will be reading it after something got out.
+set -e
+
+[ -n "$CODEGRAPH_ALLOW_PRIVATE" ] && exit 0
+
+root=$(git rev-parse --show-toplevel)
+
+# The STAGED content, not the working tree. They differ whenever something is half-committed,
+# and it is the staged version that is about to become a permanent object.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+git checkout-index -a -f --prefix="$tmp/"
+
+# Carry the deny list and the scanner over, then scan the staged copy as a plain directory.
+if ! python3 - "$root" "$tmp" <<'PY'
+import subprocess
+import sys
+import os
+
+root, staged = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(root, "tools"))
+try:
+    import scrub
+except ImportError:
+    sys.exit(0)                      # the scanner is not in this tree; nothing to enforce
+
+hits = []
+denied = scrub._denied_hashes()
+for dirpath, dirnames, filenames in os.walk(staged):
+    dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__")]
+    for fn in filenames:
+        if fn.endswith(scrub._SKIP_SUFFIX):
+            continue
+        full = os.path.join(dirpath, fn)
+        rel = os.path.relpath(full, staged)
+        try:
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        scrub._scan_text(rel, text, denied, hits)
+
+if hits:
+    for where, line_no, label, found in hits:
+        print(f"  {where}:{line_no}  {label}: {found}", file=sys.stderr)
+    print(f"\n{len(hits)} thing(s) that must not be committed. Nothing has been committed.",
+          file=sys.stderr)
+    print("Fix them, or mark a deliberate test fixture with the comment "
+          "'scrub: fixture' on that line.", file=sys.stderr)
+    sys.exit(1)
+PY
+then
+    exit 1
+fi

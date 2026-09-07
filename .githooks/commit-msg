@@ -21,6 +21,33 @@ set -e
 
 [ -n "$CODEGRAPH_ALLOW_UTF8" ] && exit 0
 
+# A message is published as loudly as a file, and is the harder half to take back. The same
+# scan the pre-commit hook runs on the tree runs here on the text about to be recorded - one
+# private word in one message is what forced the second cleanup of this repository.
+if [ -z "$CODEGRAPH_ALLOW_PRIVATE" ]; then
+  python3 - "$1" "$(git rev-parse --show-toplevel)" <<'SCRUB' || exit 1
+import os
+import sys
+
+msg_path, root = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(root, "tools"))
+try:
+    import scrub
+except ImportError:
+    sys.exit(0)
+with open(msg_path, encoding="utf-8", errors="replace") as fh:
+    body = fh.read()
+hits = scrub._scan_text("the commit message", body, scrub._denied_hashes(), [])
+if hits:
+    for where, line_no, label, found in hits:
+        print(f"  {where}, line {line_no}: {label}: {found}", file=sys.stderr)
+    print("\nNothing has been committed. A commit message cannot be corrected later "
+          "without\nrewriting history, and that leaves the old one fetchable anyway.",
+          file=sys.stderr)
+    sys.exit(1)
+SCRUB
+fi
+
 exec python3 - "$1" <<'PY'
 import sys
 
