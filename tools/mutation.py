@@ -177,17 +177,45 @@ def _on_signal(signum, _frame):
     sys.exit(128 + signum)
 
 
-def clean_tree():
+def clean_tree(target=None):
+    """Whether git can restore the file about to be rewritten, and whether it needs to.
+
+    Three answers, not two - which is the bug this replaced. It used to ask about codegraph.py
+    by name and return a bare False for anything git complained about, so a file OUTSIDE the
+    repository came back as "has uncommitted changes". That is not what happened. The file has
+    no uncommitted changes; git has never heard of it, and the run would be unrecoverable for
+    a completely different reason. Telling somebody to commit a file git does not track sends
+    them somewhere there is nothing to find.
+
+    Returns "clean", "dirty", or "untracked".
+    """
     git = shutil.which("git") or "git"
-    r = subprocess.run([git, "status", "--porcelain", "--", "codegraph.py"],
+    rel = os.path.relpath(target or TARGET, ROOT)
+    r = subprocess.run([git, "status", "--porcelain", "--", rel],
                        cwd=ROOT, capture_output=True, text=True)
-    return r.returncode == 0 and not r.stdout.strip()
+    if r.returncode != 0:
+        return "untracked"
+    if r.stdout.strip():
+        return "dirty"
+    return "clean"
 
 
 def main(argv):
     if any(a in ("-h", "--help") for a in argv):
         print(__doc__.strip())
         return 0
+    # Which file to break. It was codegraph.py and nothing else, which left every tool in
+    # tools/ untested by the one check here that can prove a test suite has teeth - including
+    # the scrub, which is the thing standing between a private word and a public repository.
+    target = TARGET
+    if "--target" in argv:
+        i = argv.index("--target")
+        if i + 1 >= len(argv):
+            sys.exit("--target needs a path")
+        target = os.path.abspath(argv[i + 1])
+        if not os.path.isfile(target):
+            sys.exit(f"no such file: {target}")
+        argv = argv[:i] + argv[i + 2:]
     try:
         want = int(argv[0]) if argv else 60
         seed = int(argv[1]) if len(argv) > 1 else 0
@@ -195,29 +223,38 @@ def main(argv):
     except ValueError:
         # It used to raise the ValueError itself, so `--help` - the first thing anybody types
         # at an unfamiliar script - answered with a traceback out of int().
-        sys.exit(f"usage: mutation.py [count] [seed] [start]   whole numbers; got {' '.join(argv)!r}\n"
+        sys.exit(f"usage: mutation.py [count] [seed] [start] [--target FILE]\n"
+                 f"       count/seed/start are whole numbers; got {' '.join(argv)!r}\n"
                  f"       mutation.py --help                    what this does and why")
     if want < 1:
         sys.exit("a run of no mutations proves nothing")
-    marker_path = os.path.join(os.path.dirname(TARGET), ".mutation-running")
+    rel = os.path.relpath(target, ROOT)
+    marker_path = os.path.join(os.path.dirname(target), ".mutation-running")
     if os.path.exists(marker_path):
         # Say what happened, rather than leaving "commit or stash" to be read as advice about
         # work somebody did themselves.
         with open(marker_path, encoding="utf-8") as fh:
             where = fh.readline().strip()
-        sys.exit(f"a previous run was killed before it could put codegraph.py back.\n"
+        sys.exit(f"a previous run was killed before it could put "
+                 f"{rel} back.\n"
                  f"  the file on disk is a mutated, comment-stripped rewrite of the real one\n"
-                 f"  restore it:  git checkout -- codegraph.py\n"
+                 f"  restore it:  git checkout -- {rel}\n"
                  f"  or from:     {where}\n"
                  f"  then remove: {marker_path}")
-    if not clean_tree():
-        sys.exit("codegraph.py has uncommitted changes - commit or stash them first, because "
+    state = clean_tree(target)
+    if state == "dirty":
+        sys.exit(f"{rel} has uncommitted changes - commit or stash them first, because "
                  "this rewrites the file and an interrupted run would be hard to tell apart")
-    with open(TARGET, encoding="utf-8") as fh:
+    if state == "untracked":
+        sys.exit(f"{target} is not in this repository, so git could not put it back.\n"
+                 f"  this rewrites the file in place and restores it at the end; if the run is\n"
+                 f"  killed, `git checkout` is the recovery, and there is none for a file git\n"
+                 f"  has never seen. Copy it into the tree and commit it first.")
+    with open(target, encoding="utf-8") as fh:
         text = fh.read()
     before = hashlib.sha256(text.encode()).hexdigest()
     backup = os.path.join(tempfile.mkdtemp(), "codegraph.py")
-    shutil.copy(TARGET, backup)
+    shutil.copy(target, backup)
 
     every = list(candidates(ast.parse(text)))
     random.seed(seed)
@@ -244,7 +281,7 @@ def main(argv):
     # beside the backup, several exits higher up, so `mutation.py 10 0 99` - which does nothing
     # at all - left the breadcrumb behind and the next run reported a crash that never
     # happened. A marker for "this is in progress" has to be created where the progress does.
-    marker = os.path.join(os.path.dirname(TARGET), ".mutation-running")
+    marker = os.path.join(os.path.dirname(target), ".mutation-running")
     with open(marker, "w", encoding="utf-8") as fh:
         fh.write(f"{backup}\n{before}\n")
     for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -260,7 +297,7 @@ def main(argv):
                 code = ast.unparse(ast.fix_missing_locations(changed))
             except Exception:
                 continue                      # an unparseable mutation is not a mutation
-            with open(TARGET, "w", encoding="utf-8") as fh:
+            with open(target, "w", encoding="utf-8") as fh:
                 fh.write(code)
             # A short leash. The suite runs in about eight seconds, and some mutations do not
             # make it FAIL - they make it never finish. Flip the comparison that ends a `while`
@@ -291,8 +328,8 @@ def main(argv):
     finally:
         with contextlib.suppress(OSError):
             os.remove(marker)
-        shutil.copy(backup, TARGET)
-        with open(TARGET, encoding="utf-8") as fh:
+        shutil.copy(backup, target)
+        with open(target, encoding="utf-8") as fh:
             after = hashlib.sha256(fh.read().encode()).hexdigest()
         if after != before:
             sys.exit(f"codegraph.py was NOT restored - put it back from {backup}")

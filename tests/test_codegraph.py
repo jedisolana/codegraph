@@ -7013,3 +7013,70 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         self.assertTrue(mode & _stat.S_IXUSR, "the owner cannot run the hook, so it will not run")
         self.assertFalse(mode & _stat.S_IXGRP, "the group does not need to run it")
         self.assertFalse(mode & _stat.S_IXOTH, "everybody does not need to run it")
+
+
+class TheMutationHarnessCanBeAimed(unittest.TestCase):
+    """It could only ever break codegraph.py, which left every tool in tools/ untested by the
+    one check here that can prove a suite has teeth - including the scrub, which is the thing
+    standing between a private word and a public repository.
+
+    Aiming it somewhere else turned two hardcoded filenames into lies: the clean-tree guard
+    asked git about codegraph.py while the run rewrote a different file, and the recovery
+    message - the one that only ever prints after something has already gone wrong - referred
+    to a name that was no longer in scope. A broken error path is worse than none, because it
+    replaces a bad situation with a traceback.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, "tools"))
+        import mutation
+        self.mutation = mutation
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.target = os.path.join(self.dir, "thing.py")
+        with open(self.target, "w", encoding="utf-8") as fh:
+            fh.write("def f(a):\n    return a > 1\n")
+
+    def run_main(self, argv):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            try:
+                code = self.mutation.main(argv)
+            except SystemExit as e:
+                return None, str(e.code), out.getvalue()
+        return code, "", out.getvalue()
+
+    def test_a_missing_target_is_refused_by_name(self):
+        _c, err, _o = self.run_main(["10", "0", "--target", os.path.join(self.dir, "gone.py")])
+        self.assertIn("no such file", err)
+
+    def test_the_flag_needs_a_path(self):
+        _c, err, _o = self.run_main(["10", "0", "--target"])
+        self.assertIn("needs a path", err)
+
+    def test_the_recovery_message_names_the_file_it_actually_broke(self):
+        """It said codegraph.py whatever was aimed at, and the line telling you how to restore
+        it referred to a variable that did not exist in that scope at all."""
+        with open(os.path.join(self.dir, ".mutation-running"), "w", encoding="utf-8") as fh:
+            fh.write("/somewhere/backup.py\n")
+        _c, err, _o = self.run_main(["10", "0", "--target", self.target])
+        self.assertIn("thing.py", err, "it named the wrong file")
+        self.assertNotIn("codegraph.py", err)
+        self.assertIn("git checkout --", err)
+
+    def test_the_clean_tree_guard_asks_about_the_chosen_file(self):
+        """It asked git about codegraph.py by name, so a dirty target would have been rewritten
+        while a clean codegraph.py said everything was fine."""
+        import inspect
+        src = inspect.getsource(self.mutation.clean_tree)
+        self.assertNotIn('"codegraph.py"', src,
+                         "the guard still names one file rather than the one being rewritten")
+        self.assertEqual(self.mutation.clean_tree(self.target), "untracked",
+                         "a file git has never heard of is not a file with uncommitted changes")
+        self.assertEqual(self.mutation.clean_tree(os.path.join(HERE, "codegraph.py")), "clean")
+
+    def test_a_file_outside_the_repository_is_refused_for_the_real_reason(self):
+        """It said "has uncommitted changes", which was false and sent you to commit a file git
+        does not track. The actual problem is that there is no way to restore it."""
+        _c, err, _o = self.run_main(["10", "0", "--target", self.target])
+        self.assertIn("not in this repository", err)
+        self.assertNotIn("uncommitted changes", err)
