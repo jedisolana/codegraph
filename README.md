@@ -451,9 +451,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 954 mutations.** The last full pass killed all 947 the file admitted then,
-with no survivors; the file has changed since, so that result is stated as what it covered
-rather than restated as though it covered this one. A full pass is hours of work, so it is run deliberately
+**The file admits 954 mutations. A full pass killed every one of them, with no survivors.**
+Against this exact file — the pass is re-run whenever it changes, because a result about an
+older version of a file is not a result about this one. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
