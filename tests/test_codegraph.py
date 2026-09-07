@@ -7301,15 +7301,14 @@ class WhatAmIAboutToBreak(Sandbox):
 
         The fix is what the @@ counts are actually for: they say how long the body is, so a
         line inside it is content whatever it starts with."""
-        self.write("app.py", "x = 1\ny = 2\n")
-        g = self.graph()
+        # No graph needed: this is about the parser, and building one would be setup that
+        # proves nothing.
         d = ("--- a/app.py\n+++ b/app.py\n@@ -0,0 +1,2 @@\n"
              "+++ this is content, not a header\n"
              "+x = 1\n")
         self.assertEqual(codegraph._diff_lines(d), {"app.py": {1, 2}})
 
     def test_a_deletion_line_that_looks_like_a_header_is_not_one_either(self):
-        self.write("app.py", "x = 1\n")
         d = ("--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,1 @@\n"
              "--- this was content\n"
              " x = 1\n")
@@ -7323,3 +7322,34 @@ class WhatAmIAboutToBreak(Sandbox):
     def test_a_new_file_is_read(self):
         d = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+def f():\n+    return 1\n"
         self.assertEqual(codegraph._diff_lines(d), {"new.py": {1, 2}})
+
+    def test_a_changed_decorator_belongs_to_the_function_it_decorates(self):
+        """`@app.route("/pay")` is the most consequential line in a web handler, and editing it
+        was reported as a module-level risk - alarming, and less useful than naming the
+        function. A decorator sits ABOVE the def, so a range starting at the def missed it."""
+        self.write("app.py",
+                   "def register(f):\n    return f\n\n"
+                   "@register\n"                       # 4
+                   "def handler():\n"                  # 5
+                   "    return 1\n"                    # 6
+                   "\n"
+                   "def caller():\n    return handler()\n")
+        g = self.graph()
+        got = codegraph.changed(g, self.diff("app.py", 4), root=self.dir)
+        self.assertEqual([t["id"] for t in got["touched"]], ["app.handler"])
+        self.assertEqual(got["module_level"], [])
+        self.assertEqual(got["touched"][0]["callers"], ["app.caller"])
+
+    def test_the_line_above_a_decorator_is_still_module_level(self):
+        """The control: widening the range must not swallow the code above it."""
+        self.write("app.py",
+                   "CONSTANT = 1\n"                    # 1
+                   "\n"
+                   "def register(f):\n    return f\n"
+                   "\n"
+                   "@register\n"
+                   "def handler():\n    return 1\n")
+        g = self.graph()
+        got = codegraph.changed(g, self.diff("app.py", 1), root=self.dir)
+        self.assertEqual(got["touched"], [])
+        self.assertEqual(got["module_level"], ["app.py:1"])

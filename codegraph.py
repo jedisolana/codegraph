@@ -2596,6 +2596,12 @@ def _enclosing_def(path, lines):
     Innermost, so a change inside a nested helper is attributed to the helper rather than to
     everything it happens to sit inside. A line that no function contains is left out - module
     level is a different answer, not a missing one.
+
+    The range starts at the first DECORATOR, not at the `def`. `@app.route("/pay")` is the most
+    consequential line in a web handler and it sits above the def, so a range that began at the
+    def called editing it a module-level risk: alarming, and less useful than naming the
+    function it belongs to. The node itself still reports the `def` line, which is what
+    somebody wants to open.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -2607,11 +2613,14 @@ def _enclosing_def(path, lines):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         end = getattr(node, "end_lineno", None) or node.lineno
+        start = min([node.lineno] + [d.lineno for d in node.decorator_list
+                                     if hasattr(d, "lineno")])
         for ln in lines:
-            if node.lineno <= ln <= end:
+            if start <= ln <= end:
                 prev = found.get(ln)
                 # A later, deeper definition wins: both enclose the line, and the one that
-                # starts last is the one written closest to it.
+                # starts last is the one written closest to it. Compared on the DEF line, which
+                # is what gets stored - two nested defs cannot share one.
                 if prev is None or node.lineno > prev:
                     found[ln] = node.lineno
     return found
