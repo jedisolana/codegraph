@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jedi-codegraph"
 version = "0.1.0"
-description = "Ask your Python codebase who calls what, and what breaks if you change it. One stdlib file, no dependencies."
+description = "Before you change a Python function, see what else breaks. One file, no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
