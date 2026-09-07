@@ -7292,3 +7292,34 @@ class WhatAmIAboutToBreak(Sandbox):
         self.assertEqual(codegraph._ranges([1, 2, 3, 7, 9, 10]), "1-3, 7, 9-10")
         self.assertEqual(codegraph._ranges([5]), "5")
         self.assertEqual(codegraph._ranges([]), "")
+
+    def test_a_line_of_content_that_looks_like_a_header_is_not_one(self):
+        """An added line whose content begins with `++` renders as `+++ ...`, which the parser
+        read as a new file header - so it threw away everything and answered nothing. Diff a
+        patch file, a stored diff, or documentation that contains a diff example, and this is
+        the ordinary case rather than a strange one.
+
+        The fix is what the @@ counts are actually for: they say how long the body is, so a
+        line inside it is content whatever it starts with."""
+        self.write("app.py", "x = 1\ny = 2\n")
+        g = self.graph()
+        d = ("--- a/app.py\n+++ b/app.py\n@@ -0,0 +1,2 @@\n"
+             "+++ this is content, not a header\n"
+             "+x = 1\n")
+        self.assertEqual(codegraph._diff_lines(d), {"app.py": {1, 2}})
+
+    def test_a_deletion_line_that_looks_like_a_header_is_not_one_either(self):
+        self.write("app.py", "x = 1\n")
+        d = ("--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,1 @@\n"
+             "--- this was content\n"
+             " x = 1\n")
+        self.assertEqual(codegraph._diff_lines(d), {})
+
+    def test_two_files_in_one_diff_stay_apart(self):
+        d = ("--- a/one.py\n+++ b/one.py\n@@ -0,0 +1,1 @@\n+a = 1\n"
+             "--- a/two.py\n+++ b/two.py\n@@ -0,0 +1,1 @@\n+b = 2\n")
+        self.assertEqual(codegraph._diff_lines(d), {"one.py": {1}, "two.py": {1}})
+
+    def test_a_new_file_is_read(self):
+        d = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+def f():\n+    return 1\n"
+        self.assertEqual(codegraph._diff_lines(d), {"new.py": {1, 2}})

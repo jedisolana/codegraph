@@ -149,13 +149,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4490,
-  "call_sites": 5956,
-  "edge_confidence": {"EXTERNAL": 2387, "INHERITED": 625, "BUILTIN": 507, "SELF-METHOD": 400,
-                      "QUALIFIED": 286, "LOCAL": 151, "UNTYPED": 126, "TYPED": 5,
+  "call_edges": 4501,
+  "call_sites": 5973,
+  "edge_confidence": {"EXTERNAL": 2391, "INHERITED": 628, "BUILTIN": 507, "SELF-METHOD": 400,
+                      "QUALIFIED": 290, "LOCAL": 151, "UNTYPED": 126, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1470,
-  "could_have_been_resolved": 1596,
+  "resolved_to_one_def": 1477,
+  "could_have_been_resolved": 1603,
   "resolution_rate": 0.921
 }
 ```
@@ -441,7 +441,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 931 mutations.** The last full pass killed all 867 the file admitted then,
+**The file admits 947 mutations.** The last full pass killed all 867 the file admitted then,
 with no survivors, and the file has grown since — so that result is stated as what it covered
 rather than restated as though it covered this one. A result about an older version of a file
 is not a result about this one, and re-running is how the claim gets made again. A full pass is hours of work, so it is run deliberately
@@ -487,7 +487,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 567 more. Grouped, because a list of every one of them stopped being
+The test suite adds 571 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

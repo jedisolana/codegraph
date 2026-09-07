@@ -2531,7 +2531,29 @@ def _diff_lines(diff):
     by something else, because all of them are this format.
     """
     out, path, ln = {}, None, None
+    old_left = new_left = 0                     # how much of the current hunk BODY is unread
     for line in diff.splitlines():
+        if old_left > 0 or new_left > 0:
+            # Inside a hunk body, and the counts in the @@ header say how long that is. A line
+            # here is CONTENT whatever it starts with: an added line reading `++ x` renders as
+            # `+++ x`, which the first version read as a file header and threw everything away.
+            # Diff a patch file, a stored diff, or documentation containing a diff example, and
+            # that is the ordinary case rather than a strange one.
+            if line.startswith("+"):
+                if ln is not None:
+                    out[path].add(ln)
+                    ln += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1                   # not in the new file; do not advance
+            elif line.startswith("\\"):
+                pass                            # "\ No newline at end of file"
+            else:
+                if ln is not None:
+                    ln += 1                     # context, including the empty line
+                old_left -= 1
+                new_left -= 1
+            continue
         if line.startswith("+++ "):
             p = line[4:].split("\t")[0].strip()
             ln = None
@@ -2557,15 +2579,14 @@ def _diff_lines(diff):
                 ln = None
                 continue                        # not a hunk header after all
             ln = start
-            _ = count                           # the header's span is not trusted; see above
-        elif path is not None and ln is not None:
-            if line.startswith("+"):
-                out[path].add(ln)
-                ln += 1
-            elif line.startswith("-") or line.startswith("\\"):
-                pass                            # not in the new file; do not advance
-            else:
-                ln += 1                         # a context line, including the empty one
+            new_left = count
+            # The old-file span, for knowing where the body ends. `@@ -12,3 +14,5 @@` - the
+            # second field, count optional and meaning one.
+            old_span = parts[1][1:].split(",") if parts[1].startswith("-") else ["0", "0"]
+            try:
+                old_left = int(old_span[1]) if len(old_span) > 1 else 1
+            except ValueError:
+                old_left = 0
     return {k: v for k, v in out.items() if v}
 
 
