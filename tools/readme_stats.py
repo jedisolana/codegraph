@@ -8,6 +8,11 @@ refreshing it a routine step rather than an event, and a routine step should be 
 
     python3 tools/readme_stats.py          # rewrite the block
     python3 tools/readme_stats.py --check  # report whether it is stale, change nothing
+
+It rewrites three things and nothing else: the json block, and the two sentences underneath
+that quote the resolution rate back in prose. Those move together on purpose - a block that
+updates while the paragraph beside it still says the old number is the failure this exists to
+prevent, not a smaller version of it.
 """
 import json
 import os
