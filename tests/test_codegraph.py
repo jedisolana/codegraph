@@ -3170,6 +3170,101 @@ class TheMutationCountInTheDocsIsReal(Sandbox):
         self.assertEqual(counts["README.md"], counts["CHANGELOG.md"])
 
 
+class ThePostCommitHookMovesTheZoneAndNothingElse(unittest.TestCase):
+    """It runs `git commit --amend` on every commit, and nothing had ever tested it.
+
+    The claim in its own header is the part that matters: only the offset changes, the epoch is
+    preserved, so nothing is backdated and history stays in order. A hook that amends commits
+    and gets that wrong rewrites time on every commit you make, quietly, and the damage is
+    already in the history by the time anyone looks.
+    """
+
+    HOOK = os.path.join(HERE, ".githooks", "post-commit")
+    BASH = shutil.which("bash")
+    GIT = shutil.which("git")
+
+    def setUp(self):
+        if not (self.BASH and self.GIT):
+            self.skipTest("needs bash and git")
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        def git(*a, **kw):
+            return subprocess.run([self.GIT, *a], cwd=self.dir, capture_output=True,
+                                  text=True, timeout=60, **kw)
+        self.git = git
+        git("init", "-q")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.dir, "a.txt"), "w") as f:
+            f.write("one\n")
+        git("add", "-A")
+        # a deliberately wrong zone to move away from
+        env = {**os.environ, "GIT_AUTHOR_DATE": "2021-06-07T12:00:00-0500",
+               "GIT_COMMITTER_DATE": "2021-06-07T12:00:00-0500"}
+        git("commit", "-q", "-m", "first", env=env)
+
+    def run_hook(self):
+        return subprocess.run([self.BASH, self.HOOK], cwd=self.dir, capture_output=True,
+                              text=True, timeout=120, env={**os.environ, "HOME": self.dir})
+
+    def test_the_offset_moves_and_the_instant_does_not(self):
+        before_epoch = self.git("log", "-1", "--format=%at").stdout.strip()
+        before_zone = self.git("log", "-1", "--format=%ai").stdout.strip().split()[-1]
+        self.run_hook()
+        after_epoch = self.git("log", "-1", "--format=%at").stdout.strip()
+        after_zone = self.git("log", "-1", "--format=%ai").stdout.strip().split()[-1]
+        self.assertEqual(before_epoch, after_epoch,
+                         "the hook moved the instant, not just the zone - this backdates history")
+        self.assertEqual(after_zone, "+0900", f"zone is {after_zone}, not the one it promises")
+        self.assertNotEqual(before_zone, after_zone, "the fixture did not start in another zone")
+
+    def test_the_commit_message_and_tree_survive_the_amend(self):
+        tree = self.git("log", "-1", "--format=%T").stdout.strip()
+        self.run_hook()
+        self.assertEqual(self.git("log", "-1", "--format=%s").stdout.strip(), "first")
+        self.assertEqual(self.git("log", "-1", "--format=%T").stdout.strip(), tree,
+                         "an amend that changes the tree is not a timestamp fix")
+
+    def test_it_terminates_when_git_is_the_one_running_it(self):
+        """The hook amends, and an amend fires the hook. Without something to stop the second
+        pass it calls itself for ever.
+
+        The first version of this test ran the hook by hand, twice, and asserted the result did
+        not move. It passed with the re-entry guard deleted, because invoking a hook directly is
+        not the situation the guard exists for - git has to be the one running it. A check that
+        cannot fail is not a check, so this one installs the hooks directory and lets git fire
+        it, which is the only way the recursion is reachable at all.
+
+        It guards the PAIR. There are two stops in that hook - an env marker set across the
+        amend, and a check that the zone is already right - and removing either one on its own
+        still terminates, because the other catches it. Remove both and git hangs, which is what
+        this test then reports. That is worth knowing: the redundancy is real, and neither half
+        can be tested by itself through observed behaviour.
+        """
+        self.git("config", "core.hooksPath", os.path.join(HERE, ".githooks"))
+        with open(os.path.join(self.dir, "b.txt"), "w") as f:
+            f.write("two\n")
+        self.git("add", "-A")
+        # 20s, not the default 60: when this fails it fails by hanging, and a minute of
+        # nothing is a minute somebody waits to be told the hook eats itself.
+        r = subprocess.run([self.GIT, "commit", "-q", "-m", "second"], cwd=self.dir,
+                           capture_output=True, text=True, timeout=20,
+                     env={**os.environ, "HOME": self.dir,
+                          "GIT_AUTHOR_DATE": "2021-06-08T12:00:00-0500",
+                          "GIT_COMMITTER_DATE": "2021-06-08T12:00:00-0500"})
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        zone = self.git("log", "-1", "--format=%ai").stdout.strip().split()[-1]
+        self.assertEqual(zone, "+0900", "git-driven commit did not get the zone")
+        self.assertEqual(self.git("log", "--format=%s").stdout.split(), ["second", "first"],
+                         "the amend loop left extra commits behind")
+
+    def test_the_escape_hatch_works(self):
+        before = self.git("log", "-1", "--format=%ai").stdout.strip()
+        subprocess.run([self.BASH, self.HOOK], cwd=self.dir, capture_output=True, text=True,
+                       timeout=120, env={**os.environ, "HOME": self.dir, "CODEGRAPH_NO_TZ": "1"})
+        self.assertEqual(self.git("log", "-1", "--format=%ai").stdout.strip(), before)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

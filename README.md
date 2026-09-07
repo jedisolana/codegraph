@@ -115,18 +115,18 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3848,
-  "call_sites": 5118,
-  "edge_confidence": {"EXTERNAL": 2059, "INHERITED": 603, "BUILTIN": 446, "SELF-METHOD": 299,
-                      "QUALIFIED": 260, "LOCAL": 123, "UNTYPED": 50, "TYPED": 5,
+  "call_edges": 3880,
+  "call_sites": 5179,
+  "edge_confidence": {"EXTERNAL": 2080, "INHERITED": 603, "BUILTIN": 448, "SELF-METHOD": 301,
+                      "QUALIFIED": 260, "LOCAL": 124, "UNTYPED": 56, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1293,
-  "could_have_been_resolved": 1343,
-  "resolution_rate": 0.963
+  "resolved_to_one_def": 1296,
+  "could_have_been_resolved": 1352,
+  "resolution_rate": 0.959
 }
 ```
 
-That 0.963 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.959 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 96%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -365,7 +365,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 492 more. Grouped, because a list of every one of them stopped being
+The test suite adds 496 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
