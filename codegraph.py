@@ -2810,10 +2810,30 @@ def unused(g):
     called = {e["dst"] for e in g["calls"] if e.get("dst")}
     mentioned = set(g.get("mentioned") or ())
     files = _files(g)
-    # A class whose base is not a class in this tree may be handed its methods by that base.
+    # A class whose base is not a class in this tree may be handed its methods by that base -
+    # and inheritance is transitive, so the question is too. `class Fake(server.Handler)` where
+    # `server.Handler(http.server.SimpleHTTPRequestHandler)` has a base that IS in the tree, so
+    # asking only about its own bases said it was not foreign, and every override of a method
+    # the external GRANDparent calls came back as reached by nothing.
     known = {n["name"] for n in g["nodes"] if n["kind"] == "class"}
-    foreign = {n["id"] for n in g["nodes"] if n["kind"] == "class"
-               and any(b.split(".")[-1] not in known for b in (n.get("bases") or ()))}
+    parents = {}
+    for n in g["nodes"]:
+        if n["kind"] == "class":
+            parents.setdefault(n["name"], set()).update(
+                b.split(".")[-1] for b in (n.get("bases") or ()))
+
+    def _inherits_from_outside(name, seen):
+        if name in seen:
+            return False                        # a cycle in the bases is expressible; stop
+        seen.add(name)
+        for base in parents.get(name, ()):
+            if base not in known or _inherits_from_outside(base, seen):
+                return True
+        return False
+
+    foreign_names = {nm for nm in parents if _inherits_from_outside(nm, set())}
+    foreign = {n["id"] for n in g["nodes"]
+               if n["kind"] == "class" and n["name"] in foreign_names}
     out = []
     for n in g["nodes"]:
         if n["kind"] != "func" or n["id"] in called:

@@ -7478,3 +7478,51 @@ class UnittestRunsTestFooNotJustTestUnderscoreFoo(Sandbox):
             any(p == _u.TestLoader().testMethodPrefix for p in codegraph._DISPATCHED_PREFIX),
             f"unittest collects {_u.TestLoader().testMethodPrefix!r}; "
             f"this checks {codegraph._DISPATCHED_PREFIX}")
+
+
+class AnInheritedInterfaceCanBeTwoLevelsUp(Sandbox):
+    """The reason "inherited interface" asked only about a class's OWN bases.
+
+    `class Fake(server.Handler)` where `server.Handler(http.server.SimpleHTTPRequestHandler)`:
+    the declared base IS in the tree, so the class did not look foreign, and every override of
+    a method the external grandparent calls - send_response, end_headers, log_message - was
+    offered as reached by nothing. Found on a real repository, on overrides written an hour
+    earlier in this session.
+
+    Inheritance is transitive and the question is too: does ANY ancestor come from outside the
+    scanned roots.
+    """
+
+    def rows(self):
+        return {i: why for i, _w, why in codegraph.unused(self.graph())}
+
+    def test_a_grandparent_outside_the_tree_still_counts(self):
+        self.write("app.py", "import http.server\n"
+                             "class Mine(http.server.BaseHTTPRequestHandler):\n"
+                             "    def do_GET(self):\n        pass\n")
+        self.write("t.py", "import app\n"
+                           "class Fake(app.Mine):\n"
+                           "    def end_headers(self):\n        pass\n")
+        r = self.rows()
+        self.assertTrue(r["app.Mine.do_GET"], "the direct case, which already worked")
+        self.assertTrue(r["t.Fake.end_headers"],
+                        "its base is in the tree, but ITS base is not - the interface is still "
+                        "inherited from outside")
+
+    def test_a_tree_that_is_foreign_nowhere_still_reports(self):
+        """The control: if every ancestor is in the tree, nothing is excused by this rule and a
+        method nothing calls is still the finding."""
+        self.write("app.py", "class Root:\n    def r(self):\n        pass\n")
+        self.write("t.py", "import app\n"
+                           "class Mid(app.Root):\n    pass\n"
+                           "class Leaf(Mid):\n"
+                           "    def nobody_calls_me(self):\n        pass\n")
+        r = self.rows()
+        self.assertFalse(r["t.Leaf.nobody_calls_me"],
+                         "every ancestor is in the tree, so nothing here is an outside interface")
+
+    def test_a_cycle_in_the_bases_does_not_hang_it(self):
+        """Expressible, even though it would not import."""
+        self.write("app.py", "class A(B):\n    def m(self):\n        pass\n"
+                             "class B(A):\n    pass\n")
+        self.rows()          # the assertion is that this returns at all
