@@ -28,10 +28,22 @@ jobs:
         python: ["3.9", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the history scrub below reads every commit, so it needs them
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       # No dependencies to install - it is the standard library and nothing else.
+      - name: nothing private, in the tree OR in the history
+        # The tree half runs in the suite already. This is the other half, and it exists
+        # because fixing a file is not fixing the history: two private words were written into
+        # a docstring as EXAMPLES of what to keep out, caught by the tree scan, removed from
+        # the file - and left in every earlier version of it, where anyone could read them with
+        # one command. That went unnoticed until somebody went looking weeks later. A check
+        # nobody runs is not a check, so it runs on every push now.
+        run: python tools/scrub.py --history
+
       - name: lint
         run: |
           pip install ruff

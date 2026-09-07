@@ -7630,3 +7630,17 @@ class ADeclaredReturnTypeIsTheSourceSayingSo(Sandbox):
                              "    c = other\n"
                              "    return c.go()\n")
         self.assertIsNone(self.edge(self.graph()).get("dst"))
+
+    def test_the_history_scrub_runs_on_every_push(self):
+        """It was wired only to the publish workflow, which runs on a tag. So a private word
+        written into a file, caught by the tree scan and removed from the file, sat in every
+        earlier version of it for as long as nobody cut a release - and that is exactly what
+        happened: two of them went unnoticed until somebody went looking, weeks of commits
+        later. Fixing a file is not fixing the history, and a check that runs rarely finds
+        things late."""
+        with open(os.path.join(HERE, ".github", "workflows", "tests.yml"), encoding="utf-8") as fh:
+            wf = fh.read()
+        self.assertIn("scrub.py --history", wf,
+                      "the history scrub must run on every push, not only on a release")
+        self.assertIn("fetch-depth: 0", wf,
+                      "it reads every commit, so a shallow checkout would make it pass blind")

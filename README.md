@@ -149,14 +149,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4633,
-  "call_sites": 6171,
-  "edge_confidence": {"EXTERNAL": 2463, "INHERITED": 657, "BUILTIN": 512, "SELF-METHOD": 418,
-                      "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 126, "TYPED": 5,
+  "call_edges": 4637,
+  "call_sites": 6176,
+  "edge_confidence": {"EXTERNAL": 2465, "INHERITED": 657, "BUILTIN": 513, "SELF-METHOD": 418,
+                      "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 127, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1532,
-  "could_have_been_resolved": 1658,
-  "resolution_rate": 0.924
+  "could_have_been_resolved": 1659,
+  "resolution_rate": 0.923
 }
 ```
 
@@ -167,7 +167,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.924 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.923 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -498,7 +498,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 592 more. Grouped, because a list of every one of them stopped being
+The test suite adds 593 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
@@ -551,6 +551,13 @@ A scrub that has never failed is not evidence that a tree is clean.
 A test file that proves a key is caught has to contain a key, so those lines are exempted one
 at a time, in the source, and `--quiet`'s companion `--fixtures` lists every one of them — a
 whole-file exemption would have meant a real key in a test goes unseen for ever.
+
+**And `--history` runs on every push, not only on a release.** It was wired to the publish
+workflow alone, so two private words written into a docstring as *examples of what to keep out*
+were caught by the tree scan, removed from the file, and left in every earlier version of it —
+where anyone could read them with one command. Nobody noticed until somebody went looking,
+weeks of commits later. Fixing a file is not fixing the history, and a check that runs rarely
+finds things late.
 
 **It runs before the commit exists, which is the only cheap moment.** The cleanup here was done
 twice. Both times the tree had been scrubbed by reading it and the reading passed. The second
