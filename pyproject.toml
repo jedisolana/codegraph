@@ -54,4 +54,9 @@ ignore = ["E501", "E741", "E701", "E702", "E731", "RUF005", "SIM108"]
 "tests/*" = ["S102", "S103", "S603", "S607"]
 # The mutation harness runs the suite as a subprocess and swallows the parse failures of
 # mutations that do not unparse; both are the job, not an oversight.
-"tools/*" = ["S112", "S603"]
+# S607 (a partial executable path): the scrub tool shells out to `git`, found on PATH, which
+# is how every tool that wraps git finds it - pinning an absolute path would break the moment
+# somebody uses a different install, and the alternative the rule wants is not available here.
+# S103 (a permissive mask): a git hook that is not 0o755 does not run, and a hook that silently
+# does not run is the exact failure the hooks exist to prevent.
+"tools/*" = ["S112", "S603", "S607", "S103"]

@@ -125,6 +125,10 @@ def historical_blobs(root=HERE):
         parts = ln.split(" ", 1)
         if len(parts) == 2:
             named.setdefault(parts[0], parts[1])
+    # A blob no ref reaches is local-only: `git add` writes the object even when the commit is
+    # then refused, so a hook doing its job leaves one behind. A push never sends it and the
+    # fix is `git gc --prune=now`, not a history rewrite - which is worth saying, because the
+    # two look identical in a list and one of them is an afternoon.
     for h in blobs:
         blob = subprocess.run(["git", "-C", root, "cat-file", "blob", h],
                               capture_output=True, check=False)
@@ -199,7 +203,9 @@ def scan(root=HERE, history=True):
         for path, short, text in historical_blobs(root):
             if path in seen_here:
                 continue                  # the live version was read above; this is an old one
-            _scan_text(f"history {path} ({short})", text, denied, hits)
+            where = (f"history {path} ({short})" if path != short
+                     else f"UNREACHABLE object {short} - local only, `git gc --prune=now`")
+            _scan_text(where, text, denied, hits)
     return hits
 
 

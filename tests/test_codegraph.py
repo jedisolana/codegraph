@@ -26,8 +26,12 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "tools"))
 
-import codegraph
-import scrub
+# Below the path setup on purpose, which is what E402 is about: neither module is importable
+# until sys.path names the directory holding it, and this suite is run from a checkout rather
+# than an install. Moving them up would not be tidier, it would be an ImportError.
+import scrub  # noqa: E402
+
+import codegraph  # noqa: E402
 
 
 def samefile_key(path):
@@ -6964,3 +6968,19 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), ".githooks",
                          "the guards are not switched on here - "
                          "run: python3 tools/scrub.py --install-hooks")
+
+    def test_an_unreachable_object_is_named_as_local_only(self):
+        """`git add` writes the blob even when the commit is then refused, so a hook doing its
+        job leaves one behind. A push never sends it and `git gc` removes it - but in a list it
+        looks exactly like something welded into the history, and one of those is an afternoon
+        of rewriting. So the report says which."""
+        path = os.path.join(self.dir, "leak.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('X = "/home/someone"\n')                      # scrub: fixture
+        subprocess.run(["git", "-C", self.dir, "add", "leak.py"], check=True, capture_output=True)
+        os.remove(path)
+        subprocess.run(["git", "-C", self.dir, "reset", "-q"], check=True, capture_output=True)
+        hits = scrub.scan(self.dir, history=True)
+        self.assertTrue(hits, "the staged-then-abandoned blob is still in the object store")
+        self.assertTrue(any("UNREACHABLE" in w and "git gc" in w for w, _l, _lab, _f in hits),
+                        [w for w, _l, _lab, _f in hits])

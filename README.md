@@ -129,18 +129,18 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4271,
-  "call_sites": 5656,
-  "edge_confidence": {"EXTERNAL": 2262, "INHERITED": 615, "BUILTIN": 485, "SELF-METHOD": 373,
-                      "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 115, "TYPED": 5,
+  "call_edges": 4280,
+  "call_sites": 5668,
+  "edge_confidence": {"EXTERNAL": 2268, "INHERITED": 615, "BUILTIN": 487, "SELF-METHOD": 373,
+                      "QUALIFIED": 272, "LOCAL": 141, "UNTYPED": 116, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1409,
-  "could_have_been_resolved": 1524,
-  "resolution_rate": 0.925
+  "could_have_been_resolved": 1525,
+  "resolution_rate": 0.924
 }
 ```
 
-That 0.925 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.924 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -417,7 +417,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 543 more. Grouped, because a list of every one of them stopped being
+The test suite adds 544 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
@@ -486,7 +486,7 @@ them only when local config says so — and *present but not installed* is the s
 here has failed in. A test checks it is actually on, and skips on CI, where nothing is
 committed from.
 
-Nine tests cover them, including the control that an ordinary commit still goes through — a
+Ten tests cover them, including the control that an ordinary commit still goes through — a
 guard that blocks everything gets deleted the first week — and the named escape hatch,
 `CODEGRAPH_ALLOW_PRIVATE=1`, because a guard with no way past it gets deleted the first time it
 is wrong.
