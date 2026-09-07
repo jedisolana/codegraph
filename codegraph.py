@@ -24,7 +24,8 @@ same-named functions would be worse than no blast radius at all.
   codegraph deps <module>      a module's in-tree imports and importers
   codegraph cycles             import cycles of any length (refactor smells)
   codegraph symbols            every function and class defined here
-  codegraph unused             every definition nothing here calls - read the caveat
+  codegraph unused             definitions nothing calls AND nothing names
+  codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
   codegraph --selftest         32 ground-truth checks, several of them red-first
   codegraph --help             this text
@@ -62,7 +63,7 @@ OUT = os.environ.get("CODEGRAPH_OUT") or os.path.join(HOME, "codegraph.json")
 # unwritable in the first place - so the escape hatch this tool prints when a build fails did
 # not actually work. Advice that has not been run is not advice.
 CACHE = (os.environ.get("CODEGRAPH_CACHE")
-         or os.path.join(os.path.dirname(OUT) or ".", "codegraph.cache.json"))          # per-file parse cache keyed by path+mtime (incremental build)
+         or os.path.join(os.path.dirname(OUT) or ".", "codegraph.cache.json"))          # per-file parse cache keyed by path + content digest (incremental build)
 # The cache is namespaced by codegraph's OWN source hash: edit the parser and every stale parse
 # is invalidated, so a change here can never silently reuse yesterday's extraction.
 try:
@@ -261,6 +262,9 @@ def _defs_and_calls(path, mod):
         # a single awkward file is not a reason to refuse to analyse a codebase.
         raise Unparseable(f"{_say(path)}: could not read: {ex.strerror or ex}") from ex
     defs, edges, imports = [], [], []
+    refs = set()          # every name this file MENTIONS without calling: a callback
+                          # handed over, a dispatch table, an alias. Not a call, and
+                          # not nothing either - see `unused`.
     aliases, fromimp, fromorig = {}, {}, {}                                   # module aliases (name->module) and from-imports (name->module) for import-aware call resolution
     # One name imported from two different modules - the try/except ImportError idiom. A plain
     # dict keeps the LAST binding, which for that idiom is the FALLBACK: the tool named
@@ -738,6 +742,20 @@ def _defs_and_calls(path, mod):
                 left = right
             self.generic_visit(node)
 
+        def visit_Name(self, node):
+            """A name that is read but not called: `signal.signal(SIGINT, on_signal)`,
+            `CARDS = [_options_card]`, `visit_ListComp = _comp`.
+
+            Python reaches a function this way as surely as by calling it, and the tool had
+            no record of it at all - so `unused` called every callback and every table entry
+            dead. A call whose target could not be resolved is deliberately NOT a mention:
+            that is a different fact, and folding it in here would quietly shorten the one
+            list somebody reads to find real dead code.
+            """
+            if isinstance(node.ctx, ast.Load) and id(node) not in self._call_funcs:
+                refs.add(node.id)
+            self.generic_visit(node)
+
         def visit_Attribute(self, node):
             """Reading a property RUNS it, and writes no parentheses doing so.
 
@@ -753,6 +771,8 @@ def _defs_and_calls(path, mod):
             attribute is not a property at all. Edges that turn out not to point at a property
             are dropped once every definition is known.
             """
+            if isinstance(node.ctx, ast.Load) and id(node) not in self._call_funcs:
+                refs.add(node.attr)          # `obj.handler` in a table reaches `handler`
             if (isinstance(node.ctx, ast.Load) and self.owner
                     and id(node) not in self._call_funcs):
                 got = self._receiver_type(node.value)
@@ -767,7 +787,7 @@ def _defs_and_calls(path, mod):
 
         def visit_Call(self, node):
             fn = node.func
-            if isinstance(fn, ast.Attribute): self._call_funcs.add(id(fn))
+            if isinstance(fn, (ast.Attribute, ast.Name)): self._call_funcs.add(id(fn))
             recv = None; method = False
             recv_root = recv_path = None
             if isinstance(fn, ast.Name): callee = fn.id                          # a BARE call foo() - may be local/imported
@@ -910,7 +930,8 @@ def _defs_and_calls(path, mod):
         e["lines"] = sorted(set(e["lines"]))
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
     return (defs, list(seen.values()), imports, aliases, fromimp,
-            {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules)
+            {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules,
+            sorted(refs))
 
 
 # Two call edges are the same relationship only when they would resolve to the same place.
@@ -1188,7 +1209,7 @@ def build(dirs=None, write=True):
                     continue
                 seen_files[real] = (full, d, root)
     pairs = list(seen_files.values())                           # walk order, one entry per file
-    cache = {}                                                  # INCREMENTAL: reuse a file's parse when its mtime is unchanged (single-tree only; multiroot ids differ by mode so it parses fresh)
+    cache = {}                                                  # INCREMENTAL: reuse a file's parse when its bytes are unchanged (single-tree only; multiroot ids differ by mode so it parses fresh)
     if write and not multiroot:
         try:
             with open(CACHE, encoding="utf-8") as _fh:
@@ -1196,7 +1217,8 @@ def build(dirs=None, write=True):
             cache = _c.get("files", {}) if _c.get("_v") == _VERSION else {}   # discard the whole cache if codegraph's code changed (versioned namespace)
         except Exception: cache = {}
     nodes, calls, imports, unreadable = [], [], [], []
-    stamps = {}                                                  # path -> [mtime, size], the graph's own record of what it read
+    mentioned = set()            # every name the tree names without calling; see `unused`
+    stamps = {}                                                  # path -> [size, digest], the graph's own record of what it read
     mod_alias, mod_from, mod_root, mod_sub, mod_alt = {}, {}, {}, {}, {}
     mod_orig = {}                                                # local alias -> the name the module actually defines
     newcache = {}
@@ -1210,9 +1232,7 @@ def build(dirs=None, write=True):
                                                 # label, and `sites` was printing places that do
                                                 # not exist - or, worse, that do and are wrong.
         try:
-            _st = os.stat(path)
-            stamp = [_st.st_mtime, _st.st_size]        # SIZE as well as time: a restored file can
-                                                       # carry the timestamp it had before
+            os.stat(path)
         except OSError:
             # A DANGLING SYMLINK - a link left behind after a move, which every real repo
             # eventually has. os.walk lists it as a file and stat() then raises, which used to
@@ -1220,13 +1240,22 @@ def build(dirs=None, write=True):
             # to analyse a codebase; skip it and carry on.
             nodes.pop()                                          # drop the module node just added
             continue
-        stamps[path] = stamp
+        try:
+            stamp = _stamp(path)                       # size + a digest of the bytes; see _stamp
+        except OSError:
+            # THERE, and unreadable - a mode-000 file, a permissions mistake, a file held
+            # open elsewhere. Not the same as a dangling symlink, which is not a file at all.
+            # This one gets named in `unreadable` by the parser below, so it must not be
+            # dropped here; it just cannot be stamped, and so cannot be cached either.
+            stamp = None
+        else:
+            stamps[path] = stamp
         # POP, not get: this file's old parse is finished with the moment it is copied, and
         # the copy goes into newcache. Holding both tables whole is where a build peaks - the
         # entries are released one at a time now, so the old table shrinks as the new one grows
         # instead of the two standing at full size together.
         c = cache.pop(path, None)
-        if c and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
+        if c and stamp is not None and c.get("stamp") == stamp:                       # unchanged file -> reuse cached parse (deep-copied so resolution can't leak back into the cache)
             # A shallow copy PER EDGE, not a deep one. Resolution writes dst/confidence/
             # candidates onto these dicts, and those writes must not reach the cache that is
             # about to be written back - but every value it touches is a scalar, and the only
@@ -1236,19 +1265,19 @@ def build(dirs=None, write=True):
             d, e, im, al, fi = (c["defs"], [dict(x) for x in c["calls"]],
                                 c["imports"], c["aliases"], c["fromimp"])
             sub = c.get("submodules", {}); alt = c.get("fromalt", {})
-            orig = c.get("fromorig", {})
+            orig = c.get("fromorig", {}); mentions = c.get("refs", [])
         else:
             try:
-                d, e, im, al, fi, alt, orig, sub = _defs_and_calls(path, mid)
+                d, e, im, al, fi, alt, orig, sub, mentions = _defs_and_calls(path, mid)
             except Unparseable as ex:
                 unreadable.append(str(ex))
                 nodes.pop()                                      # not a module we can describe
                 continue
-        if not multiroot:
+        if not multiroot and stamp is not None:
             newcache[path] = {"stamp": stamp, "defs": d, "calls": [dict(x) for x in e], "imports": im,
                               "aliases": al, "fromimp": fi, "fromalt": alt,
-                              "fromorig": orig, "submodules": sub}
-        nodes += d; calls += e; imports += im
+                              "fromorig": orig, "submodules": sub, "refs": mentions}
+        nodes += d; calls += e; imports += im; mentioned.update(mentions)
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
         mod_alt[mid] = alt; mod_orig[mid] = orig
     # The cache read off disk has done its job: every file has either been reused from it or
@@ -1686,7 +1715,14 @@ def build(dirs=None, write=True):
     calls = [{k: e[k] for k in keep if k in e} for e in calls]
     graph = {"version": _VERSION,
              "nodes": nodes, "calls": calls, "imports": imports, "dirs": sorted(dirs),
+             "mentioned": sorted(mentioned),
              "sources": {p: stamps[p] for p in sorted(stamps)}, "unreadable": sorted(unreadable)}
+    # The counts, IN the file. They were printed by `stats` and stored nowhere, so anything
+    # reading the graph had to recompute them - and the first integration written against it
+    # read `func_defs` off the JSON, found nothing, and printed a confident zero. A gauge that
+    # reads zero rather than the truth is worse than no gauge. One line, and that whole class
+    # of bug goes away for everyone downstream.
+    graph["stats"] = stats(graph)
     if write:
         for target, what in ((CACHE, "cache"), (OUT, "graph")):
             try:
@@ -1989,13 +2025,37 @@ def _prune_dir(parent, name):
     return False
 
 
+def _stamp(path):
+    """What the graph records about a file it read: its size, and a digest of its bytes.
+
+    It used to be [mtime, size], and an edit can hold both of those still. Rename a function
+    to another of the same length and the size does not move; `git checkout`, `cp -p`,
+    `rsync -t` and a container layer all put the old timestamp back on purpose, and an
+    automated edit lands inside the same second anyway. The graph then went on answering
+    about a function that no longer existed and denying the one that did - with a success
+    code, and at the exact moment somebody was about to edit. That is the one failure this
+    tool cannot have.
+
+    So it reads the bytes. Reading every file in a tree costs about a twentieth of a second
+    where the parse costs three, and no arrangement of timestamps can defeat it. blake2b
+    rather than sha256 because nothing here is defending against an adversary - only against
+    a clock that did not move.
+    """
+    with open(path, "rb") as fh:                    # OSError here is a dangling symlink, and
+        b = fh.read()                               # both callers already skip those
+    return [len(b), hashlib.blake2b(b, digest_size=16).hexdigest()]
+
+
 def _is_stale(g):
     """True if the graph no longer describes what is on disk.
 
-    Newer files are only half of it. A file that was DELETED leaves every remaining mtime
-    untouched, so the mtime test alone said "fresh" and the graph went on answering about code
-    that no longer existed. The set of files is compared too, which catches additions and
-    deletions in the same pass.
+    Changed content is only half of it. A file that was DELETED leaves every other file
+    untouched, so a per-file test alone said "fresh" and the graph went on answering about
+    code that no longer existed. The set of files is compared too, which catches additions
+    and deletions in the same pass.
+
+    What is compared per file is `_stamp` - size and a digest - so an edit that holds the
+    clock still is not mistaken for no edit at all.
     """
     if g.get("version") != _VERSION:
         return True                            # a different codegraph built this; its answers
@@ -2011,7 +2071,7 @@ def _is_stale(g):
                 if not fn.endswith(".py"): continue
                 full = os.path.join(dp, fn)
                 try:
-                    st = os.stat(full)
+                    stamp = _stamp(full)
                 except OSError:
                     # A DANGLING SYMLINK, which every long-lived repo has one of. This used to
                     # return True - "something changed" - so a single broken link meant every
@@ -2019,12 +2079,12 @@ def _is_stale(g):
                     # skips these; the freshness check has to skip the same ones or the two
                     # disagree about what the tree even contains.
                     continue
-                seen[full] = [st.st_mtime, st.st_size]
-    # An exact comparison, not "is anything newer than the graph". A file restored from a
-    # backup, a checkout, cp -p, rsync -t or a container layer keeps the timestamp it had, so
-    # it lands OLDER than the graph while holding different code - and the old test called that
-    # fresh. The graph then answered about functions that no longer exist and denied ones that
-    # do, with a success code.
+                seen[full] = stamp
+    # An exact comparison of content, not of clocks. A file restored from a backup, a
+    # checkout, cp -p, rsync -t or a container layer keeps the timestamp it had, so it lands
+    # OLDER than the graph while holding different code - and a test built on timestamps
+    # called that fresh, whichever way round it was written. The graph then answered about
+    # functions that no longer exist and denied ones that do, with a success code.
     return seen != {k: list(v) for k, v in known.items()}
 
 
@@ -2467,23 +2527,67 @@ def symbols(g):
                   for n in g["nodes"] if n["kind"] in ("func", "class"))
 
 
-def unused(g):
-    """Every function definition nothing in this tree calls, as (id, file:line, called_by_python).
+# Names Python itself reaches without anyone writing the call: a test runner finds `test_*`
+# and its fixtures, an ast.NodeVisitor dispatches to `visit_*`, http.server calls `do_GET`,
+# and a callback convention gives you `on_*` and `handle_*`. Conventions, not language rules,
+# so this list is a reason to LABEL a name rather than to hide it.
+_DISPATCHED_EXACT = frozenset((
+    "setUp", "tearDown", "setUpClass", "tearDownClass", "setUpModule", "tearDownModule",
+    "runTest", "generic_visit", "main", "handle", "run",
+))
+_DISPATCHED_PREFIX = ("visit_", "test_", "do_", "on_", "handle_")
 
-    `stats` has counted these from the start and there was no way to SEE them, which made the
-    number useless: 332 of something you cannot list is not a finding. Checking a real
-    codebase's 44 by hand turned up zero dead functions - they were a dispatch table, names
-    reached from a web page, two handlers the standard library's HTTP server calls by name, and
-    a `__str__`. So the last field is a warning, not a verdict: a dunder is called BY PYTHON,
-    for you, and will always be here.
+
+def _dispatched_by_convention(name):
+    return name in _DISPATCHED_EXACT or name.startswith(_DISPATCHED_PREFIX)
+
+
+def unused(g):
+    """Every function definition nothing in this tree calls, each with the reason it is here.
+
+    This number used to be a lie by omission. Run against this repo's own source it named 577
+    of 734 functions, and not one of them was dead: 505 unittest test methods, 46 fixtures, 22
+    `visit_*` methods of its own AST walker, a callback handed to `signal.signal`, one handed
+    to `subprocess`, an alias assigned to four other names, and a `generic_visit` override.
+    Printed as a bare count in `stats`, that is a number somebody either deletes live code on
+    or stops believing - and both are worse than saying nothing.
+
+    So each row now carries WHY, which is the same honesty the edge labels already have:
+
+      ""                    nothing here calls it and nothing here names it. The finding.
+      "python calls this"   a dunder. Yours to write, Python's to call.
+      "named, not called"   the tree mentions the name without calling it - a dispatch table,
+                            a callback argument, an alias. Reached, just not written as a call.
+      "inherited interface" its class has a base this tree cannot see, so the method may be
+                            something that base calls: do_GET, generic_visit, setUp.
+      "looks dispatched"    the name follows a convention a framework dispatches on.
+
+    Nothing is filtered out. A shorter list would be a different lie.
     """
     called = {e["dst"] for e in g["calls"] if e.get("dst")}
+    mentioned = set(g.get("mentioned") or ())
     files = _files(g)
+    # A class whose base is not a class in this tree may be handed its methods by that base.
+    known = {n["name"] for n in g["nodes"] if n["kind"] == "class"}
+    foreign = {n["id"] for n in g["nodes"] if n["kind"] == "class"
+               and any(b.split(".")[-1] not in known for b in (n.get("bases") or ()))}
     out = []
     for n in g["nodes"]:
-        if n["kind"] == "func" and n["id"] not in called:
-            where_ = f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}"
-            out.append((n["id"], where_, n["name"].startswith("__") and n["name"].endswith("__")))
+        if n["kind"] != "func" or n["id"] in called:
+            continue
+        name = n["name"]
+        owner = n["id"].rsplit(".", 1)[0]
+        if name.startswith("__") and name.endswith("__"):
+            why = "python calls this"
+        elif name in mentioned:
+            why = "named, not called"
+        elif owner in foreign:
+            why = "inherited interface"
+        elif _dispatched_by_convention(name):
+            why = "looks dispatched"
+        else:
+            why = ""
+        out.append((n["id"], f"{files.get(n['module'], n['module'] + '.py')}:{n['line']}", why))
     return sorted(out)
 
 
@@ -2492,9 +2596,13 @@ def stats(g):
     for n in g["nodes"]: kinds[n["kind"]] += 1
     conf = defaultdict(int)
     for e in g["calls"]: conf[e.get("confidence", "?")] += 1
-    called = {e["dst"] for e in g["calls"] if e.get("dst")}
     defs = [n["id"] for n in g["nodes"] if n["kind"] == "func"]
-    unreachable = [d for d in defs if d not in called]           # never called in-tree (entrypoints, dead code, or dynamic)
+    # Split, not summed. "Nothing calls this" was reported as one number and was wrong 100% of
+    # the time on this repo's own source, because almost every name on it was reached some way
+    # other than a written call. `unused` says which is which; this counts the same two piles.
+    rows = unused(g)
+    unreachable = [i for i, _w, why in rows if not why]
+    by_name = len(rows) - len(unreachable)
     # Calls resolved to ONE definition. This used to add up three named labels by hand, so
     # SELF-METHOD and TYPED edges - which resolve to exactly one def - went uncounted, and the
     # rate was understated. Worse, it was a list that had to be edited every time a label was
@@ -2514,7 +2622,12 @@ def stats(g):
             "resolved_to_one_def": specific,
             "could_have_been_resolved": winnable,
             "resolution_rate": round(specific / max(winnable, 1), 3),
-            "func_defs": len(defs), "never_called_in_tree": len(unreachable)}
+            "func_defs": len(defs),
+            # Named for what it can actually know. "in tree" read as "anywhere", and the
+            # scanned roots are not anywhere - a sibling package nobody pointed this at calls
+            # plenty of these.
+            "not_called_in_scanned_roots": len(unreachable),
+            "uncalled_but_reachable_by_name": by_name}
 
 
 def _explain(g, exc):
@@ -2598,6 +2711,8 @@ def _main(argv=None):
     # gives the same answers to whatever is going to parse them.
     as_json = "--json" in a
     a = [x for x in a if x != "--json"]
+    show_all = "--all" in a          # `unused --all`: also the names that carry a reason
+    a = [x for x in a if x != "--all"]
     # --only and --exclude, because the first real use of `unused` on a shipped repository
     # returned 337 lines of which 293 were test methods. unittest calls those by reflection, so
     # every one of them looks dead, and a list that is seven-eighths noise is one nobody reads
@@ -2791,18 +2906,27 @@ def _main(argv=None):
             print("\n".join(f"{i}  {loc}" for i, loc, _k in rows) or "(none)")
     elif a[0] == "unused":
         rows = [r for r in unused(load()) if wanted(r[0])]
+        # By default the list is the FINDING - the names nothing calls and nothing names.
+        # `--all` puts back the ones that carry a reason, which is what it used to print and
+        # what made it 577 rows long here, none of them dead.
+        shown = rows if show_all else [r for r in rows if not r[2]]
         if as_json:
-            _emit({"query": "unused",
-                   "results": [{"id": i, "at": loc, "called_by_python": d} for i, loc, d in rows]})
+            _emit({"query": "unused", "shown": "all" if show_all else "unreached",
+                   "results": [{"id": i, "at": loc, "reached_by": why or None}
+                               for i, loc, why in rows]})
         else:
-            print("\n".join(f"{i}  {loc}" + ("   (python calls this one)" if d else "")
-                             for i, loc, d in rows) or "(none)")
-            if rows:
-                sys.stdout.flush()   # or the caveat lands above the list it is about, since
+            print("\n".join(f"{i}  {loc}" + (f"   ({why})" if why else "")
+                             for i, loc, why in shown) or "(none)")
+            sys.stdout.flush()       # or the caveat lands above the list it is about, since
                                      # stderr is unbuffered and stdout is not when piped
-                print(f"\n{len(rows)} definition(s) nothing here calls. Not the same as dead: a "
-                      f"dispatch table,\na plugin registry, a web route or a framework callback "
-                      f"all look like this.", file=sys.stderr)
+            held = len(rows) - len(shown)
+            if shown:
+                print(f"\n{len(shown)} definition(s) nothing here calls and nothing here names. "
+                      f"Still not\nproof of dead: this only saw the roots it was pointed at.",
+                      file=sys.stderr)
+            if held:
+                print(f"{held} more are reached some way other than a written call "
+                      f"(--all to see them).", file=sys.stderr)
     elif a[0] == "stats": print(json.dumps(stats(load()), indent=2))
     else:
         print(__doc__)

@@ -25,6 +25,20 @@ That is a real answer from a real codebase, not a mock-up. Four callers, the nin
 to open — a caller that checks a gate five times is five places to edit — and the transitive
 radius, before you touch anything.
 
+## Two reasons to believe it
+
+**Its tests can fail.** `--selftest` does not only assert the right answer; several of its
+checks are **red-first controls** that prove the naive approach gives the *wrong* one. Two
+modules both define `digest`, and the control shows a name match blames the wrong module's.
+`open(p).write(x)` stays external rather than being attributed to your own `write`. A green
+test that never had a chance of going red is not evidence, and most tools in this space ship
+those. [How it is checked](#proving-itself) — including a full mutation pass, where the tool's
+own code is broken one small way at a time to see whether the suite notices.
+
+**It says when it does not know.** Every edge carries a confidence label, and the unresolved
+ones are named rather than guessed at. A call graph that presents a guess as a fact is worse
+than no call graph, because you cannot tell which answers to check. [The labels](#it-tells-you-when-it-doesnt-know).
+
 ## Why
 
 `grep` finds the name. It cannot tell you that two files define a function called `digest` and
@@ -115,18 +129,18 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 3920,
-  "call_sites": 5227,
-  "edge_confidence": {"EXTERNAL": 2061, "INHERITED": 603, "BUILTIN": 450, "SELF-METHOD": 315,
-                      "QUALIFIED": 260, "LOCAL": 125, "UNTYPED": 98, "TYPED": 5,
+  "call_edges": 4040,
+  "call_sites": 5376,
+  "edge_confidence": {"EXTERNAL": 2123, "INHERITED": 615, "BUILTIN": 462, "SELF-METHOD": 329,
+                      "QUALIFIED": 272, "LOCAL": 130, "UNTYPED": 101, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1311,
-  "could_have_been_resolved": 1409,
-  "resolution_rate": 0.93
+  "resolved_to_one_def": 1354,
+  "could_have_been_resolved": 1455,
+  "resolution_rate": 0.931
 }
 ```
 
-That 0.93 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.931 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -147,6 +161,36 @@ them, and those calls were being answered with functions in `_pyrepl`. A name th
 defines nor imports nor stars in is a library, something injected at runtime, or a mistake — and
 saying `EXTERNAL` is the true answer to all three.
 
+## "Nothing calls this" is a claim, so it says why
+
+Run against this repo's own source, `unused` used to name 577 of 734 functions. Every one was
+wrong: 505 unittest methods, 46 fixtures, 22 `visit_*` methods of its own AST walker, a
+callback handed to `signal.signal`, one handed to `subprocess`, an alias assigned to four
+other names. A number that is wrong every time is not conservative, it is broken — and it was
+the headline of `stats`, printed bare, where somebody either deletes live code or stops
+believing the tool.
+
+Every name it mentions without calling is now tracked, so the default list is the finding:
+
+```
+codegraph unused          → the names nothing calls and nothing names
+codegraph unused --all    → all of them, each with the reason it is reached
+```
+
+| reason | what it means |
+|---|---|
+| *(none)* | nothing here calls it and nothing here names it. **This is the finding.** |
+| `python calls this` | a dunder. Yours to write, Python's to call. |
+| `named, not called` | a dispatch table, a callback argument, an alias — reached, just not written as a call |
+| `inherited interface` | its class has a base outside the scanned roots, which may call it: `do_GET`, `generic_visit`, `setUp` |
+| `looks dispatched` | the name follows a convention a framework dispatches on |
+
+Nothing is hidden — `--all` still prints every row. What changed is that the count means
+something. On this repo it went from 577 to **0**, which is the true answer.
+
+And the number is still only about **the roots you pointed it at**. A sibling package nobody
+scanned calls plenty of these. `stats` names it `not_called_in_scanned_roots` for that reason.
+
 ## The commands
 
 ```
@@ -162,8 +206,9 @@ codegraph path <from> <to>   a call path connecting two functions
 codegraph deps <module>      a module's in-tree imports and importers, `import_module("x")` included
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph symbols            every function and class defined here
-codegraph unused             every definition nothing here calls — read the caveat
-codegraph stats              counts, resolution rate, never-called definitions
+codegraph unused             definitions nothing calls AND nothing names
+codegraph unused --all       ...plus the ones reached some other way, each with why
+codegraph stats              counts, resolution rate, definitions nothing reaches
 codegraph --selftest         32 ground-truth checks, several of them red-first
 codegraph --help             the same list; a bare `codegraph` prints it too
 --json                       any query, answered as data instead of prose
@@ -227,6 +272,11 @@ The prose form of `impact` says the blast radius holds *five functions*; the JSO
 **which**. That gap existed because the prose was written for a person reading it and nothing
 was checking the other reader.
 
+The counts are **in the graph file**, not only in `stats`. They used to be computed on
+demand and stored nowhere, so the first integration written against `codegraph.json` read
+`func_defs` off it, found nothing, and printed a confident zero — a gauge reading zero rather
+than the truth. `json.load(open("codegraph.json"))["stats"]` is the whole answer now.
+
 The library refuses exactly what the command line refuses, through the same code:
 `codegraph.Ambiguous` when several definitions answer to the name, carrying the candidates, and
 `codegraph.Unknown` when this graph has never seen it. Neither is answered with an empty
@@ -264,8 +314,8 @@ Static analysis, honestly labelled:
   dropped afterwards unless the name turns out to be a property, since one file cannot know
   what another one defines.
 - **A function passed by name is not a call** — `Thread(target=f)`, `sorted(key=f)`,
-  `partial(f, 1)`. `f` is referenced, never invoked here, so it shows in `unused`. That listing
-  says "nothing here calls this", which is not the same as dead, and says so.
+  `partial(f, 1)`. `f` is referenced, never invoked here. Those references are tracked, so `f`
+  is not reported as unreached; it is listed under `unused --all` as *named, not called*.
 - **`super()` resolves against the class it is written in.** Python's own order for that
   class - so a diamond lands where the interpreter lands. What static analysis cannot know is
   that `B.m`'s `super()` goes to `C` when `B` is reached through a `D(B, C)` instance.
@@ -322,12 +372,12 @@ A suite that never fails is not evidence of anything, so it is checked the other
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 841 mutations. A full pass killed every one of them, with no survivors.**
-It ran against this commit, in two halves resumed from a fixed seed so both drew the same
-list. A full pass is hours of work, so it is run deliberately
+**The file admits 867 mutations.** The last full pass killed all 841 the file admitted at
+the time, with no survivors; the code has grown since and the pass is due again, so that
+result is not restated here as though it covered this tree. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
-checked nowhere drifts in two directions. Two of the 841 did not make the suite fail but made
+checked nowhere drifts in two directions. Two of them did not make the suite fail but made
 it never finish — flip the comparison that ends a `while` — and those are caught by a timeout
 and counted apart, because "hung" and "failed" are different facts.
 
@@ -367,7 +417,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 500 more. Grouped, because a list of every one of them stopped being
+The test suite adds 517 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

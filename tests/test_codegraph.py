@@ -3862,12 +3862,36 @@ class AGraphKnowsExactlyWhatItRead(Sandbox):
             return json.load(f)
 
     def test_the_graph_records_a_stamp_for_every_file_it_read(self):
-        self.write("a.py", "def f():\n    return 1\n")
+        path = self.write("a.py", "def f():\n    return 1\n")
         g = self.graph(write=False)
         self.assertIsInstance(g["sources"], dict)
-        (path, stamp), = g["sources"].items()
+        (recorded, stamp), = g["sources"].items()
+        self.assertEqual(recorded, path)
+        self.assertEqual(stamp, codegraph._stamp(path))
+        size, digest = stamp
+        self.assertEqual(size, os.path.getsize(path))
+        self.assertRegex(digest, r"\A[0-9a-f]{32}\Z")
+
+    def test_the_stamp_moves_when_only_the_content_does(self):
+        """The guard on the stamp itself: it must be a fact about the bytes and nothing else.
+        A stamp that reads the clock would hold still here."""
+        path = self.write("a.py", "def alpha():\n    return 1\n")
+        before = codegraph._stamp(path)
         st = os.stat(path)
-        self.assertEqual(stamp, [st.st_mtime, st.st_size])
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("def gamma():\n    return 1\n")
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        after = codegraph._stamp(path)
+        self.assertEqual(after[0], before[0], "the fixture must not change the size")
+        self.assertNotEqual(after, before)
+
+    def test_the_stamp_holds_still_when_only_the_clock_does(self):
+        """And the other direction, which is what makes the incremental build worth having:
+        touching a file must not cost a reparse."""
+        path = self.write("a.py", "def alpha():\n    return 1\n")
+        before = codegraph._stamp(path)
+        os.utime(path, None)
+        self.assertEqual(codegraph._stamp(path), before)
 
     def test_the_cache_is_keyed_on_size_as_well_as_time(self):
         """Same timestamp, different content: the incremental cache must not serve the old
@@ -6198,7 +6222,10 @@ class TheNeverCalledListWasOnlyEverACount(Sandbox):
         g = self.graph(write=False)
         rows = codegraph.unused(g)
         self.assertEqual([i for i, _at, _d in rows], ["m.caller", "m.unused_one"])
-        self.assertEqual(codegraph.stats(g)["never_called_in_tree"], len(rows))
+        st = codegraph.stats(g)
+        self.assertEqual(st["not_called_in_scanned_roots"]
+                         + st["uncalled_but_reachable_by_name"], len(rows),
+                         "the two counts have to add up to the list, or one of them is quiet")
 
     def test_it_says_where(self):
         self.write("m.py", "def alone():\n    return 1\n")
@@ -6234,11 +6261,12 @@ class TheNeverCalledListWasOnlyEverACount(Sandbox):
         r = subprocess.run([sys.executable, cg, "unused"], cwd=d,
                            capture_output=True, text=True, timeout=180)
         self.assertIn("m.alone", r.stdout)
-        self.assertIn("Not the same as dead", r.stderr)
+        self.assertIn("Still not\nproof of dead", r.stderr)
+        self.assertIn("only saw the roots it was pointed at", r.stderr)
         j = subprocess.run([sys.executable, cg, "unused", "--json"], cwd=d,
                            capture_output=True, text=True, timeout=180)
         self.assertEqual(json.loads(j.stdout)["results"],
-                         [{"id": "m.alone", "at": "m.py:1", "called_by_python": False}])
+                         [{"id": "m.alone", "at": "m.py:1", "reached_by": None}])
 
 
 class AnAnswerYouCanScope(Sandbox):
@@ -6281,10 +6309,19 @@ class AnAnswerYouCanScope(Sandbox):
         self.assertEqual(self.lines("callers", "app/core.shared", "--only", "tests/*"),
                          ["tests/test_core.T.test_one", "tests/test_core.T.test_two"])
 
-    def test_unused_is_readable_once_the_tests_are_out(self):
+    def test_unused_no_longer_needs_scoping_to_be_readable(self):
+        """This is why the class exists: 293 of 337 rows were unittest methods. They are still
+        listed under --all, with the reason - but they are no longer the answer."""
         every = self.lines("unused")
-        self.assertTrue(any("test_one" in ln for ln in every), "unittest methods look dead")
-        scoped = self.lines("unused", "--exclude", "tests/*")
+        self.assertEqual([ln.split()[0] for ln in every], ["app/core.orphan", "app/core.user"])
+        self.assertFalse(any("test_one" in ln for ln in every),
+                         "a unittest method is not a finding")
+        shown = self.lines("unused", "--all")
+        self.assertTrue(any("test_one" in ln for ln in shown),
+                        "--all must still show everything; hiding it would be the other lie")
+
+    def test_unused_can_still_be_scoped(self):
+        scoped = self.lines("unused", "--all", "--exclude", "tests/*")
         self.assertEqual([ln.split()[0] for ln in scoped], ["app/core.orphan", "app/core.user"])
 
     def test_it_works_on_the_other_verbs_too(self):
@@ -6438,3 +6475,179 @@ class TheScanExcludesItselfOnEveryPlatform(unittest.TestCase):
         self.assertGreater(len(listed), 4, listed)
         self.assertTrue(any(p.endswith("codegraph.py") for p in listed))
         self.assertTrue(any(p.endswith("README.md") for p in listed))
+
+
+class AFileCanChangeWithoutItsTimestampMoving(Sandbox):
+    """The cache asked "same mtime, same size?" and called that the same file.
+
+    An automated edit lands inside one second; `git checkout`, `cp -p` and `rsync -t` all put
+    the old timestamp back on purpose. Rename a function to another of the same length and
+    both halves of that key hold still. The graph then answered about a function that no
+    longer exists and denied the one that does - with a success code, which is the worst way
+    to be wrong, and precisely at the moment somebody is about to edit.
+    """
+
+    BEFORE = "def alpha():\n    return 1\n\ndef caller():\n    return alpha()\n"
+    AFTER = "def gamma():\n    return 1\n\ndef caller():\n    return gamma()\n"
+
+    def rewrite_holding_the_clock(self, rel, body):
+        """Same bytes count, same mtime to the nanosecond. Only the content moves."""
+        path = os.path.join(self.dir, rel)
+        st = os.stat(path)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        after = os.stat(path)
+        self.assertEqual(after.st_size, st.st_size, "the fixture must not change the size")
+        self.assertEqual(after.st_mtime_ns, st.st_mtime_ns, "the fixture must not move the clock")
+        return path
+
+    def test_a_rebuild_sees_the_new_name(self):
+        self.write("m.py", self.BEFORE)
+        self.graph()
+        self.rewrite_holding_the_clock("m.py", self.AFTER)
+        ids = {n["id"] for n in self.graph()["nodes"]}
+        self.assertIn("m.gamma", ids, "the rebuild reused a stale parse of a file that changed")
+        self.assertNotIn("m.alpha", ids, "it is still reporting a function that was renamed away")
+
+    def test_the_freshness_check_calls_it_stale(self):
+        self.write("m.py", self.BEFORE)
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g), "nothing changed yet")
+        self.rewrite_holding_the_clock("m.py", self.AFTER)
+        self.assertTrue(codegraph._is_stale(g),
+                        "the graph describes code that is no longer on disk and says it is fresh")
+
+    def test_the_answer_a_query_gives_is_the_new_one(self):
+        """The whole point: `callers` is asked at the moment of an edit."""
+        self.write("m.py", self.BEFORE)
+        self.graph()
+        self.rewrite_holding_the_clock("m.py", self.AFTER)
+        g = codegraph.load()
+        by_name = {n["id"] for n in g["nodes"]}
+        self.assertIn("m.gamma", by_name)
+        self.assertNotIn("m.alpha", by_name)
+
+
+class NothingCallsThisIsAClaimThatHasToEarnItself(Sandbox):
+    """`unused` reported 577 of this repo's own 734 functions, and every single one was wrong.
+
+    505 were unittest test methods, 46 were setUp/tearDown, 22 were the `visit_*` methods of
+    its own AST walker, and the four that were left were a callback handed to `signal.signal`,
+    one handed to `subprocess` as `preexec_fn`, an alias assigned to four other names, and a
+    `generic_visit` override. Zero real. A number that is wrong 100% of the time is not a
+    conservative number, it is a broken one - and it was the headline of `stats`, printed
+    bare, where somebody would either delete live code or stop believing the tool.
+
+    The fix is the honesty already applied to edges: say WHY a name is on the list, and count
+    the ones that are only there because nothing here calls things by name.
+    """
+
+    TREE = (
+        ("app.py",
+         "import signal\n"
+         "\n"
+         "def dead_and_really_dead():\n"          # the only real one
+         "    return 1\n"
+         "\n"
+         "def on_signal(signum, frame):\n"        # handed to signal.signal by name
+         "    return 2\n"
+         "\n"
+         "def card_one():\n"                      # dispatch table
+         "    return 3\n"
+         "\n"
+         "CARDS = [card_one]\n"
+         "signal.signal(signal.SIGINT, on_signal)\n"
+         "\n"
+         "class Walker:\n"
+         "    def visit_Call(self, node):\n"       # dispatched by name, never written down
+         "        return node\n"
+         "\n"
+         "    def __repr__(self):\n"              # python calls this one
+         "        return 'w'\n"),
+        ("test_app.py",
+         "import unittest\n"
+         "\n"
+         "class T(unittest.TestCase):\n"
+         "    def setUp(self):\n"
+         "        pass\n"
+         "\n"
+         "    def test_something(self):\n"
+         "        pass\n"),
+    )
+
+    def build(self):
+        for rel, body in self.TREE:
+            self.write(rel, body)
+        return self.graph()
+
+    def rows(self):
+        return {i: reason for i, _where, reason in codegraph.unused(self.build())}
+
+    def test_the_only_name_reported_unreached_is_the_only_dead_one(self):
+        unreached = {i for i, r in self.rows().items() if not r}
+        self.assertEqual(unreached, {"app.dead_and_really_dead"})
+
+    def test_a_function_handed_to_something_by_name_is_not_unreached(self):
+        self.assertTrue(self.rows()["app.on_signal"])
+
+    def test_a_function_only_a_dispatch_table_holds_is_not_unreached(self):
+        self.assertTrue(self.rows()["app.card_one"])
+
+    def test_a_visitor_method_dispatched_by_name_is_not_unreached(self):
+        self.assertTrue(self.rows()["app.Walker.visit_Call"])
+
+    def test_a_test_method_and_its_fixture_are_not_unreached(self):
+        r = self.rows()
+        self.assertTrue(r["test_app.T.test_something"])
+        self.assertTrue(r["test_app.T.setUp"])
+
+    def test_a_dunder_is_not_unreached(self):
+        self.assertTrue(self.rows()["app.Walker.__repr__"])
+
+    def test_every_name_is_still_listed_so_nothing_is_hidden(self):
+        """The brand is honest labelling, not a shorter list. Everything uncalled is still
+        here; what changed is that each one says why."""
+        self.assertEqual(set(self.rows()), {
+            "app.dead_and_really_dead", "app.on_signal", "app.card_one",
+            "app.Walker.visit_Call", "app.Walker.__repr__",
+            "test_app.T.test_something", "test_app.T.setUp"})
+
+    def test_stats_counts_the_two_apart(self):
+        s = codegraph.stats(self.build())
+        self.assertEqual(s["not_called_in_scanned_roots"], 1)
+        self.assertEqual(s["uncalled_but_reachable_by_name"], 6)
+        self.assertNotIn("never_called_in_tree", s,
+                         "the old name claimed more than it could know")
+
+
+class TheCountsAreInTheFileNotOnlyOnTheScreen(Sandbox):
+    """`stats` printed the counts and the graph stored none of them, so anything reading
+    codegraph.json had to recompute them from nodes and calls. The first integration written
+    against it read `func_defs` off the file, found nothing, and printed zero - a gauge that
+    reads zero rather than the truth, which is worse than no gauge at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("m.py", "def used():\n    return 1\n"
+                           "def caller():\n    return used()\n"
+                           "def orphan():\n    return 2\n")
+
+    def test_the_written_graph_carries_its_own_stats(self):
+        codegraph.build([self.dir])
+        with open(codegraph.OUT, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertIn("stats", on_disk, "a reader of the file cannot get the numbers")
+        self.assertEqual(on_disk["stats"]["func_defs"], 3)
+        self.assertEqual(on_disk["stats"]["not_called_in_scanned_roots"], 2)
+
+    def test_the_stored_block_is_what_stats_would_say(self):
+        """Two numbers for one fact drift. This is the check that they cannot."""
+        g = codegraph.build([self.dir])
+        stored = dict(g["stats"])
+        recomputed = codegraph.stats({k: v for k, v in g.items() if k != "stats"})
+        self.assertEqual(stored, recomputed)
+
+    def test_a_graph_loaded_back_still_has_them(self):
+        codegraph.build([self.dir])
+        self.assertEqual(codegraph.load()["stats"]["func_defs"], 3)
