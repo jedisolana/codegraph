@@ -20,7 +20,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macos-latest is deliberately absent while this repository is private. A private
+        # repo's minutes come out of a monthly allowance, and a mac runner is billed at TEN
+        # times a linux one - measured here, the three mac jobs were 70% of the cost of a
+        # push and 30 of its 42 charged minutes. They are also the least useful three: this
+        # is developed on a mac, so that platform is covered by hand before anything is
+        # pushed. Windows is not, and windows is where the bugs were.
+        # Put macos-latest back the day this goes public; then it is free again.
+        os: [ubuntu-latest, windows-latest]
         python: ["3.9", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
