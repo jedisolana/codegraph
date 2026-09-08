@@ -9397,3 +9397,65 @@ class TheReadmeDescribesTheToolThatExists(unittest.TestCase):
         """`nothing calls this` is in the instructions the server hands the model. A person
         reading the README deserves the same warning."""
         self.assertRegex(self.readme.lower(), r"nothing calls|dispatch")
+
+
+class AMalformedRequestMustNotEndTheSession(Sandbox):
+    """Fuzzed the protocol with ten shapes a real client eventually sends. One of them killed
+    the server: `params` as a string instead of an object.
+
+    Everything after it got no reply, and the process exited 1. An agent cannot tell a dead
+    server from a slow one, so it waits, and the session is over.
+
+    The guard added for a failing TOOL wraps the tool call. This crashes above it, in the
+    dispatch that reads `params` - `"nonsense".get("name")` raises before anything guarded is
+    reached. Same lesson, one level up: a server outlives its own bugs, and the place to say so
+    is around the whole message rather than around the part I happened to be thinking about."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def a():\n    return 1\n")
+        self.graph()
+
+    BAD = (
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": "nonsense"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": 7},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "codegraph_changed", "arguments": {"diff": 5}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+         "params": {"name": "codegraph_blast", "arguments": {"name": "a", "filter": [1]}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"arguments": {}}},
+    )
+
+    def run_all(self):
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+        msgs += list(self.BAD)
+        msgs.append({"jsonrpc": "2.0", "id": 99, "method": "tools/list"})
+        payload = "".join(json.dumps(m) + "\n" for m in msgs)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        return {json.loads(x).get("id"): json.loads(x)
+                for x in r.stdout.splitlines() if x.strip()}, r
+
+    def test_the_request_after_the_bad_ones_is_still_answered(self):
+        replies, r = self.run_all()
+        self.assertIn(99, replies, f"the server died; exit {r.returncode}, {r.stderr[-200:]}")
+
+    def test_every_bad_request_gets_an_answer_of_some_kind(self):
+        """Silence is the one reply an agent cannot act on."""
+        replies, _ = self.run_all()
+        for msg in self.BAD:
+            with self.subTest(id=msg["id"]):
+                self.assertIn(msg["id"], replies)
+
+    def test_the_server_exits_cleanly(self):
+        _, r = self.run_all()
+        self.assertEqual(r.returncode, 0, r.stderr[-300:])
+
+    def test_nothing_but_json_reaches_stdout(self):
+        """stdout IS the protocol. A traceback printed there is unparseable to the client."""
+        _, r = self.run_all()
+        for line in r.stdout.splitlines():
+            if line.strip():
+                json.loads(line)

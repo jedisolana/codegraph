@@ -3681,6 +3681,24 @@ def _mcp_serve(stream_in=None, stream_out=None):
         if mid is None:
             continue                                 # a notification takes no reply, and
                                                      # answering one hangs some clients
+        try:
+            _mcp_dispatch(send, mid, method, msg, tools)
+        except Exception as e:                       # a server outlives its own bugs
+            # AROUND THE WHOLE MESSAGE, not around the part I happened to be thinking about.
+            # The guard for a failing TOOL wrapped the tool call, and `params` arriving as a
+            # string crashed above it - `"nonsense".get("name")` raises before anything guarded
+            # is reached, and the process died mid-session. An agent cannot tell a dead server
+            # from a slow one, so it waits, and the session is over.
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32603,
+                            "message": f"{method or 'request'} failed: "
+                                       f"{type(e).__name__}: {e}"}})
+    return 0
+
+
+def _mcp_dispatch(send, mid, method, msg, tools):
+    """One message, answered. Every exception in here is caught by the caller."""
+    if True:
         if method == "initialize":
             send({"jsonrpc": "2.0", "id": mid,
                   "result": {"protocolVersion": MCP_PROTOCOL,
@@ -3704,7 +3722,7 @@ def _mcp_serve(stream_in=None, stream_out=None):
                       "error": {"code": -32603,
                                 "message": f"{params.get('name')} failed: "
                                            f"{type(e).__name__}: {e}"}})
-                continue
+                return
             if got is None:
                 send({"jsonrpc": "2.0", "id": mid,
                       "error": {"code": -32602,
@@ -3714,7 +3732,6 @@ def _mcp_serve(stream_in=None, stream_out=None):
         else:
             send({"jsonrpc": "2.0", "id": mid,
                   "error": {"code": -32601, "message": f"unknown method: {method!r}"}})
-    return 0
 
 
 def _one_target(g, name, as_json=False):
