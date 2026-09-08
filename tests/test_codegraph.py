@@ -7693,7 +7693,10 @@ class ADeclaredReturnTypeIsTheSourceSayingSo(Sandbox):
         happened: two of them went unnoticed until somebody went looking, weeks of commits
         later. Fixing a file is not fixing the history, and a check that runs rarely finds
         things late."""
-        with open(os.path.join(HERE, ".github", "workflows", "tests.yml"), encoding="utf-8") as fh:
+        # Named ci.yml since the rename that got push-triggering working again. Found by CI,
+        # on a commit I pushed without running the suite first - which is the one habit this
+        # whole repository is built to make unnecessary.
+        with open(os.path.join(HERE, ".github", "workflows", "ci.yml"), encoding="utf-8") as fh:
             wf = fh.read()
         self.assertIn("scrub.py --history", wf,
                       "the history scrub must run on every push, not only on a release")
@@ -8154,3 +8157,87 @@ class AnAnswerThatCouldNotSeeEverything(Sandbox):
         skipped with the rest."""
         text, _ = self.call()
         self.assertNotRegex(text.lower(), r"could not|incomplete|not read")
+
+
+class EveryQueryRebuiltTheWholeGraph(Sandbox):
+    """A symlinked .py file made the graph permanently stale, so every query rebuilt all of it.
+
+    The build skips a symlink whose target it has already indexed - deliberately, with a
+    comment explaining that naming the module after the link left `callers_of` empty. The
+    staleness check walks the tree and counts that same symlink as a file it has never seen. So
+    the two disagree for ever: the graph is rebuilt, the rebuild skips the link again, and the
+    next query finds it missing again.
+
+    Measured on a clone of ansible, which has ten of them: 1.30s a query against 0.09s, and the
+    only symptom is that it feels slow. Silent, permanent, and on any repository that symlinks
+    a Python file - which is every monorepo and most plugin trees.
+
+    Found while measuring something else, by asking why a graph reported stale one second after
+    being built."""
+
+    def link_or_skip(self, target, link):
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError, AttributeError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+
+    def test_a_symlinked_file_does_not_make_a_fresh_graph_stale(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        self.link_or_skip(os.path.join(self.dir, "pkg/core.py"),
+                          os.path.join(self.dir, "pkg/alias.py"))
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g),
+                         "a graph is stale the moment it is built, so every query rebuilds")
+
+    def test_and_so_a_second_query_does_not_rebuild(self):
+        """The behaviour, not the flag. A rebuild that nobody asked for is the whole cost."""
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        self.link_or_skip(os.path.join(self.dir, "pkg/core.py"),
+                          os.path.join(self.dir, "pkg/alias.py"))
+        self.graph()
+        builds = []
+        real = codegraph.build
+
+        def counted(*a, **k):
+            builds.append(1)
+            return real(*a, **k)
+
+        codegraph.build = counted
+        try:
+            codegraph.load()
+            codegraph.load()
+        finally:
+            codegraph.build = real
+        self.assertEqual(builds, [], f"{len(builds)} rebuild(s) nobody asked for")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_real_edit_still_makes_it_stale(self):
+        """The positive control, and the reason the check exists at all."""
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        g = self.graph()
+        self.write("pkg/core.py", "def load():\n    return 2\n")
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_a_new_file_still_makes_it_stale(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        g = self.graph()
+        self.write("pkg/extra.py", "def other():\n    return 1\n")
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_a_symlink_to_something_outside_the_tree_is_still_indexed(self):
+        """Not every symlink is a duplicate. One pointing at a file the tree does not otherwise
+        contain is the only copy there is, and dropping it would lose real code."""
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        with open(os.path.join(outside, "far.py"), "w", encoding="utf-8") as fh:
+            fh.write("def far_away():\n    return 1\n")
+        self.write("pkg/__init__.py", "")
+        self.link_or_skip(os.path.join(outside, "far.py"),
+                          os.path.join(self.dir, "pkg/near.py"))
+        g = self.graph()
+        self.assertIn("far_away", " ".join(n["name"] for n in g["nodes"]))
+        self.assertFalse(codegraph._is_stale(g))

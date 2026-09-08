@@ -2193,12 +2193,29 @@ def _is_stale(g):
     known = g.get("sources")
     if not isinstance(known, dict): return True   # a graph from before stamps: rebuild once
     seen = {}
+    winner = {}                                   # realpath -> the path the BUILD would keep
     for d in g.get("dirs", [HOME]):
         for dp, dns, fns in os.walk(d):
             dns[:] = [x for x in dns if not _prune_dir(dp, x)]
             for fn in fns:
                 if not fn.endswith(".py"): continue
                 full = os.path.join(dp, fn)
+                # A SYMLINK TO A FILE THIS TREE ALREADY HOLDS. The build skips it on purpose -
+                # naming the module after the link left `callers_of` on the real one empty -
+                # and this walk counted it as a file it had never seen. So the two disagreed
+                # for ever: stale, rebuild, the rebuild skips the link, stale again. Every
+                # query rebuilt the entire graph, silently, and the only symptom was that it
+                # felt slow. Ten of them in a clone of ansible: 1.30s a query against 0.09s.
+                #
+                # Exactly the failure the paragraph below describes for a DANGLING link, one
+                # step along, and the same cure: skip what the build skips, or the two do not
+                # agree about what the tree contains.
+                real = os.path.realpath(full)
+                if real in winner:
+                    if os.path.islink(full):
+                        continue                  # the build keeps the other one
+                    seen.pop(winner[real], None)  # ...and this is the other one
+                winner[real] = full
                 try:
                     stamp = _stamp(full)
                 except OSError:
