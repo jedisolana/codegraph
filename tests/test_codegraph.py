@@ -9666,6 +9666,61 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class AnImportedClassIsStillAClassReceiver(Sandbox):
+    """`Helper.tag(1)` where `Helper` came from an import. A class DEFINED in the file resolved
+    - that is the `CLASS` label - and the identical statement on an imported one did not, which
+    is the ordinary way a classmethod or a factory gets called. `AnsibleTagHelper.tag(...)`
+    alone is 81 unresolved calls in a clone of ansible.
+
+    The lookup that says which class an imported name means already exists, is already used for
+    annotations and for a class written out through a module, and answers only for a real class.
+    The name has to be one this file imported: a bare name matched across the tree would be the
+    guess this refuses everywhere else."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("lib.py",
+                   "class Base:\n"
+                   "    @classmethod\n"
+                   "    def tag(cls, x):\n        return x\n\n"
+                   "class Helper(Base):\n    pass\n\n"
+                   "def helper_fn():\n"
+                   "    def tag(x):\n        return x\n"
+                   "    return tag\n")
+
+    def test_an_imported_class_receiver(self):
+        self.write("b.py", "from lib import Helper\n\n\n"
+                           "def use():\n    return Helper.tag(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.Base.tag"), ["b.use"])
+
+    def test_it_works_through_an_alias(self):
+        self.write("c.py", "from lib import Helper as H\n\n\n"
+                           "def use():\n    return H.tag(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.Base.tag"), ["c.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_name_this_file_never_imported_is_not_matched(self):
+        self.write("d.py", "def use():\n    return Helper.tag(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.Base.tag"), [])
+
+    def test_a_local_of_that_name_shadows_it(self):
+        self.write("e.py", "from lib import Helper\n\n\n"
+                           "def use(Helper):\n    return Helper.tag(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.Base.tag"), [])
+
+    def test_an_imported_function_is_not_a_class_receiver(self):
+        """`helper_fn.tag` is not a thing, and `lib.helper_fn.tag` is a real id - the nested
+        function - so answering with it would be confidently wrong."""
+        self.write("f.py", "from lib import helper_fn\n\n\n"
+                           "def use():\n    return helper_fn.tag(1)\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.helper_fn.tag"), [])
+
+
 class FromDotImportIsNotAlwaysASubmodule(Sandbox):
     """`from . import app`, where `app` is an object the package's `__init__.py` built. The
     relative branch treated every name after `from .` as a module of its own, so the name was

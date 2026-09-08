@@ -4,6 +4,22 @@
 
 First release.
 
+### An imported class is still a class receiver
+
+`Helper.tag(1)`, where `Helper` came from an import. A class DEFINED in the file resolved -
+that is what the `CLASS` label is - and the identical statement on an imported one did not,
+which is the ordinary way a classmethod or a factory gets called. `AnsibleTagHelper.tag(...)`
+alone is 81 unresolved calls in a clone of ansible.
+
+The lookup that says which class an imported name means already existed, is already used for
+annotations and for a class written out through a module, and answers for a real class and
+nothing else - so an imported FUNCTION of that name gets no answer, which matters because
+`lib.helper_fn.tag` can be a real id when `tag` is nested inside it. The name has to be one this
+file imported and not one it rebinds; a bare name matched across the tree would be the guess
+this refuses everywhere else.
+
+514 more resolved calls on ansible, 520 on pandas, 1 on flask, none lost.
+
 ### `from . import app` is not always a submodule
 
 Every name after `from .` was read as a module of its own. So `from . import app`, beside an
@@ -448,7 +464,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,298 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,310 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

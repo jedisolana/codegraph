@@ -1880,6 +1880,23 @@ def build(dirs=None, write=True):
             # unbound call. The receiver is a class in this module, not an unknown object.
             cand = cls_ids[srcmod][recv] + "." + callee
             if cand in def_ids: dst = cand; conf = "CLASS"
+        if (not dst and method and recv and not e.get("recv_local")
+                and recv not in cls_ids.get(srcmod, {})
+                and recv in imported_in.get(srcmod, ())):
+            # ...and the same statement on a class this file IMPORTED, which is the ordinary
+            # way a classmethod or a factory gets called. `AnsibleTagHelper.tag(...)` alone is
+            # 81 unresolved calls in a clone of ansible. The lookup that says which class an
+            # imported name means is the one annotations already use; it answers for a real
+            # class and nothing else, so an imported FUNCTION of that name gets no answer here.
+            #
+            # The name has to be one this file imported and not one it rebinds. A bare name
+            # matched across the tree would be the guess this refuses everywhere else.
+            cands = _classes_named(recv, srcmod, e["src"])
+            knew_class = knew_class or len(cands) == 1
+            if len(cands) == 1:
+                for b in _mro(cands[0], bases_of, mro_cache):
+                    if (b + "." + callee) in def_ids:
+                        dst = b + "." + callee; conf = "CLASS"; break
         if (not dst and method and e.get("recv_path") and "/" in e["recv_path"]
                 and not e.get("recv_root_local")
                 and e.get("recv_root") in imported_in.get(srcmod, ())):
