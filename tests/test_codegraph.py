@@ -1512,7 +1512,7 @@ class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
     """Properties that must hold of ANY graph this tool produces, checked against real
     codebases rather than fixtures. Nothing had ever asserted them."""
 
-    LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "LOCAL", "INHERITED",
+    LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "RE-EXPORT", "LOCAL", "INHERITED",
                         "CLASS", "CONSTRUCTOR", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
     UNRESOLVED = frozenset({"AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
 
@@ -9479,9 +9479,13 @@ class CalledTwentyTimesAndReportedAsUnreached(Sandbox):
 
     def setUp(self):
         super().setUp()
-        self.write("pkg/__init__.py", "from pkg.helpers import thing as thing\n")
+        # The original fixture here was `pkg.thing()` through a re-export, and the class two
+        # below now RESOLVES that - which is the point of it. So this uses a receiver nothing
+        # can type, which stays unresolved and always will: `x.thing()` on an untyped `x` is
+        # a runtime answer.
+        self.write("pkg/__init__.py", "")
         self.write("pkg/helpers.py", "def thing():\n    return 1\n")
-        self.write("app.py", "import pkg\n\n\ndef use():\n    return pkg.thing()\n")
+        self.write("app.py", "def use(x):\n    return x.thing()\n")
         self.graph()
 
     def ask(self, name="thing"):
@@ -9515,3 +9519,56 @@ class CalledTwentyTimesAndReportedAsUnreached(Sandbox):
         self.graph()
         text, _ = self.ask("never_used_anywhere")
         self.assertIn("Nothing in this tree names it either", text)
+
+
+class APackageAttributeThatThePackageReExports(Sandbox):
+    """`flask.abort(404)` is twenty unresolved calls, and the tool already holds everything it
+    needs to resolve them.
+
+    It resolves `memory.recall()` when `memory` is an imported module: the receiver names a
+    module this file imported, so look up `recall` in it. That rule fails one step early for
+    `flask.abort`, because `abort` is not DEFINED in `flask/__init__.py` - it is re-exported
+    there, `from .helpers import abort as abort`.
+
+    The from-imports of every module are already computed and already carried to resolution
+    time. This follows them one hop: a name the receiving module re-exports resolves to where
+    it came from. It is exactly as careful as the rule it extends - the receiver must be a
+    module this file imported, and the name must be one that module explicitly re-exports."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "from pkg.helpers import abort as abort\n")
+        self.write("pkg/helpers.py", "def abort(code):\n    return code\n")
+        self.write("app.py", "import pkg\n\n\ndef handler():\n    return pkg.abort(404)\n")
+        self.g = self.graph()
+
+    def test_the_call_resolves_to_where_the_function_is_defined(self):
+        self.assertEqual(codegraph.callers_of(self.g, "pkg/helpers.abort"), ["app.handler"])
+
+    def test_and_it_is_labelled_rather_than_guessed(self):
+        """Every resolved edge carries how it was resolved. A new path that leaves the label
+        blank is one nobody can audit."""
+        edge = next(e for e in self.g["calls"]
+                    if e.get("callee") == "abort" and e.get("src") == "app.handler")
+        self.assertEqual(edge.get("confidence"), "RE-EXPORT", edge)
+
+    def test_the_blast_radius_reaches_through_it(self):
+        self.assertIn("app.handler", codegraph.blast_radius(self.g, "pkg/helpers.abort"))
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_name_the_package_does_not_re_export_is_not_invented(self):
+        """The whole risk of this rule. `pkg.missing()` must stay unresolved rather than being
+        attached to something with the right name somewhere else in the tree."""
+        self.write("other.py", "def missing():\n    return 1\n")
+        self.write("app2.py", "import pkg\n\n\ndef h2():\n    return pkg.missing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "other.missing"), [])
+
+    def test_a_receiver_this_file_did_not_import_is_not_followed(self):
+        """The existing rule's own guard, which this must not weaken: a local variable that
+        happens to share a package's name is not that package."""
+        self.write("app3.py",
+                   "class Thing:\n    def abort(self, code):\n        return code\n\n\n"
+                   "def h3():\n    pkg = Thing()\n    return pkg.abort(1)\n")
+        g = self.graph()
+        self.assertNotIn("app3.h3", codegraph.callers_of(g, "pkg/helpers.abort"))

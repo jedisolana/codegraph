@@ -1605,7 +1605,23 @@ def build(dirs=None, write=True):
                 conf = "AMBIGUOUS"; e["candidates"] = sorted(set(hits))
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_alias.get(srcmod, {})):        # memory.recall() where `memory` is an imported module -> resolve to memory.recall
-            dst = by_modname.get((mod_alias[srcmod][recv], callee)); conf = "QUALIFIED" if dst else conf
+            target_mod = mod_alias[srcmod][recv]
+            dst = by_modname.get((target_mod, callee)); conf = "QUALIFIED" if dst else conf
+            if not dst:
+                # A NAME THE PACKAGE RE-EXPORTS. `flask.abort(404)` reaches a function
+                # `__init__.py` does not define - it re-exports it, `from .helpers import abort
+                # as abort` - which is the shape of nearly every Python library API. Twenty
+                # calls in a clone of flask, all unresolved, with everything needed to resolve
+                # them already computed and already carried here.
+                #
+                # As careful as the rule it extends: the receiver has to be a module this file
+                # imported, and the name has to be one that module EXPLICITLY re-exports. A
+                # name it does not re-export stays unresolved rather than being attached to
+                # something with the right name elsewhere in the tree.
+                came_from = mod_from.get(target_mod, {}).get(callee)
+                if came_from:
+                    dst = by_modname.get((came_from, callee))
+                    conf = "RE-EXPORT" if dst else conf
         if (not dst and method and not e.get("recv_local")
                 and e.get("recv_path") in allmods
                 and e.get("recv_root") in imported_in.get(srcmod, ())):

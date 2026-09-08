@@ -81,6 +81,7 @@ not work out are listed as exactly that, rather than quietly guessed:
 |---|---|---|
 | `LOCAL` | a bare call to a function this scope can see — the same module, or a function it is nested inside | yes |
 | `QUALIFIED` | `thing.load()`, where `thing` is a module this file actually imported | yes |
+| `RE-EXPORT` | `flask.abort()`, where `abort` is not defined in `flask/__init__.py` but re-exported by it — the shape of nearly every library API | yes |
 | `SELF-METHOD` | `self.helper()`, resolved inside the enclosing class | yes |
 | `INHERITED` | `self.method()` or `super().method()`, where the method lives on a base class | yes |
 | `CLASS` | `Parent.method()` — the receiver is a class in this module | yes |
@@ -149,13 +150,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5688,
-  "call_sites": 7452,
-  "edge_confidence": {"EXTERNAL": 3061, "INHERITED": 747, "BUILTIN": 605, "SELF-METHOD": 565,
-                      "QUALIFIED": 325, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 5711,
+  "call_sites": 7480,
+  "edge_confidence": {"EXTERNAL": 3071, "INHERITED": 754, "BUILTIN": 607, "SELF-METHOD": 565,
+                      "QUALIFIED": 329, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1844,
-  "could_have_been_resolved": 2022,
+  "resolved_to_one_def": 1855,
+  "could_have_been_resolved": 2033,
   "resolution_rate": 0.912
 }
 ```
@@ -436,14 +437,14 @@ it usable:
   unresolved rather than being attributed to a class the mixin never names. Measured: after
   dotted bases were fixed this is what remains of `assertEqual` on the standard library,
   2,527 of the original 15,872, and every one of them is this shape.
-- **A name re-exported by a package is not followed.** `__init__.py` doing
-  `from .helpers import abort as abort`, called as `flask.abort(404)`, is the shape of nearly
-  every Python library API — and the imports recorded here are module-to-module, so the
-  re-exported *name* is not among them. Those twenty calls are in the graph, labelled
-  unresolved, and `callers` does not name them. When you ask about such a function the answer
-  says so: *called 20 times through `flask.abort` by calls this graph could not resolve* —
-  never "nothing names it", which is what it used to say while twenty edges in the same graph
-  named it.
+- **A re-export is followed to the definition, through however many packages.** `pd.DataFrame`
+  reaches `pandas/core/frame.DataFrame` even though `pandas/__init__.py` gets it from
+  `pandas.core.api`, which gets it from `core.frame` — labelled `RE-EXPORT`. It fires only when
+  the receiver is a module this file imported and the name is one that module explicitly
+  re-exports; a name it does not re-export is left unresolved rather than attached to something
+  with the right name elsewhere in the tree. **It cannot fire under a src-layout**, where
+  `import flask` does not name the module id `src/flask/__init__` — measured: 38,162 of these
+  on pandas and none at all on flask.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
   say it outright: a parameter's, a variable's, and a function's **declared return type**, so
   `def make() -> Client` types what `c = make()` holds. A container annotation is not its contents,
@@ -493,9 +494,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,153 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,154 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer and an incompleteness warning,
-which are 166 of those mutations
+which are 167 of those mutations
 and has not had a pass of its own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -542,7 +543,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 730 more. Grouped, because a list of every one of them stopped being
+The test suite adds 735 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
