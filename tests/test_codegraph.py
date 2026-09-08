@@ -8457,3 +8457,64 @@ class OneBadAnswerEndedTheSession(Sandbox):
         replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
         self.assertIn(3, [m.get("id") for m in replies], r.stdout[-300:])
         self.assertEqual(r.returncode, 0)
+
+
+class EveryToolOnSomethingThatExists(Sandbox):
+    """`codegraph_find` shipped broken because every test of it asked for a name that was not
+    there. It joined pairs as strings, which only works when there are no pairs.
+
+    Three other tools had never been asked a question with a real answer either. This asks all
+    of them, about a tree built so that each has something to say, and checks the reply is an
+    answer rather than an error - which is the check that would have caught the first one.
+
+    Kept as one test over a list rather than eight tests, so a ninth tool is covered the day it
+    is added rather than the day somebody remembers."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py",
+                   "def load():\n    return 1\n\n\ndef helper():\n    return load()\n")
+        self.write("pkg/app.py",
+                   "from pkg.core import helper\n\n\ndef run():\n    return helper()\n")
+        self.graph()
+
+    ASKS = (("codegraph_callers", {"name": "load"}),
+            ("codegraph_calls", {"name": "helper"}),
+            ("codegraph_blast", {"name": "load"}),
+            ("codegraph_sites", {"name": "load"}),
+            ("codegraph_where", {"name": "load"}),
+            ("codegraph_find", {"name": "load"}),
+            ("codegraph_shape", {"name": "pkg/core"}),
+            ("codegraph_path", {"name": "run", "to": "load"}))
+
+    def test_every_tool_answers_a_question_it_has_an_answer_to(self):
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+        for i, (tool, args) in enumerate(self.ASKS, start=2):
+            msgs.append({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                         "params": {"name": tool, "arguments": args}})
+        payload = "".join(json.dumps(m) + "\n" for m in msgs)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = {m.get("id"): m for m in
+                   (json.loads(x) for x in r.stdout.splitlines() if x.strip())}
+        for i, (tool, _args) in enumerate(self.ASKS, start=2):
+            with self.subTest(tool=tool):
+                self.assertIn(i, replies, f"{tool} got no reply at all")
+                self.assertNotIn("error", replies[i], f"{tool}: {replies[i].get('error')}")
+                text = replies[i]["result"]["content"][0]["text"]
+                self.assertTrue(text.strip(), f"{tool} answered with nothing")
+                self.assertNotIn("(nothing for", text, f"{tool} found nothing to say")
+
+    def test_the_list_covers_every_tool_the_server_advertises(self):
+        """The part that makes it hold: a tool added without a question here fails this."""
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        advertised = {t["name"] for t in replies[-1]["result"]["tools"]}
+        self.assertEqual(advertised, {t for t, _ in self.ASKS})
