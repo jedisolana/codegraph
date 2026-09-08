@@ -9885,6 +9885,65 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class TheInterpreterIsAskedWhatAStarCarries(Sandbox):
+    """What `from x import *` brings is `__all__` when the module states one and otherwise the
+    names that do not begin with an underscore. That rule was written here from reading the
+    language reference, which is exactly the kind of thing to get subtly wrong - so it is
+    checked against the interpreter instead of against what was believed.
+
+    The package is imported, Python is asked which names actually arrived, and codegraph is
+    required to resolve a call through exactly those and no others."""
+
+    NAMES = ("shown", "hidden", "_under", "plain", "_private")
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "from pkg.a import *\nfrom pkg.b import *\n")
+        self.write("pkg/a.py",
+                   '__all__ = ["shown"]\n\n\n'
+                   "def shown():\n    return 1\n\n\n"
+                   "def hidden():\n    return 2\n\n\n"
+                   "def _under():\n    return 3\n")
+        self.write("pkg/b.py",
+                   "def plain():\n    return 4\n\n\n"
+                   "def _private():\n    return 5\n")
+        self.write("app.py", "import pkg\n\n\n" + "".join(
+            f"def use_{n.lstrip('_')}():\n    return pkg.{n}()\n\n\n" for n in self.NAMES))
+
+    def python_says(self):
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "pkg = importlib.import_module('pkg')\n"
+                f"print(json.dumps({{n: hasattr(pkg, n) for n in {self.NAMES!r}}}))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_codegraph_carries_exactly_what_python_carries(self):
+        arrived = self.python_says()
+        self.assertEqual(sorted(k for k, v in arrived.items() if v), ["plain", "shown"],
+                         "the fixture stopped exercising the rule")
+        g = self.graph()
+        got = {e["src"].split("use_")[1]: e.get("dst")
+               for e in g["calls"] if e["src"].startswith("app.use_")}
+        for name, present in sorted(arrived.items()):
+            resolved = bool(got.get(name.lstrip("_")))
+            self.assertEqual(resolved, present,
+                             f"python says pkg.{name} is "
+                             f"{'present' if present else 'absent'}; codegraph "
+                             f"{'resolved' if resolved else 'did not resolve'} it")
+
+    def test_all_naming_something_the_module_lacks_is_python_refusing_to_import(self):
+        """A detail worth recording rather than guarding: `__all__ = ["gone"]` where the module
+        defines no `gone` makes `from x import *` raise AttributeError, so the shape cannot
+        occur in code that runs. Nothing resolves through it here either, for the duller reason
+        that there is no definition to find."""
+        self.write("pkg/a.py", '__all__ = ["gone"]\n\n\ndef shown():\n    return 1\n')
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/a.shown"), [])
+
+
 class TheInterpreterIsAskedWhoWins(Sandbox):
     """The README says a diamond lands where the interpreter lands. That is checkable against
     the interpreter rather than against a hand-worked expectation, so this asks Python which

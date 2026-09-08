@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6541,
-  "call_sites": 8578,
-  "edge_confidence": {"EXTERNAL": 3282, "INHERITED": 1052, "BUILTIN": 755, "SELF-METHOD": 596,
-                      "QUALIFIED": 446, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6566,
+  "call_sites": 8609,
+  "edge_confidence": {"EXTERNAL": 3296, "INHERITED": 1057, "BUILTIN": 759, "SELF-METHOD": 597,
+                      "QUALIFIED": 447, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2330,
-  "could_have_been_resolved": 2504,
+  "resolved_to_one_def": 2337,
+  "could_have_been_resolved": 2511,
   "resolution_rate": 0.931
 }
 ```
@@ -243,6 +243,14 @@ actually owns the call, and codegraph is required to have said the same. A hand-
 expectation encodes what the author believed C3 does; this cannot drift from what Python does.
 Replacing the linearisation with a depth-first walk — the bug that was there originally — turns
 it red on exactly the case that bug got wrong.
+
+What `from x import *` carries is checked the same way, because that rule was written from
+reading the language reference and is exactly the kind of thing to get subtly wrong. The
+package is imported, Python is asked which names actually arrived, and the tool has to resolve
+through those and no others. It agrees on all five: a name `__all__` lists, one it leaves out,
+an underscore name, a plain name from a module with no `__all__`, and an underscore name from
+one. Asking also turned up a detail worth knowing — `__all__` naming something the module does
+not define makes `import *` raise, so that shape cannot occur in code that runs.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -793,7 +801,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 881 more. Grouped, because a list of every one of them stopped being
+The test suite adds 883 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
