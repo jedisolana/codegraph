@@ -8512,7 +8512,8 @@ class EveryToolOnSomethingThatExists(Sandbox):
             ("codegraph_where", {"name": "load"}),
             ("codegraph_find", {"name": "load"}),
             ("codegraph_shape", {"name": "pkg/core"}),
-            ("codegraph_path", {"name": "run", "to": "load"}))
+            ("codegraph_path", {"name": "run", "to": "load"}),
+            ("codegraph_repo_map", {}))
 
     def test_every_tool_answers_a_question_it_has_an_answer_to(self):
         msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
@@ -8544,3 +8545,144 @@ class EveryToolOnSomethingThatExists(Sandbox):
         replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
         advertised = {t["name"] for t in replies[-1]["result"]["tools"]}
         self.assertEqual(advertised, {t for t, _ in self.ASKS})
+
+
+class WhatIsThisCodebase(Sandbox):
+    """The first question anybody asks about a repository they have not seen, and the one this
+    tool could not answer.
+
+    `stats` reports on the GRAPH - node counts, edge confidence, resolution rate. Every number
+    in it is about how well the tool did its job, and none of them is about the code. An agent
+    dropped into an unfamiliar tree needs the other thing: which modules everything leans on,
+    what the busiest functions are, and where execution starts.
+
+    Derived, not guessed: the ranking is how many modules import a module, which the graph
+    already knows, and the output says so."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n\n\ndef save(x):\n    return x\n")
+        self.write("pkg/util.py", "from pkg.core import load\n\n\ndef helper():\n    return load()\n")
+        self.write("pkg/app.py", "from pkg.core import load\nfrom pkg.util import helper\n\n\n"
+                                 "def run():\n    return load() + helper()\n")
+        self.write("pkg/cli.py", "from pkg.app import run\n\n\ndef main():\n    return run()\n")
+        self.graph()
+
+    def map_text(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = codegraph._main(["map", *extra])
+        return rc, out.getvalue()
+
+    def test_it_names_the_module_everything_leans_on(self):
+        """core is imported by two others; cli by none. A map that lists them alphabetically
+        has told you nothing."""
+        rc, text = self.map_text()
+        self.assertEqual(rc, 0, text)
+        # Only the ranked block: `pkg/cli` appears again under the entry points, and the
+        # first version of this counted that as a third module and failed on its own filter.
+        lines = [l for l in text.splitlines()
+                 if "importer(s)" in l and ("pkg/core" in l or "pkg/cli" in l)]
+        self.assertEqual(len(lines), 2, text)
+        self.assertLess(text.index("pkg/core"), text.index("pkg/cli"), text)
+
+    def test_it_says_what_it_ranked_by(self):
+        """A list in an order nobody explained is a list somebody has to reverse-engineer."""
+        _, text = self.map_text()
+        self.assertRegex(text.lower(), r"import|depend")
+
+    def test_it_shows_where_execution_starts(self):
+        """`main` is called by nothing in the tree, which is what an entry point looks like."""
+        _, text = self.map_text()
+        self.assertIn("main", text)
+
+    def test_it_fits_on_a_screen(self):
+        """The point is orientation. A map the size of the territory is the territory."""
+        _, text = self.map_text()
+        self.assertLess(len(text.splitlines()), 40, text)
+
+    def test_it_is_also_an_mcp_tool(self):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_repo_map", "arguments": {}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        self.assertNotIn("error", replies[-1], r.stderr[-300:])
+        self.assertIn("pkg/core", replies[-1]["result"]["content"][0]["text"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_module_that_defines_nothing_is_not_the_top_of_the_map(self):
+        """An empty `__init__.py` collects an import from every module in its package, so it
+        ranked first: the top line of the map, pointing at a file with nothing in it."""
+        _, text = self.map_text()
+        ranked = [l for l in text.splitlines() if "importer(s)" in l]
+        self.assertNotIn("__init__", ranked[0], text)
+
+    def test_a_single_module_still_maps(self):
+        """No imports at all is a real repository, and ranking by importers must not divide by
+        the number of them."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "only.py"), "w", encoding="utf-8") as f:
+            f.write("def one():\n    return 1\n")
+        codegraph.OUT = os.path.join(d, "codegraph.json")
+        codegraph.CACHE = os.path.join(d, "codegraph.cache.json")
+        codegraph.HOME = d
+        codegraph.build([d])
+        rc, text = self.map_text()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("only", text)
+
+    def test_the_numbers_are_the_ones_the_graph_holds(self):
+        """core has two importers. If the map says anything else it is describing something
+        other than this repository."""
+        _, text = self.map_text()
+        line = next(l for l in text.splitlines() if "pkg/core" in l)
+        self.assertIn("2", line, line)
+
+
+class WhereItStartsIsNotANestedTestHelper(Sandbox):
+    """On a clone of flask the map's `this is where it starts` listed
+    `tests/test_cli.test_appgroup_app_context.cli` - a function defined inside a test function.
+    Flask's actual entry point, `src/flask/cli.main`, was not in the list at all.
+
+    Two rules, both about what an entry point IS. It is defined at module level, not nested
+    inside another function - a closure called by the function that made it is not where
+    anything starts. And a repository is oriented by its product before its suite."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/cli.py", "def main():\n    return 1\n")
+        self.write("tests/__init__.py", "")
+        self.write("tests/test_it.py",
+                   "def test_thing():\n    def cli():\n        return 1\n    return cli()\n")
+        self.graph()
+
+    def entries(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            codegraph._main(["map"])
+        text = out.getvalue()
+        head = "this is where it starts:"
+        return text.split(head)[1] if head in text else ""
+
+    def test_a_nested_function_is_not_an_entry_point(self):
+        self.assertNotIn("test_thing.cli", self.entries())
+
+    def test_the_real_one_is(self):
+        self.assertIn("pkg/cli.main", self.entries())
+
+    def test_the_product_comes_before_the_suite(self):
+        """A `main` in a test module is a real thing to find, and it is not what somebody
+        opening an unfamiliar repository wants first."""
+        self.write("tests/test_main.py", "def main():\n    return 1\n")
+        self.graph()
+        text = self.entries()
+        self.assertIn("pkg/cli.main", text)
+        if "tests/test_main.main" in text:
+            self.assertLess(text.index("pkg/cli.main"), text.index("tests/test_main.main"), text)

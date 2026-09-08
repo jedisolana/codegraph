@@ -32,6 +32,9 @@ same-named functions would be worse than no blast radius at all.
                                here, instead of reading 4 file(s) whole (2,140 lines)`.
                                Opt-in, because scripts parse the current output; always on
                                over MCP, where an agent is deciding whether to open them.
+  codegraph map                what this codebase IS: the modules everything leans on,
+                               ranked by how many others import them, and where execution
+                               starts. The first question in a repository you have not seen.
   codegraph shape <file>       every signature in a file and its line number, no bodies -
                                3,600 lines of source as 110 lines of what it offers
   codegraph mcp                serve the graph to a coding agent over MCP (stdin/stdout).
@@ -61,7 +64,7 @@ import os
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 _BUILTINS = set(dir(builtins))                              # next()/len()/sorted()/open()/... are builtins, never a same-named in-tree func (discard edges to built-ins; matters most cross-tree where a unique in-tree name shadows a builtin)
 
@@ -3120,6 +3123,76 @@ def shape(path):
     return src.count("\n") + 1, lines
 
 
+def _demote_test(node_id):
+    """0 for the product, 1 for the suite. Orientation starts with what the code IS for.
+
+    Spelled with fnmatch rather than a regular expression because this file does not import
+    `re` - it parses Python with `ast`, which is the point of it.
+    """
+    parts = node_id.replace("\\", "/").split("/")
+    return 1 if any(p in ("test", "tests") or p.startswith("test_") for p in parts) else 0
+
+
+def repo_map(g, limit=12):
+    """What this codebase IS, in one screen.
+
+    The first question anybody asks about a tree they have not seen, and the one this tool
+    could not answer. `stats` reports on the GRAPH - node counts, edge confidence, resolution
+    rate - and every number in it is about how well the tool did its job rather than about the
+    code.
+
+    Ranked by how many modules import a module, because that is the thing the graph already
+    knows and it is what "leans on" means. The output says so: a list in an order nobody
+    explained is a list somebody has to reverse-engineer.
+    """
+    mods = [n for n in g["nodes"] if n["kind"] == "module"]
+    importers = defaultdict(set)
+    for e in g["imports"]:
+        if any(m["id"] == e["callee"] for m in mods):     # in-tree only; stdlib is not the map
+            importers[e["callee"]].add(e["src"])
+    called = Counter(e["callee"] for e in g["calls"])
+    by_mod = defaultdict(list)
+    for n in g["nodes"]:
+        if n["kind"] in ("func", "class"):
+            by_mod[n["module"]].append(n)
+    out = ["ranked by how many modules in this tree import them:"]
+    # A module that DEFINES nothing is not what anything leans on, whatever the import count
+    # says. An empty `__init__.py` collects an import from every module in its package and so
+    # ranked first - the top line of the map, pointing at a file with nothing in it.
+    ranked = sorted((m for m in mods if by_mod.get(m["id"])),
+                    key=lambda m: (-len(importers[m["id"]]), m["id"]))
+    for m in ranked[:limit]:
+        n_in = len(importers[m["id"]])
+        defs = sorted(by_mod.get(m["id"], []), key=lambda d: -called.get(d["name"], 0))
+        busiest = ", ".join(d["name"] for d in defs[:3])
+        out.append(f"  {n_in:>3} importer(s)  {m['id']}   [{busiest}]")
+    if len(ranked) > limit:
+        out.append(f"  ...and {len(ranked) - limit} more module(s)")
+    # WHERE IT STARTS. A definition nothing in the tree calls is either an entry point or dead,
+    # and `unused` already tells you which; here it is the shortlist worth reading first.
+    names_called = {e["callee"] for e in g["calls"]}
+    starters = ("main", "run", "cli", "start", "serve", "app")
+
+    def module_level(n):
+        # `tests/test_cli.test_appgroup_app_context.cli` is a function defined INSIDE a test
+        # function, and it topped this list on a clone of flask while flask's own
+        # `src/flask/cli.main` was absent. A closure called by the function that made it is not
+        # where anything starts.
+        return "." not in n["id"][len(n["module"]) + 1:]
+
+    found = [n for n in g["nodes"]
+             if n["kind"] == "func" and n["name"] in starters
+             and n["name"] not in names_called and module_level(n)]
+    # A `main` in a test module is a real thing to find and is not what somebody opening an
+    # unfamiliar repository wants first.
+    entries = [n["id"] for n in sorted(found, key=lambda n: (_demote_test(n["id"]), n["id"]))]
+    if entries:
+        out.append("")
+        out.append("nothing in this tree calls these, so this is where it starts:")
+        out += [f"  {e}" for e in entries[:8]]
+    return out
+
+
 # ------------------------------------------------------------------ a door an agent can knock on
 #
 # Everything above this line is a thing a PERSON runs. An agent has to shell out for it and then
@@ -3156,6 +3229,10 @@ MCP_TOOLS = {
     "codegraph_shape": ("what a file offers - every signature and its line number, without the "
                         "bodies. Ask this INSTEAD of reading a file you only need the shape of",
                         "name", None),
+    "codegraph_repo_map": ("what this codebase is: the modules everything leans on, ranked by "
+                           "how many others import them, and where execution starts. Ask this "
+                           "FIRST in a repository you have not seen",
+                           None, None),
 }
 
 
@@ -3279,6 +3356,8 @@ def _mcp_call(tool, args):
         # `load` exits the process when there is no graph. That is right for a command and
         # fatal for a server, and the message it exits with is the one the agent needs.
         return _mcp_result(str(e) or "no graph yet - run: codegraph build <path>")
+    if tool == "codegraph_repo_map":
+        return _mcp_result("\n".join(repo_map(g)) + _unread_warning(g))
     raw = (args.get("name") or args.get("query") or "").strip()
     if not raw:
         return _mcp_result("this tool needs a `name`")
@@ -3350,16 +3429,19 @@ def _mcp_serve(stream_in=None, stream_out=None):
         stream_out.write(json.dumps(msg) + "\n")
         stream_out.flush()
 
-    tools = [{"name": n,
-              "description": d,
-              "inputSchema": {"type": "object",
-                              "properties": ({"name": {"type": "string"},
-                                              "to": {"type": "string"}}
-                                             if n == "codegraph_path"
-                                             else {"name": {"type": "string"}}),
-                              "required": (["name", "to"] if n == "codegraph_path"
-                                           else ["name"])}}
-             for n, (d, _arg, _fn) in MCP_TOOLS.items()]
+    def schema(n):
+        if n == "codegraph_path":
+            return ({"name": {"type": "string"}, "to": {"type": "string"}}, ["name", "to"])
+        if n == "codegraph_repo_map":
+            return ({}, [])                          # it asks about the whole tree, not a name
+        return ({"name": {"type": "string"}}, ["name"])
+
+    tools = []
+    for n, (d, _arg, _fn) in MCP_TOOLS.items():
+        props, required = schema(n)
+        tools.append({"name": n, "description": d,
+                      "inputSchema": {"type": "object", "properties": props,
+                                      "required": required}})
 
     for line in stream_in:
         line = line.strip()
@@ -3537,6 +3619,12 @@ def _main(argv=None):
         return 0
     if a[0] == "--selftest": return _selftest()
     if a[0] == "mcp": return _mcp_serve()
+    if a[0] == "map":
+        g = load()
+        out = repo_map(g)
+        if as_json: _emit({"query": "map", "results": out})
+        else: print("\n".join(out))
+        return 0
     if a[0] == "shape":
         if len(a) < 2 or not a[1].strip():
             print("usage: codegraph shape <file or module>", file=sys.stderr)
