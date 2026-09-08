@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6446,
-  "call_sites": 8451,
-  "edge_confidence": {"EXTERNAL": 3245, "INHERITED": 1018, "BUILTIN": 747, "SELF-METHOD": 595,
-                      "QUALIFIED": 432, "LOCAL": 227, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6485,
+  "call_sites": 8498,
+  "edge_confidence": {"EXTERNAL": 3260, "INHERITED": 1032, "BUILTIN": 750, "SELF-METHOD": 595,
+                      "QUALIFIED": 438, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2280,
-  "could_have_been_resolved": 2454,
-  "resolution_rate": 0.929
+  "resolved_to_one_def": 2301,
+  "could_have_been_resolved": 2475,
+  "resolution_rate": 0.93
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.929 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.93 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -188,7 +188,7 @@ have been tracked from the beginning, so the `before` is where each started:
 |---|---|---|
 | flask | 0.241 | **0.755** |
 | ansible | 0.379 | **0.726** |
-| pandas | 0.359 | **0.811** |
+| pandas | 0.359 | **0.817** |
 
 And the whole corpus it is measured against now — **fourteen codebases, 596,641 call edges,
 156,835 definitions**. They were not chosen for flattering numbers; they were chosen to be
@@ -200,14 +200,20 @@ unalike, and the low two are here for the same reason as the high two:
 | click | 0.864 | | flask | 0.755 |
 | starlette | 0.837 | | pydantic | 0.727 |
 | black | 0.823 | | ansible | 0.726 |
-| scrapy | 0.816 | | sqlalchemy | 0.690 |
-| pandas | 0.811 | | celery | 0.596 |
+| scrapy | 0.816 | | sqlalchemy | 0.702 |
+| pandas | 0.817 | | celery | 0.596 |
 | httpx | 0.801 | | stdlib | 0.577 |
 
 Running it over code nobody aimed it at is what has found every real bug in it, and the number
 that matters is the one that looks wrong. `httpx` first measured **0.353** against a field that
 was otherwise above 0.72, and that gap was one line: `httpx/__init__.py` is twelve lines of
-`from ._api import *`. The two at the bottom were checked the same way and are not that. celery
+`from ._api import *`. The two at the bottom were checked the same way and are not that. `sqlalchemy` was the next one down and gave up a rule rather than a bug: it is the library that
+made the fluent interface Python idiom, and every link in `q.filter(a).order_by(b).all()` is
+annotated `-> Self`. That is PEP 673 and it names no class, so the chain stopped at the first
+link — 510 methods in pandas are written that way and 261 in sqlalchemy. `Self` means the class
+of the RECEIVER, which is not the class the method is written in the moment a subclass inherits
+it, so where a subclass overrides the next call in the chain the answer is refused rather than
+guessed. celery
 is a dynamic task registry and unannotated fixtures; the standard library is old, barely
 annotated, and spends its time on strings and dicts — which is the blind spot named further
 down, showing up as a number.
@@ -252,7 +258,7 @@ round of it, so this table is that round on its own:
 | ansible | 17,553 → **20,120** | 11,309 → **7,584** |
 | pandas | 96,759 → **102,318** | 31,635 → **23,892** |
 
-Ten rules and five bugs did that, and none of them is clever. A name a package **re-exports** —
+Eleven rules and six bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -727,7 +733,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,372 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,383 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. Three samples have been drawn from it as it changed: 150, then 300, then 300 again, and every
 one of the 750 was killed — one of them by hanging rather than failing, which is counted apart
@@ -778,7 +784,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 866 more. Grouped, because a list of every one of them stopped being
+The test suite adds 872 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

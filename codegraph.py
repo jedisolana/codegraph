@@ -564,6 +564,18 @@ def _defs_and_calls(path, mod):
             # because that is where the name means something. A container - `list[Client]` - is
             # not its contents, and _annotated_class already refuses those.
             rt = _annotated_class(node.returns) if node.returns is not None else None
+            if rt == "Self" and self.classes:
+                # PEP 673, and how every fluent interface is annotated now: `-> Self` says the
+                # method hands back the receiver. `Self` names no class, so the annotation was
+                # read and found nothing, and `q.filter(a).order_by(b).all()` stopped at the
+                # first link - 510 methods in a clone of pandas are written that way.
+                #
+                # Recorded as the class the method is WRITTEN in, which is what it means for a
+                # receiver of exactly that class. A subclass inherits it and `Self` is then the
+                # subclass, so the resolution step refuses when a subclass overrides the call
+                # being made on the result.
+                rt = self.classes[-1].rsplit(".", 1)[-1]
+                d["returns_self"] = True
             if rt: d["returns"] = rt
             brt = _annotated_builtin(node.returns)
             if brt: d["returns_builtin"] = brt
@@ -1088,14 +1100,19 @@ def _defs_and_calls(path, mod):
                     # Read only if that guess turns out to name nothing.
                     edge["recv_call"] = self.ctypes[-1][recv]
                 elif (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Call)
-                      and not edge.get("super_of") and _called_class(fn.value)):
+                      and not edge.get("super_of")):
                     # `Leg("stock", 100).payoff(110)` - the class is written at the call site,
                     # in the same expression, and was read only when it went through a variable
                     # first. So `x = Leg(...)` then `x.payoff()` resolved and the one-liner did
                     # not, and `unused` then reported `Leg.payoff` as called by nothing while
                     # three lines called it. Found by running this tool over somebody else's
                     # codebase; the standard library writes the shape 944 times.
-                    edge["recv_type"] = _called_class(fn.value)
+                    # Only when the class reading names something. `Leg(100).payoff()` writes
+                    # the class at the call site; `Query().filter(1).all()` does not - its
+                    # receiver is a call ON a call - and gating the FALLBACK below on this
+                    # reading meant a chain two links long carried nothing at all.
+                    if _called_class(fn.value):
+                        edge["recv_type"] = _called_class(fn.value)
                     # ...and the same name carried as a FUNCTION, read only if that class
                     # reading turns out to name nothing. `make().go()` and `x = make()` then
                     # `x.go()` are one expression written two ways, and only the two-line form
@@ -2397,6 +2414,27 @@ def build(dirs=None, write=True):
     # where the name means something - and walks the MRO like every other typed receiver.
     returns_of = {n["id"]: n["returns"] for n in nodes if n.get("returns")}
     returns_builtin = {n["id"]: n["returns_builtin"] for n in nodes if n.get("returns_builtin")}
+    self_returning = {n["id"] for n in nodes if n.get("returns_self")}
+    children = defaultdict(list)
+    for cid, bases in bases_of.items():
+        for b in bases:
+            children[b].append(cid)
+
+    def _overridden_below(cand, callee):
+        """Does any class below the one this landed on define the same call. If so the receiver
+        might be that subclass - `Self` says it is whatever the object really is - and the base
+        class's version is the wrong answer for it."""
+        owner = cand.rsplit(".", 1)[0]
+        seen, stack = {owner}, list(children.get(owner, ()))
+        while stack:
+            c = stack.pop()
+            if c in seen:
+                continue
+            seen.add(c)
+            if f"{c}.{callee}" in def_ids:
+                return True
+            stack += children.get(c, ())
+        return False
     # A recorded class name that names no class in this tree is not an answer, so those fall
     # through to what the call hands back. This is the same "tried first, fallen back from"
     # order the two-line form uses, one level up.
@@ -2523,6 +2561,11 @@ def build(dirs=None, write=True):
                 continue
             cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target,
                               e["callee"], e)
+            if cand and target in self_returning and _overridden_below(cand, e["callee"]):
+                # `Self` is the RECEIVER's class, and a subclass that overrides this call would
+                # answer differently. Which one the object really is cannot be decided here, so
+                # neither is the answer.
+                cand = None
             if cand:
                 e["dst"] = cand
                 e["confidence"] = "TYPED"

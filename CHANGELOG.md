@@ -6,6 +6,31 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### A method that returns Self
+
+`def filter(self, x) -> Self:` - PEP 673, and how every fluent interface is annotated now.
+`Self` names no class, so the tool read the annotation and found nothing, and
+`q.filter(a).order_by(b).all()` stopped at the first link. 510 methods in a clone of pandas are
+written that way and 261 in sqlalchemy, which is the library that made the shape a Python
+idiom.
+
+What `Self` means is the class of the RECEIVER, not the class the method is written in, and
+those differ the moment a subclass inherits it. Where a subclass overrides the next call in the
+chain, answering with the base class's version would be wrong exactly when the object is really
+the subclass, so that case is refused rather than guessed.
+
+Underneath it, a chain two links long carried nothing at all. `Leg(100).payoff()` writes its
+class at the call site and `Query().filter(1).all()` does not - its receiver is a call ON a
+call - and the FALLBACK that handles the second case was gated behind the class reading that
+only handles the first. So the deferred name was never recorded, and no amount of knowing what
+`filter` returns would have helped.
+
+sqlalchemy 0.690 -> 0.702 and pandas 0.811 -> 0.817: 1,961 more resolved calls, none lost.
+
+The first measurement of this said 136 were lost. That baseline had an earlier, unguarded
+version of the same rule already in it, so the guard's correct refusals showed up as losses
+against it. Measured against the committed build instead, nothing is lost.
+
 ### A package that re-exports with a star
 
 `httpx/__init__.py` is twelve lines of `from ._api import *`, and every caller then writes
@@ -561,7 +586,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,372 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,383 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

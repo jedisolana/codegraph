@@ -9885,6 +9885,81 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class AMethodThatReturnsSelf(Sandbox):
+    """`def filter(self, x) -> Self:` - PEP 673, and how every fluent interface is annotated
+    now. `Self` names no class, so the tool read the annotation and found nothing, and a chain
+    like `q.filter(a).order_by(b).all()` stopped at the first link.
+
+    510 methods in a clone of pandas are annotated that way and 261 in sqlalchemy, which is the
+    library that invented the shape in Python.
+
+    What `Self` means is the class of the RECEIVER, not the class the method is written in, and
+    those differ the moment a subclass inherits it. Where a subclass overrides the next call in
+    the chain, answering with the base class's version would be wrong exactly half the time, so
+    that case is refused rather than guessed."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("q.py",
+                   "from typing import Self\n\n\n"
+                   "class Query:\n"
+                   "    def filter(self, x) -> Self:\n        return self\n\n"
+                   "    def all(self):\n        return []\n")
+
+    def test_a_chain_through_a_self_returning_method(self):
+        self.write("a.py", "from q import Query\n\n\n"
+                           "def use():\n    return Query().filter(1).all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "q.Query.all"), ["a.use"])
+
+    def test_the_two_line_form_too(self):
+        self.write("b.py", "from q import Query\n\n\n"
+                           "def use():\n    r = Query().filter(1)\n    return r.all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "q.Query.all"), ["b.use"])
+
+    def test_the_typing_extensions_spelling(self):
+        self.write("t.py",
+                   "from typing_extensions import Self\n\n\n"
+                   "class Chain:\n"
+                   "    def step(self) -> Self:\n        return self\n\n"
+                   "    def done(self):\n        return 1\n")
+        self.write("c.py", "from t import Chain\n\n\n"
+                           "def use():\n    return Chain().step().done()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "t.Chain.done"), ["c.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_subclass_that_overrides_the_next_call_is_refused(self):
+        """`Self` is the RECEIVER's class. A subclass inherits `filter` and overrides `all`, so
+        the chain could land on either - and answering with the base class's is wrong whenever
+        the object is really the subclass."""
+        self.write("sub.py", "from q import Query\n\n\n"
+                             "class SubQuery(Query):\n"
+                             "    def all(self):\n        return [1]\n")
+        self.write("d.py", "from q import Query\n\n\n"
+                           "def use():\n    return Query().filter(1).all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "q.Query.all"), [])
+        self.assertEqual(codegraph.callers_of(g, "sub.SubQuery.all"), [])
+
+    def test_a_subclass_that_does_not_override_it_still_resolves(self):
+        """The guard is about the next call being overridden, not about a subclass existing."""
+        self.write("sub2.py", "from q import Query\n\n\n"
+                              "class Plain(Query):\n    pass\n")
+        self.write("e.py", "from q import Query\n\n\n"
+                           "def use():\n    return Query().filter(1).all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "q.Query.all"), ["e.use"])
+
+    def test_self_on_a_plain_function_names_nothing(self):
+        self.write("f.py", "from typing import Self\n\n\n"
+                           "def make() -> Self:\n    return 1\n\n\n"
+                           "def use():\n    return make().all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "q.Query.all"), [])
+
+
 class APackageThatReExportsWithAStar(Sandbox):
     """`httpx/__init__.py` is twelve lines of `from ._api import *`, and then every caller writes
     `httpx.get(...)`. The re-export rule followed a name a package imports BY NAME and had
