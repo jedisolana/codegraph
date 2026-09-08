@@ -9572,3 +9572,69 @@ class APackageAttributeThatThePackageReExports(Sandbox):
                    "def h3():\n    pkg = Thing()\n    return pkg.abort(1)\n")
         g = self.graph()
         self.assertNotIn("app3.h3", codegraph.callers_of(g, "pkg/helpers.abort"))
+
+
+class ASrcLayoutIsStillOneImportAway(Sandbox):
+    """`import flask` names the module id `src/flask/__init__`, and nothing connected the two.
+
+    So every rule that starts "the receiver is a module this file imported" - QUALIFIED,
+    RE-EXPORT, the dotted-chain one - fires not at all in a repository laid out with a `src`
+    directory. Measured: 38,162 re-export resolutions on pandas, which is flat, and zero on
+    flask, which is not. Nothing about flask is harder; the id just has a prefix on it.
+
+    A source root is decidable from the tree, and it is exactly what Python itself looks for: a
+    directory that holds packages and is not one - no `__init__.py` of its own. `src` is the
+    convention with a name, but `lib` and any other are the same shape and this looks at the
+    shape.
+
+    Ambiguity is refused rather than guessed: two roots both offering `thing` resolve to
+    neither, which is what this tool does everywhere else it cannot tell."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("src/pkg/__init__.py", "from pkg.helpers import thing as thing\n")
+        self.write("src/pkg/helpers.py", "def thing():\n    return 1\n")
+        self.write("tests/test_it.py", "import pkg\n\n\ndef test_one():\n    return pkg.thing()\n")
+        self.g = self.graph()
+
+    def test_the_import_finds_the_package_under_src(self):
+        self.assertEqual(codegraph.callers_of(self.g, "src/pkg/helpers.thing"),
+                         ["tests/test_it.test_one"])
+
+    def test_a_plain_qualified_call_works_too(self):
+        """Not only re-exports: every rule that needs the receiver to name a module was dead
+        under this layout."""
+        self.write("src/pkg/direct.py", "def direct_thing():\n    return 1\n")
+        self.write("tests/test_two.py",
+                   "from pkg import direct\n\n\ndef test_two():\n    return direct.direct_thing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "src/pkg/direct.direct_thing"),
+                         ["tests/test_two.test_two"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_two_roots_offering_the_same_name_resolve_to_neither(self):
+        """The risk of looking under prefixes at all. A vendored copy is a real thing to find,
+        and picking one of two is a confident wrong answer."""
+        self.write("vendor/pkg/__init__.py", "from pkg.helpers import thing as thing\n")
+        self.write("vendor/pkg/helpers.py", "def thing():\n    return 1\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "src/pkg/helpers.thing"), [])
+        self.assertEqual(codegraph.callers_of(g, "vendor/pkg/helpers.thing"), [])
+
+    def test_a_directory_that_is_itself_a_package_is_not_a_root(self):
+        """`pkg/sub` is reached as `pkg.sub`, never as `sub` - and treating every directory as
+        a root would resolve `import sub` to it."""
+        self.write("src/pkg/sub/__init__.py", "")
+        self.write("src/pkg/sub/deep.py", "def deep_thing():\n    return 1\n")
+        self.write("tests/test_three.py",
+                   "import sub\n\n\ndef test_three():\n    return sub.deep_thing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "src/pkg/sub/deep.deep_thing"), [])
+
+    def test_a_flat_layout_still_works(self):
+        """The case that already worked, which this must not disturb."""
+        self.write("flat.py", "def flat_thing():\n    return 1\n")
+        self.write("tests/test_four.py",
+                   "import flat\n\n\ndef test_four():\n    return flat.flat_thing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])

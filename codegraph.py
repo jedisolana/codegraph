@@ -1384,16 +1384,49 @@ def build(dirs=None, write=True):
     # A package is a directory, and its module id is `pkg/__init__` - so an import that names
     # `pkg` has to be pointed at the file that actually holds its code. Without this,
     # `from pkg import helper` resolved to nothing at all, because there is no module `pkg`.
+    # SOURCE ROOTS. A directory that holds packages and is not one itself - no `__init__.py` of
+    # its own - is what Python treats as a place to import from, and `src` is the convention
+    # with a name rather than a rule. Without this, `import flask` never met the module id
+    # `src/flask/__init__`, so every rule beginning "the receiver is a module this file
+    # imported" fired not at all under that layout: 38,162 re-export resolutions on pandas,
+    # which is flat, and none on flask, which is not.
+    roots = set()
+    for mid in allmods:
+        if not mid.endswith("/__init__"):
+            continue
+        parent = mid[: -len("/__init__")].rpartition("/")[0]
+        if parent and f"{parent}/__init__" not in allmods:
+            roots.add(parent)
+
     def _real_module(name):
         # The PACKAGE first. Python's own finder looks for pkg/__init__.py before pkg.py in the
         # same directory, so when a repo holds both, `import thing` is the package - and this
         # used to answer with the file.
         pkg = f"{name}/__init__"
-        return pkg if pkg in allmods else name
+        if pkg in allmods:
+            return pkg
+        if name in allmods:
+            return name
+        # Then under each source root. AMBIGUITY IS REFUSED: two roots both offering `thing` -
+        # a vendored copy is a real thing to find - resolve to neither, which is what this tool
+        # does everywhere else it cannot tell.
+        under = [f"{r}/{name}/__init__" for r in roots if f"{r}/{name}/__init__" in allmods]
+        under += [f"{r}/{name}" for r in roots if f"{r}/{name}" in allmods]
+        return under[0] if len(under) == 1 else name
 
     for table in (mod_alias, mod_from):
         for mid in table:
             table[mid] = {k: _real_module(v) for k, v in table[mid].items()}
+    # `from pkg import direct` where `pkg/direct` is a MODULE binds a module, not a name -
+    # which is what Python does, and what makes `direct.direct_thing()` a qualified call
+    # rather than an untyped receiver. It was recorded only as a name imported from `pkg`, so
+    # every call through it was unresolved.
+    for mid, names in mod_from.items():
+        for name, target in names.items():
+            base = target[: -len("/__init__")] if target.endswith("/__init__") else target
+            sub = f"{base}/{name}"
+            if sub in allmods and name not in mod_alias.get(mid, {}):
+                mod_alias.setdefault(mid, {})[name] = sub
     imports = [i for i in imports if not i.get("maybe") or i["callee"] in allmods]
     for i in imports:
         i.pop("maybe", None)
