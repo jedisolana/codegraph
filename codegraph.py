@@ -3306,6 +3306,21 @@ def _unread_warning(g):
             f"read, so this answer may be incomplete: {', '.join(shown)}{more}")
 
 
+def _where_they_live(g, ids):
+    """Which files the answers are in - a fact, not a comparison.
+
+    The saving footer belongs where the baseline is real: `shape` replaces opening a file you
+    were going to open. A list of callers replaces a search, and comparing it to reading whole
+    files nobody would have read is a claim that flatters the tool.
+    """
+    files = {os.path.basename(p) for p in _files_for(g, ids)}
+    if not files:
+        return ""
+    shown = ", ".join(sorted(files)[:4])
+    more = f", +{len(files) - 4} more" if len(files) > 4 else ""
+    return f"\n\n{len(ids)} result(s), in {len(files)} file(s): {shown}{more}"
+
+
 def _saving(answer_lines, paths):
     """One line saying what this replaced, with its baseline written down.
 
@@ -3474,10 +3489,14 @@ def _mcp_call(tool, args):
         # its newest part.
         return _mcp_result(f"nothing calls {target}. " + _why_not_called(g, target)
                            + _unread_warning(g))
-    # The ids in the answer name the files somebody would otherwise have opened to learn the
-    # same thing. That is the baseline, and it is the honest one to compare against.
-    return _mcp_result("\n".join(out) + _saving(len(out), _files_for(g, out))
-                       + _unread_warning(g))
+    # NO SAVING CLAIMED HERE, and that is a correction of my own work from this morning. The
+    # footer said `4 line(s) here, instead of reading 1 file(s) whole (3921 lines)` - and
+    # nobody learns who calls a function by reading a 3,921-line file end to end. They grep,
+    # and grep shows them four lines. The number was true and the sentence was false, which is
+    # the thing `a saving with no stated baseline is a marketing number` was written to stop.
+    #
+    # What IS true and worth saying: where the answers live, so the next step is one file away.
+    return _mcp_result("\n".join(out) + _where_they_live(g, out) + _unread_warning(g))
 
 
 def _mcp_serve(stream_in=None, stream_out=None):
@@ -3745,7 +3764,7 @@ def _main(argv=None):
         else:
             print("\n".join(found) or "(none)")
             if saved and found:
-                print(_saving(len(found), _files_for(g, found)).strip())
+                print(_where_they_live(g, found).strip())
     elif a[0] == "blast":
         g = load()
         t, rc = _one_target(g, a[1], as_json)

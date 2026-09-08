@@ -8041,9 +8041,10 @@ class WhatTheAnswerSavedYou(Sandbox):
         self.assertIn(str(real), text, text[:300])   # the file was 303
         self.assertRegex(text.lower(), r"instead of|rather than|whole")
 
-    def test_a_list_of_callers_says_which_files_it_saved_opening(self):
+    def test_a_list_of_callers_says_which_files_the_answers_are_in(self):
+        """Not what it saved - see the correction two classes below. Where they are."""
         text, _ = self.call("codegraph_callers", name="load")
-        self.assertRegex(text.lower(), r"\bfile|line", text[:300])
+        self.assertRegex(text.lower(), r"\bfile", text[:300])
 
     def test_the_baseline_is_named_not_implied(self):
         """A saving with no stated baseline is a marketing number. The claim here is `you would
@@ -8080,10 +8081,14 @@ class WhatTheAnswerSavedYou(Sandbox):
         self.assertEqual(out.getvalue().strip(), "pkg/app.run")
 
     def test_and_it_appears_when_asked(self):
+        """It says WHERE the answers live rather than claiming a saving. Written the other way
+        first: `instead of reading 1 file(s) whole` for a list of callers compares against
+        something nobody would have done - they would have grepped - and the correction is two
+        classes further down."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             codegraph._main(["callers", "load", "--saved"])
-        self.assertRegex(out.getvalue().lower(), r"instead of|whole")
+        self.assertRegex(out.getvalue().lower(), r"result\(s\), in .*file")
 
 
 class AnAnswerThatCouldNotSeeEverything(Sandbox):
@@ -8830,3 +8835,66 @@ class NothingCallsItIsNotTheSameAsNothingReachesIt(Sandbox):
         self.graph()
         text, _ = self.ask("handle_go")
         self.assertTrue(text.startswith("pkg/app.run"), text[:120])
+
+
+class TheSavingHasToBeAThingSomebodyWouldHaveDone(Sandbox):
+    """I wrote the saving footer this morning and its baseline is wrong for most of the tools.
+
+        4 line(s) here, instead of reading 1 file(s) whole (3921 lines).
+
+    That is the answer to `who calls _describe`, and nobody learns that by reading a
+    3,921-line file end to end. They grep, and grep shows them four lines. The comparison is
+    against something no one would have done, which makes the number true and the sentence
+    false - and `a saving with no stated baseline is a marketing number` was the rule I wrote
+    beside it.
+
+    For `shape` the baseline is exactly right: you wanted the shape of that file, so the
+    alternative really is opening it. That is where the claim stays.
+
+    For the call-graph answers there is a true thing to say instead - where the answers live,
+    so you can go straight there - and no saving claimed."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n" + "# padding\n" * 300)
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n"
+                                 + "# padding\n" * 200)
+        self.graph()
+
+    def call(self, tool, **args):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": args}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_a_callers_answer_claims_no_saving(self):
+        text, _ = self.call("codegraph_callers", name="load")
+        self.assertNotRegex(text.lower(), r"instead of reading")
+
+    def test_but_it_still_says_where_the_answers_live(self):
+        """Dropping the false claim must not drop the useful part: an agent that knows which
+        file to open next has been told something worth knowing."""
+        text, _ = self.call("codegraph_callers", name="load")
+        self.assertRegex(text.lower(), r"\bfile")
+
+    def test_the_shape_of_a_file_still_claims_it(self):
+        """Here the baseline is exactly right. You wanted the shape of that file; the
+        alternative really is opening it."""
+        text, _ = self.call("codegraph_shape", name="pkg/core")
+        self.assertRegex(text.lower(), r"instead of reading")
+
+    def test_the_answer_is_still_first(self):
+        text, _ = self.call("codegraph_callers", name="load")
+        self.assertTrue(text.splitlines()[0].startswith("pkg/app.run"), text[:120])
+
+    def test_the_command_line_flag_still_works_and_is_honest_too(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            codegraph._main(["callers", "load", "--saved"])
+        self.assertNotRegex(out.getvalue().lower(), r"instead of reading")

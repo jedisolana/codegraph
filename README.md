@@ -149,13 +149,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5335,
-  "call_sites": 7045,
-  "edge_confidence": {"EXTERNAL": 2853, "INHERITED": 717, "BUILTIN": 567, "SELF-METHOD": 519,
-                      "QUALIFIED": 317, "LOCAL": 195, "UNTYPED": 159, "TYPED": 5,
+  "call_edges": 5369,
+  "call_sites": 7079,
+  "edge_confidence": {"EXTERNAL": 2875, "INHERITED": 720, "BUILTIN": 570, "SELF-METHOD": 523,
+                      "QUALIFIED": 318, "LOCAL": 195, "UNTYPED": 160, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1756,
-  "could_have_been_resolved": 1915,
+  "resolved_to_one_def": 1764,
+  "could_have_been_resolved": 1924,
   "resolution_rate": 0.917
 }
 ```
@@ -452,9 +452,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,126 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,131 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer and an incompleteness warning,
-which are 139 of those mutations
+which are 144 of those mutations
 and has not had a pass of its own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -501,7 +501,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 680 more. Grouped, because a list of every one of them stopped being
+The test suite adds 685 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
