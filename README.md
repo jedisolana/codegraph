@@ -280,10 +280,13 @@ different name from the one the class was defined under. So the lookup found the
 check threw it away, and every method Blueprint inherits from Scaffold was invisible. 78 more
 calls on flask, 15 on ansible, and one correction: a `super()` that was skipping a level.
 
-Every one of these was checked edge by edge against the build before it: 6,794 calls gained
-across the three repositories, and 6 lost — five that the old reading order reached by using
-the NEW type on the OLD name, right by luck and labelled `TYPED` either way, and one `super()`
-answer that was simply wrong.
+Every one of these was checked edge by edge against the build before it, and the whole round
+was then checked end to end against the build it started from: **8,558 calls gained across the
+three repositories, and 6 lost.** Five of the six are answers the old reading order reached by
+using the NEW type on the OLD name — right by luck, and labelled `TYPED` either way — and the
+sixth is a `super()` that was reaching two classes up. That gained-minus-lost is 8,552, which
+is exactly the change in the count table above; a running total added up from each step said
+6,794, and adding up notes is not the same as measuring.
 
 The tenth rule is a class receiver the file imported. `Helper.tag(1)` where `Helper` is defined
 in the same file resolved — that is the `CLASS` label — and the identical statement on an
