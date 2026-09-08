@@ -9886,6 +9886,66 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class ASyntaxCallOnSomethingBuiltRightThere(Sandbox):
+    """`f = Foo()` then `with f:` records `Foo.__enter__`. `with Foo():` records nothing, though
+    the class is written at the call site and that is the easiest receiver there is to type.
+
+    The written form of the same reading was fixed long ago - `Leg(100).payoff()` resolves
+    because the class is right there - and the calls Python makes from SYNTAX were left behind.
+    So a context manager used the way context managers are usually used, without a name, had no
+    caller at all, and `unused` called its `__enter__` dead."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("lib.py",
+                   "class Foo:\n"
+                   "    def __enter__(self):\n        return self\n\n"
+                   "    def __exit__(self, *a):\n        return False\n\n"
+                   "    def __iter__(self):\n        return iter([])\n\n"
+                   "    def __len__(self):\n        return 0\n")
+
+    def dunders(self, src):
+        g = self.graph()
+        return {e["callee"]: e.get("dst") for e in g["calls"]
+                if e["src"] == src and e["callee"].startswith("__")}
+
+    def test_with_on_a_constructor(self):
+        self.write("a.py", "from lib import Foo\n\n\n"
+                           "def use():\n    with Foo():\n        return 1\n")
+        got = self.dunders("a.use")
+        self.assertEqual(got.get("__enter__"), "lib.Foo.__enter__")
+        self.assertEqual(got.get("__exit__"), "lib.Foo.__exit__")
+
+    def test_for_over_a_constructor(self):
+        self.write("b.py", "from lib import Foo\n\n\n"
+                           "def use():\n    for _ in Foo():\n        return 1\n")
+        self.assertEqual(self.dunders("b.use").get("__iter__"), "lib.Foo.__iter__")
+
+    def test_len_of_a_constructor(self):
+        self.write("c.py", "from lib import Foo\n\n\n"
+                           "def use():\n    return len(Foo())\n")
+        self.assertEqual(self.dunders("c.use").get("__len__"), "lib.Foo.__len__")
+
+    def test_the_named_form_still_works(self):
+        """The positive control: this is the spelling that already worked."""
+        self.write("d.py", "from lib import Foo\n\n\n"
+                           "def use():\n    f = Foo()\n    with f:\n        return 1\n")
+        self.assertEqual(self.dunders("d.use").get("__enter__"), "lib.Foo.__enter__")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_receiver_it_cannot_type_records_nothing(self):
+        """`with open(p) as f` names no class this tree knows, and inventing one would put a
+        caller on whichever `__enter__` happened to be lying around."""
+        self.write("e.py", "def use(p):\n    with open(p) as f:\n        return f\n")
+        self.assertEqual(self.dunders("e.use"), {})
+
+    def test_a_class_without_the_method_records_nothing(self):
+        self.write("plain.py", "class Plain:\n    def go(self):\n        return 1\n")
+        self.write("f.py", "from plain import Plain\n\n\n"
+                           "def use():\n    return len(Plain())\n")
+        self.assertEqual(self.dunders("f.use").get("__len__"), None)
+
+
 class AnAttributeOnSomethingOtherThanSelf(Sandbox):
     """`self.db.query()` has resolved for a long time - an attribute the class body assigns, read
     through `self`. `c.db.query()` on a typed `c` did not, though the tool knows what class `c`

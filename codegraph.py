@@ -866,6 +866,14 @@ def _defs_and_calls(path, mod):
             if _is_self_attr(node):
                 cls = self.atypes[-1].get(node.attr)
                 return ("recv_type", cls) if cls else None
+            if isinstance(node, ast.Call):
+                # A class written at the call site is the easiest receiver there is to type,
+                # and the calls Python makes from SYNTAX were the last place not reading it.
+                # `f = Foo()` then `with f:` recorded `Foo.__enter__`; `with Foo():` recorded
+                # nothing - so a context manager used the way they usually are, without a name,
+                # had no caller and `unused` called its `__enter__` dead.
+                cls = _called_class(node)
+                return ("recv_type", cls) if cls else None
             return None
 
         def _syntax_call(self, recv_node, name, line, alt=None):
@@ -884,6 +892,13 @@ def _defs_and_calls(path, mod):
                     "method": True, "kind": "CALL", "syntax": True, "line": line}
             if alt: edge["alt"] = alt
             edge[got[0]] = got[1]
+            if isinstance(recv_node, ast.Call):
+                # FLAGGED, because the name a constructor call spells is only a class if the
+                # tree turns out to hold one. `with open(p)` spells "open", and an edge that
+                # stays unresolved is a call this file never wrote, invented on a receiver
+                # nothing could type. Those are dropped rather than labelled external: on a
+                # clone of pandas, keeping them was 22,100 extra edges to buy 629 answers.
+                edge["ctor_recv"] = True
             edges.append(edge)
 
         def _with(self, node, enter, exit_):
@@ -1251,7 +1266,7 @@ EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", 
                  "builtin_recv",
                  "recv_local", "recv_root_local", "callee_local", "encl_class", "recv_type",
                  "recv_call", "invoke_type", "super_of", "super_from", "alt", "syntax",
-                 "recv_attr", "recv_attr_of",
+                 "recv_attr", "recv_attr_of", "ctor_recv",
                  "attr_read")
 
 # Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
@@ -2390,6 +2405,9 @@ def build(dirs=None, write=True):
     for e in calls:
         if e.get("syntax") and e["confidence"] == "UNTYPED":
             e["confidence"] = "EXTERNAL"
+    # A syntax call invented on a constructor whose class this tree does not hold is a call
+    # nobody wrote about an object nobody can name. Dropped, not labelled.
+    calls = [e for e in calls if not (e.get("ctor_recv") and not e.get("dst"))]
     # An attribute read was recorded wherever the receiver could be typed, because whether the
     # name belongs to a property is not knowable until every file has been parsed. Now it is:
     # anything that did not land on a property was an ordinary attribute - a field, a constant,

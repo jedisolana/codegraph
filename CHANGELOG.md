@@ -6,6 +6,24 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### A syntax call on something built right there
+
+`f = Foo()` then `with f:` recorded `Foo.__enter__`. `with Foo():` recorded nothing, though the
+class is written at the call site and that is the easiest receiver there is to type. The WRITTEN
+form of the same reading was fixed long ago - `Leg(100).payoff()` resolves because the class is
+right there - and the calls Python makes from syntax were left behind. So a context manager used
+the way they usually are, without a name, had no caller and `unused` called its `__enter__`
+dead. Same for `for _ in Foo()` and `len(Foo())`.
+
+The first version of this cost more than it bought. A constructor's name is only a class if the
+tree turns out to hold one: `with open(p)` spells "open", and recording those as external added
+22,100 edges to a clone of pandas to buy 629 answers. An invented call about an object nothing
+can name is worse than silence, so a syntax edge on a constructor receiver that does not resolve
+is dropped rather than labelled.
+
+1,229 more resolved calls across four repositories - 629 on pandas, 388 on sqlalchemy, 164 on
+the standard library, 48 on scrapy - and every edge added is one that resolved.
+
 ### An attribute on something other than self
 
 `self.db.query()` has resolved for a long time - an attribute the class body assigns, read
@@ -678,7 +696,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,398 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,401 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
