@@ -684,9 +684,9 @@ it usable:
   one of them runs.
 - **A reflected operator is not followed.** `a + b` records `a.__add__`; Python's fallback to
   `b.__radd__` happens only when the first returns `NotImplemented`, which is a runtime answer.
-- **A property read needs a receiver the file can type.** `self.thing` and `c.thing` where `c`
-  is annotated or was built here both resolve; a bare `x.thing` on an untyped `x` does not, the
-  same way `x.method()` does not. Every typed attribute read is recorded while parsing and
+- **A property read needs a receiver the file can type.** `self.thing`, `c.thing` where `c` is
+  annotated or was built here, and `Thing().thing` where the class is written at the read all
+  resolve; a bare `x.thing` on an untyped `x` does not, the same way `x.method()` does not. Every typed attribute read is recorded while parsing and
   dropped afterwards unless the name turns out to be a property, since one file cannot know
   what another one defines.
 - **A function passed by name is not a call** — `Thread(target=f)`, `sorted(key=f)`,
@@ -747,6 +747,12 @@ it usable:
   a `Test*` class's method, or another fixture. The lookup is pytest's own: the module, then
   `conftest.py` in its directory, then each directory above. A fixture supplied by a plugin is
   not in the tree and cannot be seen, and a parameter the body rebinds is not answered.
+
+Every one of these was checked by running it rather than by reading the code, because a
+limitation nobody re-runs becomes a description of a tool that no longer exists. Two of them
+turned out to be false — an attribute was read through `self` and no other typed name, and a
+call made by syntax refused a class written at the call site — and both are fixed above rather
+than documented as limits. The rest hold exactly as stated.
 
 Everything it cannot resolve is labelled rather than guessed, so the limits are visible in the
 output instead of hidden in it.
