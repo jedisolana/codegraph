@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.1.0
+## Unreleased
 
-First release.
+Everything down to the `0.1.0` heading is on `main` and is **not** in the released 0.1.0 on
+PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
+accept a second 0.1.0, so the tag alone would fail at the upload step.
 
 ### A list is as plainly stated as a class
 
@@ -289,6 +291,10 @@ instance is still untyped, and an instance of a class outside the tree is not in
 estimated twenty points on flask, by counting the calls that *mention* such a name instead of
 the ones a class can actually be found for. The rule is real and the estimate was not; the
 measurement is what the README states.
+
+## 0.1.0
+
+First release.
 
 ### One answer for what a receiver is
 

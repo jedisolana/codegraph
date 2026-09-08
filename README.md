@@ -648,6 +648,11 @@ on PyPI, and PyPI reads hyphens as if they weren't there. The command it install
 It is still one file with no dependencies, so copying `codegraph.py` out of an installed
 package and dropping it into a repository works exactly as well.
 
+**The published version is 0.1.0 and predates the measurements above.** Those describe `main`,
+which is a long way ahead of it — `CHANGELOG.md` lists what is in between under *Unreleased*.
+Clone the repository, or take `codegraph.py` from it, if you want the numbers this README
+states.
+
 Python 3.9+. Tested on Linux, macOS and Windows.
 
 ## Proving itself
