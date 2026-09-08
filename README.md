@@ -540,10 +540,17 @@ machine addresses, dates and assistant attribution. `--history` adds every commi
 history, and a scan of the tracked tree alone called this repository clean while two files of
 working notes sat in earlier commits.
 
-Private words are matched against **hashes**. A list of secret names written out in a public
-file is the leak it exists to prevent, so `deny.txt` holds only sha256 of each word,
-`--add WORD` never writes the word down, and a hit reports the position rather than the text —
-a CI log on a public repository is public too.
+**The private-word list lives outside the repository** — `~/.config/codegraph/deny.txt`, or
+wherever `CODEGRAPH_DENY` points. It was in `tools/` for a while with each word stored as a
+sha256, on the reasoning that a hash is not a word. It is not much else either: these are short
+dictionary words with no salt, so they come back by *guessing and checking* rather than by
+reversing — twelve of them fell to a sixteen-word list in under a second, in a file whose own
+comment said it existed to stop exactly that.
+
+Hashing still earns its place: an accidentally shared list is not instantly readable, `--add
+WORD` never writes the word down, and a hit reports the position rather than the text, because
+a CI log on a public repository is public too. But that is obfuscation. The protection is that
+the file is not published.
 
 Fifteen of its sixteen tests **plant** the thing being looked for and prove the scan goes red.
 A scrub that has never failed is not evidence that a tree is clean.
