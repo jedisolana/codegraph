@@ -3456,6 +3456,20 @@ def _why_not_called(g, target):
     cannot see. Read here for one definition, because "nothing calls it" and "nothing reaches
     it" are different facts and only one of them means it is safe to delete.
     """
+    # BEFORE anything else: is the bare name the callee of calls this graph could not resolve?
+    # Asked flask who calls `abort`, it said "nothing names it either" while twenty edges in
+    # the same graph named it - `flask.abort(404)`, reaching a function `__init__.py`
+    # re-exports, which is the shape of nearly every Python library API there is. The limit is
+    # fair; the sentence was not, and an agent reading it deletes what the library exports.
+    bare = target.rsplit(".", 1)[-1]
+    loose = [e for e in g["calls"] if e.get("callee") == bare and e.get("src") != target]
+    if loose:
+        who = ", ".join(sorted({e["src"] for e in loose})[:3])
+        recv = next((e["recv"] for e in loose if e.get("recv")), None)
+        through = f" through `{recv}.{bare}`" if recv else ""
+        return (f"But `{bare}` is called {len(loose)} time(s){through} by calls this graph "
+                f"could not resolve to a definition - {who}. Read this as unresolved, not as "
+                "unreached.")
     for node_id, _where, reason in unused(g):
         if node_id == target:
             if not reason:

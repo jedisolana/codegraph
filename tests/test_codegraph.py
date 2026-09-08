@@ -9459,3 +9459,59 @@ class AMalformedRequestMustNotEndTheSession(Sandbox):
         for line in r.stdout.splitlines():
             if line.strip():
                 json.loads(line)
+
+
+class CalledTwentyTimesAndReportedAsUnreached(Sandbox):
+    """Asked flask who calls `abort` and got: `nothing calls src/flask/helpers.abort. Nothing
+    in this tree names it either, so as far as this graph can see it is unreached.`
+
+    It is called twenty times, as `flask.abort(404)`, because `__init__.py` re-exports it -
+    `from .helpers import abort as abort`. Which is the shape of nearly every Python library
+    API there is.
+
+    The graph HAS all twenty call edges. It cannot resolve `flask.abort` to the definition,
+    because the imports it records are module-to-module and the re-exported NAME is not among
+    them. That limit is fair and it is in the README now.
+
+    What is not fair is the sentence. `nothing names it` was said while twenty edges in the
+    same graph name it, and an agent reading that deletes a function the whole library
+    exports."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "from pkg.helpers import thing as thing\n")
+        self.write("pkg/helpers.py", "def thing():\n    return 1\n")
+        self.write("app.py", "import pkg\n\n\ndef use():\n    return pkg.thing()\n")
+        self.graph()
+
+    def ask(self, name="thing"):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_callers", "arguments": {"name": name}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_it_does_not_claim_nothing_names_it(self):
+        text, r = self.ask()
+        self.assertNotIn("Nothing in this tree names it either", text, r.stderr[-200:])
+
+    def test_it_says_the_name_is_called_but_unresolved(self):
+        text, _ = self.ask()
+        self.assertRegex(text.lower(), r"called .*could not|unresolved|by name")
+
+    def test_it_says_how_many_times(self):
+        """One is a curiosity. Twenty is the whole answer."""
+        text, _ = self.ask()
+        self.assertIn("1", text)
+
+    # ------------------------------------------------------------------------- the control
+    def test_a_genuinely_unreached_function_still_says_so(self):
+        """The sentence has to keep meaning something, or the fix has only moved the lie."""
+        self.write("pkg/dead.py", "def never_used_anywhere():\n    return 1\n")
+        self.graph()
+        text, _ = self.ask("never_used_anywhere")
+        self.assertIn("Nothing in this tree names it either", text)
