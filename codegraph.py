@@ -383,7 +383,7 @@ def _defs_and_calls(path, mod):
                 # walking up from this module's own package: one dot stays in it, each extra dot
                 # climbs one more.
                 base = mod.split("/")[:-1]
-                if node.level - 1 > len(base):
+                if node.level - 1 >= len(base):
                     # More dots than there is tree to climb. Python calls this "attempted
                     # relative import beyond top-level package" and refuses to import at all.
                     # The excess used to be discarded silently, so `from ... import thing` in

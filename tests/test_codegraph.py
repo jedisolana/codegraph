@@ -9885,6 +9885,74 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class TheInterpreterIsAskedWhereADotLeads(Sandbox):
+    """Counting dots is arithmetic, and arithmetic is the kind of thing to be off by one at.
+    `from ...top import x` inside `pkg.sub.deep` means `pkg.top`; one dot more is an error
+    Python refuses outright. Both were bugs here once - a relative import used to be dropped on
+    the floor, and the excess dots of a too-deep one used to be discarded silently, landing on a
+    top-level module of the same name and answering QUALIFIED.
+
+    So the package is imported and Python is asked which module each name really came from."""
+
+    def setUp(self):
+        super().setUp()
+        for p in ("pkg", "pkg/sub", "pkg/sub/deep"):
+            self.write(f"{p}/__init__.py", "")
+        self.write("pkg/top.py", "def from_top():\n    return 1\n")
+        self.write("pkg/sub/mid.py", "def from_mid():\n    return 2\n")
+
+    def python_says(self, mod):
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "try:\n"
+                f"    m = importlib.import_module({mod!r})\n"
+                "except Exception as e:\n"
+                "    print(json.dumps({'error': type(e).__name__})); raise SystemExit\n"
+                "out = {}\n"
+                "for n in ('from_top', 'from_mid', 'mid'):\n"
+                "    v = getattr(m, n, None)\n"
+                "    if v is None: continue\n"
+                "    out[n] = getattr(v, '__name__', None) if hasattr(v, '__path__') or "
+                "type(v).__name__ == 'module' else v.__module__\n"
+                "print(json.dumps(out))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_every_dot_count_lands_where_python_lands(self):
+        self.write("pkg/sub/deep/user.py",
+                   "from ...top import from_top\n"
+                   "from ..mid import from_mid\n"
+                   "from .. import mid\n\n\n"
+                   "def a():\n    return from_top()\n\n\n"
+                   "def b():\n    return from_mid()\n\n\n"
+                   "def c():\n    return mid.from_mid()\n")
+        truth = self.python_says("pkg.sub.deep.user")
+        self.assertEqual(truth, {"from_top": "pkg.top", "from_mid": "pkg.sub.mid",
+                                 "mid": "pkg.sub.mid"}, truth)
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"]
+               if e["src"].startswith("pkg/sub/deep/user.")}
+        self.assertEqual(got["pkg/sub/deep/user.a"], "pkg/top.from_top")
+        self.assertEqual(got["pkg/sub/deep/user.b"], "pkg/sub/mid.from_mid")
+        self.assertEqual(got["pkg/sub/deep/user.c"], "pkg/sub/mid.from_mid")
+
+    def test_one_dot_too_many_is_refused_by_both(self):
+        """Python calls it "attempted relative import beyond top-level package" and imports
+        nothing. The excess used to be discarded here, which landed the name on a top-level
+        module and answered QUALIFIED - the confident kind of wrong."""
+        self.write("top.py", "def from_top():\n    return 99\n")
+        self.write("pkg/sub/deep/toofar.py",
+                   "from ....top import from_top\n\n\n"
+                   "def a():\n    return from_top()\n")
+        truth = self.python_says("pkg.sub.deep.toofar")
+        self.assertIn("error", truth, "the fixture stopped being an error for Python")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "top.from_top"), [])
+        self.assertEqual(codegraph.callers_of(g, "pkg/top.from_top"), [])
+
+
 class WhereSuperGoesAndWhereItCannotBeKnown(Sandbox):
     """`super()` is resolved against the class it is WRITTEN in, using that class's own order.
     For the class at the bottom of a diamond that is exactly what runs. For a class in the

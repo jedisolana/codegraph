@@ -6,6 +6,35 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### Asking the interpreter instead of asserting what it does
+
+Four things this tool models are rules of the language, and for each one Python itself can be
+asked rather than reasoned about here. A hand-written expectation encodes what the author
+believed; consulting the interpreter cannot drift from what it does.
+
+- **C3 linearisation.** A hierarchy with five leaves is imported, Python is asked which class
+  actually owns the call, and the tool has to agree. Replacing the linearisation with a
+  depth-first walk - the bug that was there originally - turns it red on exactly the case that
+  bug got wrong.
+- **What a star carries.** `__all__` when the module states one, otherwise the names that do
+  not begin with an underscore. That rule was written from the language reference, which is the
+  kind of thing to get subtly wrong. Python is asked which names actually arrived.
+- **Which dunder runs.** `x += y`, `with c`, `for r in rows`, `len(x)`. The interesting one is
+  `+=`, which runs `__iadd__` when the class has one and `__add__` when it does not, never
+  both, and inherits that choice from wherever the method really lives.
+- **Where `super()` goes.** Both halves: at the bottom of a diamond it is exactly what runs, and
+  in the middle it is right for an instance of that class and wrong for one reached through the
+  diamond. Python's own answer is recorded beside the limit.
+
+The dot-counting one found a bug. `from ...top import x` inside `pkg.sub.deep` means `pkg.top`;
+one dot more is beyond the top-level package and Python refuses to import at all. The guard for
+that compared with `>` where it needed `>=`, so the too-deep form resolved to a top-level module
+of the same name and was labelled QUALIFIED - the confident kind of wrong, and the exact failure
+the guard's own comment said it had fixed.
+
+It changes nothing on any of the repositories measured, because code Python will not import does
+not exist in one. It is a wrong answer to a question that can be asked, which is enough.
+
 ### A dotted module that re-exports, and two caps that were arbitrary
 
 `import pkg.mod` then `pkg.mod.func()`, where `mod` re-exports `func` rather than defining it.
