@@ -4000,7 +4000,11 @@ class ADottedCallNeedsAnImport(Sandbox):
                              "def go():\n"
                              "    return config.load()\n")
         g = self.graph(write=False)
-        self.assertEqual(self.edge(g, "app.go", "load"), (None, "UNTYPED"))
+        # It resolves to the METHOD now, because a module-level `config = C()` types the name
+        # for every function in the file. This used to assert `(None, "UNTYPED")` - which was
+        # the limitation written down as if it were the requirement. The requirement is in the
+        # name of the test and it still holds: whatever this is, it is not the module.
+        self.assertEqual(self.edge(g, "app.go", "load"), ("app.C.load", "TYPED"))
         self.assertEqual(codegraph.callers_of(g, "config.load"), [])
 
     def test_a_package_path_still_resolves_when_it_was_imported(self):
@@ -9638,3 +9642,73 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
                    "import flat\n\n\ndef test_four():\n    return flat.flat_thing()\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
+
+
+class AModuleLevelSingletonHasAType(Sandbox):
+    """`x = Foo()` then `x.method()` resolves - in the SAME scope. Written at module level and
+    called from a function, it did not, and that is the shape almost every Python program uses
+    for a logger, a client, a registry, a console.
+
+    Measured on ansible: `display.warning(...)` and friends are 762 unresolved calls, the
+    largest named receiver in the whole tree, and `display = Display()` is sitting at the top
+    of those same files.
+
+    A module-level binding is visible to every function in the module - that is what module
+    level means - so the type travels with it. What must NOT travel is a name the function
+    rebinds or receives: a local assignment and a parameter both shadow it, and using the
+    module's type there would be a confident wrong answer."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/thing.py",
+                   "class Display:\n"
+                   "    def warn(self, m):\n        return m\n\n"
+                   "    def other(self):\n        return 1\n")
+
+    def test_a_module_level_instance_types_calls_inside_functions(self):
+        self.write("pkg/use.py",
+                   "from pkg.thing import Display\n\n\n"
+                   "display = Display()\n\n\n"
+                   "def emit():\n    return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), ["pkg/use.emit"])
+
+    def test_it_works_for_methods_too(self):
+        self.write("pkg/use2.py",
+                   "from pkg.thing import Display\n\n\n"
+                   "display = Display()\n\n\n"
+                   "class Runner:\n    def go(self):\n        return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), ["pkg/use2.Runner.go"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_local_of_the_same_name_shadows_it(self):
+        """The risk. A function that rebinds the name is talking about something else, and
+        answering with the module's type is a confident wrong answer."""
+        self.write("pkg/shadow.py",
+                   "from pkg.thing import Display\n\n\n"
+                   "class Other:\n    def warn(self, m):\n        return m\n\n\n"
+                   "display = Display()\n\n\n"
+                   "def emit():\n    display = Other()\n    return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
+        self.assertEqual(codegraph.callers_of(g, "pkg/shadow.Other.warn"), ["pkg/shadow.emit"])
+
+    def test_a_parameter_of_the_same_name_shadows_it(self):
+        self.write("pkg/param.py",
+                   "from pkg.thing import Display\n\n\n"
+                   "display = Display()\n\n\n"
+                   "def emit(display):\n    return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
+
+    def test_a_module_level_name_that_is_not_an_instance_is_not_typed(self):
+        """`config = load()` is not a class this file can name, and guessing from the name
+        would be the `RESOLVED` label all over again."""
+        self.write("pkg/plain.py",
+                   "def load():\n    return 1\n\n\n"
+                   "config = load()\n\n\n"
+                   "def emit():\n    return config.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])

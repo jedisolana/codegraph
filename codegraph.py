@@ -549,9 +549,26 @@ def _defs_and_calls(path, mod):
                         *node.args.kwonlyargs]:
                 cls = _annotated_class(arg.annotation)
                 if cls: seeded[arg.arg] = cls
+            # A MODULE-LEVEL BINDING IS VISIBLE IN HERE - that is what module level means. So
+            # `display = Display()` at the top of a file types `display.warning(...)` inside
+            # every function in it, which is how almost every Python program keeps a logger, a
+            # client, a registry or a console. Measured on ansible: 762 unresolved calls on
+            # `display` alone, the largest named receiver in the tree, with `display =
+            # Display()` sitting at the top of those same files.
+            #
+            # Names this function BINDS are left out, which is the whole risk: a local
+            # assignment or a parameter of the same name is talking about something else, and
+            # answering with the module's type there would be a confident wrong answer.
+            shadowed = _bound_names(node)
+            # `_bound_names` returns (bound, freed) - the second being names a `global` or
+            # `nonlocal` hands back to the enclosing scope. Testing membership against the
+            # TUPLE instead of the set shadowed nothing at all, which the two controls caught.
+            binds = shadowed[0]
+            outer = {k: v for k, v in self.vtypes[0].items()
+                     if k not in binds and k not in seeded} if self.vtypes else {}
             self.ctypes.append({})
-            self.vtypes.append(seeded)                          # calls inside this body belong to qid; its own var-type scope
-            self.bound.append(_bound_names(node))
+            self.vtypes.append({**outer, **seeded})             # calls inside this body belong to qid; its own var-type scope
+            self.bound.append(shadowed)
             for c in node.body: self.visit(c)
             self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
 

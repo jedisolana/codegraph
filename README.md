@@ -150,14 +150,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5741,
-  "call_sites": 7524,
-  "edge_confidence": {"EXTERNAL": 3083, "INHERITED": 765, "BUILTIN": 609, "SELF-METHOD": 565,
-                      "QUALIFIED": 334, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 5771,
+  "call_sites": 7558,
+  "edge_confidence": {"EXTERNAL": 3095, "INHERITED": 777, "BUILTIN": 610, "SELF-METHOD": 565,
+                      "QUALIFIED": 339, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1871,
-  "could_have_been_resolved": 2049,
-  "resolution_rate": 0.913
+  "resolved_to_one_def": 1888,
+  "could_have_been_resolved": 2066,
+  "resolution_rate": 0.914
 }
 ```
 
@@ -168,7 +168,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.913 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.914 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 91%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -185,7 +185,7 @@ On other people's code, measured on a clone of each and built from its own root:
 | repo | before | after |
 |---|---|---|
 | flask | 0.241 | **0.484** |
-| ansible | 0.379 | **0.608** |
+| ansible | 0.379 | **0.630** |
 | pandas | 0.359 | **0.754** |
 
 Two rules did that, and neither of them is clever. A name a package **re-exports** —
@@ -461,6 +461,10 @@ it usable:
   with the right name elsewhere in the tree. It works under a src-layout too: a directory that
   holds packages and is not one itself is where Python imports from, and that is decidable from
   the tree. Two roots offering the same name resolve to neither.
+- **A module-level instance types the whole module.** `display = Display()` at the top of a
+  file types `display.warning(...)` inside every function in it, which is how almost every
+  program keeps a logger, a client or a registry. A local assignment or a parameter of the same
+  name shadows it, because a function that rebinds the name is talking about something else.
 - **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
   say it outright: a parameter's, a variable's, and a function's **declared return type**, so
   `def make() -> Client` types what `c = make()` holds. A container annotation is not its contents,
@@ -510,9 +514,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,167 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,172 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer and an incompleteness warning,
-which are 180 of those mutations
+which are 185 of those mutations
 and has not had a pass of its own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -559,7 +563,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 740 more. Grouped, because a list of every one of them stopped being
+The test suite adds 745 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
