@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6650,
-  "call_sites": 8708,
-  "edge_confidence": {"EXTERNAL": 3349, "INHERITED": 1075, "BUILTIN": 764, "SELF-METHOD": 604,
+  "call_edges": 6677,
+  "call_sites": 8741,
+  "edge_confidence": {"EXTERNAL": 3364, "INHERITED": 1079, "BUILTIN": 770, "SELF-METHOD": 606,
                       "QUALIFIED": 448, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2363,
-  "could_have_been_resolved": 2537,
-  "resolution_rate": 0.931
+  "resolved_to_one_def": 2369,
+  "could_have_been_resolved": 2543,
+  "resolution_rate": 0.932
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.931 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.932 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -281,6 +281,13 @@ meaning: the nearest enclosing FUNCTION that defines the name, then the module �
 body is not in that chain at all, so `helper()` inside a method is the module's function and
 not the method sitting beside it. Each case in the fixture returns a different string, so the
 interpreter says which definition actually ran and the tool has to have named that one.
+
+Two more go the same way. A `@property` read RUNS code, and which code is a fact about the
+class — an override wins, an inherited one is found up the bases — so Python is asked where the
+property came from. And `Client()` runs `__new__` and then `__init__`, but only the ones that
+exist: a class with just `__new__`, a class with just `__init__`, and a class with neither are
+each asked of the interpreter, because an edge to a method that is not there puts a caller on
+nothing.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -831,7 +838,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 891 more. Grouped, because a list of every one of them stopped being
+The test suite adds 893 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

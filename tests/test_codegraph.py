@@ -9886,6 +9886,83 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class TheInterpreterIsAskedWhatAConstructorAndAPropertyRun(Sandbox):
+    """Two more places the tool models the interpreter rather than the source.
+
+    `Client()` runs `__new__` and then `__init__`, and runs only the ones that exist - a class
+    with neither runs neither, and recording an edge to a method that is not there would put a
+    caller on nothing. Reading `c.size` where `size` is a `@property` RUNS code, and which code
+    is a fact about the class: an override wins, and an inherited one is found up the bases.
+
+    Python is asked which of those a class really has, and which class the property came from."""
+
+    SOURCE = (
+        "class Base:\n"
+        "    @property\n    def size(self):\n        return 'base'\n\n\n"
+        "class Sub(Base):\n    pass\n\n\n"
+        "class Over(Base):\n"
+        "    @property\n    def size(self):\n        return 'over'\n\n\n"
+        "class WithNew:\n"
+        "    def __new__(cls, *a):\n        return super().__new__(cls)\n\n"
+        "    def __init__(self):\n        self.x = 1\n\n\n"
+        "class OnlyNew:\n"
+        "    def __new__(cls, *a):\n        return super().__new__(cls)\n\n\n"
+        "class OnlyInit:\n"
+        "    def __init__(self):\n        self.x = 1\n\n\n"
+        "class Neither:\n    pass\n\n\n"
+        "def read_sub(s: Sub):\n    return s.size\n\n\n"
+        "def read_over(o: Over):\n    return o.size\n\n\n"
+        "def make_both():\n    return WithNew()\n\n\n"
+        "def make_new():\n    return OnlyNew()\n\n\n"
+        "def make_init():\n    return OnlyInit()\n\n\n"
+        "def make_neither():\n    return Neither()\n"
+    )
+
+    def python_says(self):
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "m = importlib.import_module('p')\n"
+                "out = {'prop': {}, 'ctor': {}}\n"
+                "for n in ('Sub', 'Over'):\n"
+                "    cls = getattr(m, n)\n"
+                "    out['prop'][n] = [c.__name__ for c in cls.__mro__ "
+                "if 'size' in c.__dict__][0]\n"
+                "for n in ('WithNew', 'OnlyNew', 'OnlyInit', 'Neither'):\n"
+                "    cls = getattr(m, n)\n"
+                "    out['ctor'][n] = [d for d in ('__new__', '__init__') if d in cls.__dict__]\n"
+                "print(json.dumps(out))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def setUp(self):
+        super().setUp()
+        self.write("p.py", self.SOURCE)
+
+    def test_a_property_read_lands_where_python_looks_it_up(self):
+        truth = self.python_says()["prop"]
+        self.assertEqual(truth, {"Sub": "Base", "Over": "Over"}, truth)
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"] if e["callee"] == "size"}
+        self.assertEqual(got.get("p.read_sub"), f"p.{truth['Sub']}.size")
+        self.assertEqual(got.get("p.read_over"), f"p.{truth['Over']}.size")
+
+    def test_a_constructor_records_the_dunders_the_class_really_has(self):
+        truth = self.python_says()["ctor"]
+        self.assertEqual(truth, {"WithNew": ["__new__", "__init__"], "OnlyNew": ["__new__"],
+                                 "OnlyInit": ["__init__"], "Neither": []}, truth)
+        g = self.graph()
+        by_src = {}
+        for e in g["calls"]:
+            if e.get("dst") and e["callee"] in ("WithNew", "OnlyNew", "OnlyInit", "Neither"):
+                by_src.setdefault(e["callee"], set()).add(e["dst"].rsplit(".", 1)[-1])
+        for cls, dunders in sorted(truth.items()):
+            got = {d for d in by_src.get(cls, set()) if d.startswith("__")}
+            self.assertEqual(sorted(got), sorted(dunders),
+                             f"{cls}() runs {dunders} in Python")
+
+
 class TheInterpreterIsAskedWhichNameABareCallMeans(Sandbox):
     """LEGB, implemented here by hand and adjudicated by Python. A bare `helper()` means the
     nearest enclosing FUNCTION that defines one, then the module - and a class body is not in

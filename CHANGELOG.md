@@ -29,6 +29,10 @@ believed; consulting the interpreter cannot drift from what it does.
   name, then the module, with class bodies skipped - so `helper()` inside a method is the
   module's function and not the method beside it, which is the one people expect to go the
   other way. Each candidate returns a different string, so the interpreter names the winner.
+- **What a property read and a constructor run.** A `@property` read runs code, and an override
+  wins over an inherited one. `Client()` runs `__new__` then `__init__`, and only the ones the
+  class really has - with neither, neither - because an edge to a method that is not there puts
+  a caller on nothing.
 
 The dot-counting one found a bug. `from ...top import x` inside `pkg.sub.deep` means `pkg.top`;
 one dot more is beyond the top-level package and Python refuses to import at all. The guard for
