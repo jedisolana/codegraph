@@ -2493,7 +2493,12 @@ def build(dirs=None, write=True):
             e["typed_miss"] = True
         return None
 
-    for _round in range(6):
+    # Bounded only so a pathological cycle cannot spin: the loop stops the moment a round
+    # changes nothing, which on every repository measured is round four or five. The cap used to
+    # be six, which silently cut a fluent chain off at six links - `q.a().b().c().d().e().f()`
+    # resolved and one more call did not, for no reason a reader could have guessed. Raising it
+    # costs nothing where the work converges, which is everywhere it has been measured.
+    for _round in range(24):
         changed = False
         # Which definition a name reached from a given scope. Two different ones is not an
         # answer, the same way a bare call with two candidates is not.

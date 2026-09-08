@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6485,
-  "call_sites": 8498,
-  "edge_confidence": {"EXTERNAL": 3260, "INHERITED": 1032, "BUILTIN": 750, "SELF-METHOD": 595,
-                      "QUALIFIED": 438, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6495,
+  "call_sites": 8512,
+  "edge_confidence": {"EXTERNAL": 3263, "INHERITED": 1036, "BUILTIN": 751, "SELF-METHOD": 595,
+                      "QUALIFIED": 440, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2301,
-  "could_have_been_resolved": 2475,
+  "resolved_to_one_def": 2307,
+  "could_have_been_resolved": 2481,
   "resolution_rate": 0.93
 }
 ```
@@ -784,7 +784,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 872 more. Grouped, because a list of every one of them stopped being
+The test suite adds 874 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

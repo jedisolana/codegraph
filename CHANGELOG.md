@@ -27,6 +27,13 @@ only handles the first. So the deferred name was never recorded, and no amount o
 
 sqlalchemy 0.690 -> 0.702 and pandas 0.811 -> 0.817: 1,961 more resolved calls, none lost.
 
+The rounds are bounded so a cycle cannot spin, and the bound was six - which cut a chain off at
+six links. `q.a().b().c().d().e().f()` resolved and one more call did not, for no reason a
+reader could have guessed at. The loop already stops the moment a round changes nothing, which
+on every repository measured is round four or five, so the cap is insurance rather than a
+schedule and there is no reason for it to be tight. It is 24 now; the extra rounds never run
+and the build time does not move.
+
 The first measurement of this said 136 were lost. That baseline had an earlier, unguarded
 version of the same rule already in it, so the guard's correct refusals showed up as losses
 against it. Measured against the committed build instead, nothing is lost.

@@ -9929,6 +9929,37 @@ class AMethodThatReturnsSelf(Sandbox):
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "t.Chain.done"), ["c.use"])
 
+    def test_a_chain_of_any_length(self):
+        """Each link is settled from the one before it, which is why the rounds exist. A chain
+        four calls long is the shape a query builder is actually written in."""
+        self.write("long.py",
+                   "from typing import Self\n\n\n"
+                   "class Q:\n"
+                   "    def filter(self, x) -> Self:\n        return self\n\n"
+                   "    def order_by(self, x) -> Self:\n        return self\n\n"
+                   "    def limit(self, n) -> Self:\n        return self\n\n"
+                   "    def all(self):\n        return []\n")
+        self.write("g.py", "from long import Q\n\n\n"
+                           "def two():\n    return Q().filter(1).all()\n\n\n"
+                           "def four():\n"
+                           "    return Q().filter(1).order_by(2).limit(3).all()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "long.Q.all"), ["g.four", "g.two"])
+
+    def test_a_chain_longer_than_the_round_cap_used_to_be(self):
+        """The rounds are bounded so a cycle cannot spin, and the bound used to be six - which
+        cut a chain off at six links, resolving one call and not the next for no reason a reader
+        could have guessed. The loop stops when a round changes nothing; the cap is insurance."""
+        steps = "\n\n".join(f"    def s{i}(self) -> Self:\n        return self"
+                             for i in range(1, 10))
+        self.write("deep.py", "from typing import Self\n\n\nclass Q:\n" + steps
+                              + "\n\n    def end(self):\n        return 1\n")
+        chain = "".join(f".s{i}()" for i in range(1, 10))
+        self.write("h.py", "from deep import Q\n\n\n"
+                           f"def use():\n    return Q(){chain}.end()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "deep.Q.end"), ["h.use"])
+
     # ------------------------------------------------------------------------- the controls
     def test_a_subclass_that_overrides_the_next_call_is_refused(self):
         """`Self` is the RECEIVER's class. A subclass inherits `filter` and overrides `all`, so
