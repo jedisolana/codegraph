@@ -180,6 +180,22 @@ impossible call. Two things moved it: resolution bugs fixed with tests, and then
 denominator being made to mean something. Both directions are in `CHANGELOG.md`, with the
 count of fabricated edges each one removed.
 
+On other people's code, measured on a clone of each and built from its own root:
+
+| repo | before | after |
+|---|---|---|
+| flask | 0.241 | **0.484** |
+| ansible | 0.379 | **0.608** |
+| pandas | 0.359 | **0.754** |
+
+Two rules did that, and neither of them is clever. A name a package **re-exports** —
+`pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
+followed to where the definition actually is. And `import flask` is connected to the module id
+`src/flask/__init__`, because a directory that holds packages and is not one is where Python
+imports from, which is decidable from the tree. Before that second one, the first fired 38,162
+times on pandas and *not once* on flask; nothing about flask was harder, its ids just had a
+prefix on them.
+
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
 every real way a bare name reaches a definition had a rule of its own, it fired fifteen times
