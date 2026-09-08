@@ -2382,6 +2382,16 @@ def load(fresh=True):
         try:
             g = build(g.get("dirs"))
         except BadPath as e:
+            # TWO different situations raise this, and saying the wrong one sends somebody
+            # looking for a directory that has not moved. A read-only checkout answered
+            # "the tree this graph was built from is gone: cannot write the graph ... Permission
+            # denied" - the first clause false, the rest true, in one sentence.
+            if "cannot write" in str(e):
+                # The analysis worked. Only the writing failed, and the answers are still good;
+                # they just cost a rebuild every time until there is somewhere to put them.
+                sys.exit(f"{e}\n"
+                         f"  the code is fine and so is the graph - this is a read-only place "
+                         f"to keep it")
             # The tree this graph describes has been moved or deleted. Rebuilding is the right
             # instinct and it cannot succeed - but a traceback is not an answer, and the graph
             # on disk is now a description of somewhere that is not there. Say which.

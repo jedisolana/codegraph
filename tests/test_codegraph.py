@@ -9200,3 +9200,85 @@ class AGraphAboveYouIsNotNecessarilyAboutYou(Sandbox):
         codegraph.OUT = os.path.join(self.root, "codegraph.json")
         g = codegraph.load(fresh=False)
         self.assertTrue(any(n["name"] == "far_away" for n in g["nodes"]))
+
+
+class TheTreeIsNotGoneItIsJustReadOnly(Sandbox):
+    """A read-only checkout gave this answer:
+
+        the tree this graph was built from is gone: cannot write the graph to ...
+        Permission denied. set CODEGRAPH_OUT to a writable path
+
+    The first clause is false and the rest is true, in one sentence. The tree is right there;
+    what failed was writing the rebuilt graph. Somebody reading the headline goes looking for a
+    directory that has not moved.
+
+    Both situations raise the same exception - a tree that cannot be read and an output that
+    cannot be written - and `load` announced both as the first one. A container mount, a
+    read-only CI checkout and somebody else's repository are all normal places to run this."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def a():\n    return 1\n")
+        self.graph()
+
+    def stale_and_unwritable(self):
+        self.write("pkg/new.py", "def b():\n    return 2\n")   # make the graph stale
+        for root, _dirs, files in os.walk(self.dir):
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o444)
+            os.chmod(root, 0o555)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for root, _dirs, files in os.walk(self.dir):
+            os.chmod(root, 0o755)
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o644)
+
+    def ask(self):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_callers", "arguments": {"name": "a"}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_it_does_not_say_the_tree_is_gone(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the write bits, so nothing can fail here")
+        self.stale_and_unwritable()
+        text, r = self.ask()
+        self.assertNotIn("is gone", text, r.stderr[-200:])
+
+    def test_it_says_what_actually_failed(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the write bits")
+        self.stale_and_unwritable()
+        text, _ = self.ask()
+        self.assertRegex(text.lower(), r"write|read-only|permission")
+
+    def test_and_still_answers_rather_than_dying(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the write bits")
+        self.stale_and_unwritable()
+        _, r = self.ask()
+        self.assertEqual(r.returncode, 0)
+
+    # ------------------------------------------------------------------------- the control
+    def test_a_tree_that_really_is_gone_still_says_so(self):
+        """The other half of the same exception, and the message it was written for."""
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "x.py"), "w", encoding="utf-8") as f:
+            f.write("def x():\n    return 1\n")
+        codegraph.HOME = d
+        codegraph.OUT = os.path.join(self.dir, "elsewhere.json")
+        codegraph.CACHE = os.path.join(self.dir, "elsewhere.cache.json")
+        codegraph.build([d])
+        shutil.rmtree(d, ignore_errors=True)
+        with self.assertRaises(SystemExit) as caught:
+            codegraph.load()
+        self.assertIn("gone", str(caught.exception))

@@ -149,14 +149,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5527,
-  "call_sites": 7278,
-  "edge_confidence": {"EXTERNAL": 2967, "INHERITED": 732, "BUILTIN": 588, "SELF-METHOD": 543,
-                      "QUALIFIED": 323, "LOCAL": 198, "UNTYPED": 168, "TYPED": 5,
+  "call_edges": 5574,
+  "call_sites": 7331,
+  "edge_confidence": {"EXTERNAL": 2996, "INHERITED": 736, "BUILTIN": 592, "SELF-METHOD": 549,
+                      "QUALIFIED": 325, "LOCAL": 198, "UNTYPED": 170, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1804,
-  "could_have_been_resolved": 1972,
-  "resolution_rate": 0.915
+  "resolved_to_one_def": 1816,
+  "could_have_been_resolved": 1986,
+  "resolution_rate": 0.914
 }
 ```
 
@@ -167,8 +167,8 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.915 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.914 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 91%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
@@ -452,9 +452,9 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,144 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,145 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer and an incompleteness warning,
-which are 157 of those mutations
+which are 158 of those mutations
 and has not had a pass of its own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -501,7 +501,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 707 more. Grouped, because a list of every one of them stopped being
+The test suite adds 711 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
