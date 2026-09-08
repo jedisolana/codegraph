@@ -28,6 +28,8 @@ same-named functions would be worse than no blast radius at all.
   codegraph unused             definitions nothing calls AND nothing names
   codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
+  codegraph shape <file>       every signature in a file and its line number, no bodies -
+                               3,600 lines of source as 110 lines of what it offers
   codegraph mcp                serve the graph to a coding agent over MCP (stdin/stdout).
                                The same answers, asked by the agent instead of by you:
                                callers, calls, blast, sites, where, find, path.
@@ -2997,6 +2999,83 @@ def _emit(obj):
     print(json.dumps(obj, indent=2))
 
 
+def _sig(node):
+    """One definition's signature, written the way the source writes it.
+
+    Rebuilt from the tree rather than sliced out of the text, because a signature can span
+    lines, carry comments between them, and end in the middle of one.
+    """
+    a = node.args
+    parts = []
+    pos = list(a.posonlyargs) + list(a.args)
+    defaults = [None] * (len(pos) - len(a.defaults)) + list(a.defaults)
+    for i, (arg, default) in enumerate(zip(pos, defaults)):
+        text = arg.arg
+        if arg.annotation is not None:
+            text += ": " + ast.unparse(arg.annotation)
+        if default is not None:
+            text += (" = " if arg.annotation is not None else "=") + ast.unparse(default)
+        parts.append(text)
+        if a.posonlyargs and i == len(a.posonlyargs) - 1:
+            parts.append("/")
+    if a.vararg is not None:
+        parts.append("*" + a.vararg.arg)
+    elif a.kwonlyargs:
+        parts.append("*")                            # the bare star: what follows is keyword-only
+    for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+        text = arg.arg
+        if arg.annotation is not None:
+            text += ": " + ast.unparse(arg.annotation)
+        if default is not None:
+            text += (" = " if arg.annotation is not None else "=") + ast.unparse(default)
+        parts.append(text)
+    if a.kwarg is not None:
+        parts.append("**" + a.kwarg.arg)
+    out = f"{node.name}({', '.join(parts)})"
+    if node.returns is not None:
+        out += " -> " + ast.unparse(node.returns)
+    return out
+
+
+def shape(path):
+    """What a file offers, without the code in between.
+
+    An agent asked to change one function reads the whole file to find it: a 900-line module
+    costs 900 lines of context to learn six signatures. This is the signatures and their line
+    numbers, and nothing else.
+
+    Parsed on demand rather than stored in the graph, so the answer is right even when the
+    graph is stale - and reading one file is cheaper than the staleness check would be.
+
+    Decorators are kept, because they change how a thing is CALLED: `size` behind `@property`
+    is an attribute, and calling it as a method is exactly the mistake an agent working from a
+    signature list would make.
+    """
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    tree = ast.parse(src, filename=path)
+    lines = []
+
+    def walk(body, depth):
+        for node in body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            pad = "  " * depth
+            for dec in node.decorator_list:
+                lines.append(f"{node.lineno:>6}  {pad}@{ast.unparse(dec)}")
+            if isinstance(node, ast.ClassDef):
+                bases = ", ".join(ast.unparse(b) for b in node.bases)
+                head = f"class {node.name}({bases})" if bases else f"class {node.name}"
+            else:
+                kw = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+                head = kw + _sig(node)
+            lines.append(f"{node.lineno:>6}  {pad}{head}")
+            walk(node.body, depth + 1)
+
+    walk(tree.body, 0)
+    return src.count("\n") + 1, lines
+
+
 # ------------------------------------------------------------------ a door an agent can knock on
 #
 # Everything above this line is a thing a PERSON runs. An agent has to shell out for it and then
@@ -3030,7 +3109,24 @@ MCP_TOOLS = {
                        "name", lambda g, _t, raw: find(g, raw)),
     "codegraph_path": ("a call path connecting two functions, if one exists",
                        "name", None),
+    "codegraph_shape": ("what a file offers - every signature and its line number, without the "
+                        "bodies. Ask this INSTEAD of reading a file you only need the shape of",
+                        "name", None),
 }
+
+
+def _shape_target(g, raw):
+    """A path if it is one, otherwise the file a module id names.
+
+    An agent that has been reading graph output has ids, not paths, and one that has been
+    reading a diff has paths. Both are the obvious thing to type.
+    """
+    if os.path.isfile(raw):
+        return raw
+    for n in g["nodes"]:
+        if n["kind"] == "module" and n["id"] in (raw, raw.replace(".", "/")):
+            return n["file"]
+    return None
 
 
 def _mcp_result(text):
@@ -3061,6 +3157,16 @@ def _mcp_call(tool, args):
             return _mcp_result("codegraph_path needs `name` and `to`")
         got = path(g, raw, to)
         return _mcp_result(" -> ".join(got) if got else f"no call path from {raw} to {to}")
+    if tool == "codegraph_shape":
+        found = _shape_target(g, raw)
+        if found is None:
+            return _mcp_result(f"no file or module named {raw!r}")
+        try:
+            total, out = shape(found)
+        except (OSError, SyntaxError, ValueError) as e:
+            return _mcp_result(f"cannot read {raw}: {e}")
+        head = f"{raw}  -  {len(out)} definition(s) of {total} lines"
+        return _mcp_result("\n".join([head] + out) if out else head + "\n(no definitions)")
     if tool == "codegraph_find":
         found = find(g, raw)
         return _mcp_result("\n".join(found) or f"nothing matching {raw!r}")
@@ -3272,6 +3378,30 @@ def _main(argv=None):
         return 0
     if a[0] == "--selftest": return _selftest()
     if a[0] == "mcp": return _mcp_serve()
+    if a[0] == "shape":
+        if len(a) < 2 or not a[1].strip():
+            print("usage: codegraph shape <file or module>", file=sys.stderr)
+            return 2
+        target = a[1] if os.path.isfile(a[1]) else _shape_target(load(), a[1])
+        if target is None:
+            print(f"no file or module named {a[1]!r}")
+            return 1
+        try:
+            total, out = shape(target)
+        except OSError as e:
+            print(f"cannot read {a[1]}: {e}")
+            return 1
+        except SyntaxError as e:
+            # Not a traceback: a file that will not parse is a normal thing to meet halfway
+            # through an edit, and the line it stopped at is the useful part.
+            print(f"cannot parse {a[1]}: {e.msg} at line {e.lineno}")
+            return 1
+        if as_json:
+            _emit({"query": "shape", "target": a[1], "lines": total, "definitions": out})
+        else:
+            print(f"{a[1]}  -  {len(out)} definition(s) of {total} lines")
+            print("\n".join(out) if out else "(no definitions)")
+        return 0
     if a[0] == "build":
         try:
             g = build(a[1:] or None)

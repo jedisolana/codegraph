@@ -7863,3 +7863,136 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         for line in r.stdout.splitlines():
             if line.strip():
                 json.loads(line)                     # raises if anything else was printed
+
+
+class TheShapeOfAFileWithoutItsBody(Sandbox):
+    """An agent asked to change one function reads the whole file to find it. A 900-line module
+    costs 900 lines of context to learn six signatures.
+
+    `codegraph shape` returns the signatures and nothing else: what a file offers, at what line,
+    without the code in between. Parsed on demand rather than stored in the graph, so it is
+    right even when the graph is stale - and reading one file is cheaper than the staleness
+    check would be.
+
+    Written before the command existed."""
+
+    SOURCE = (
+        '"""A store, and how to open one."""\n'
+        "import os\n"
+        "\n"
+        "\n"
+        "class Store:\n"
+        '    """Holds things."""\n'
+        "\n"
+        "    def __init__(self, path: str) -> None:\n"
+        "        self.path = path\n"
+        "        self.cache = {}\n"
+        "\n"
+        "    @property\n"
+        "    def size(self) -> int:\n"
+        "        return len(self.cache)\n"
+        "\n"
+        "    async def flush(self, *, force: bool = False):\n"
+        "        SENTINEL_INSIDE_A_BODY = 1\n"
+        "        return SENTINEL_INSIDE_A_BODY\n"
+        "\n"
+        "\n"
+        "def load(path: str, *, strict: bool = False) -> Store:\n"
+        "    return Store(path)\n"
+    )
+
+    def shape_of(self, target, extra=()):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = codegraph._main(["shape", target, *extra])
+        return rc, out.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/store.py", self.SOURCE)
+        self.graph()
+
+    # ------------------------------------------------------------------------- what it shows
+    def test_it_names_every_definition(self):
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        for name in ("Store", "__init__", "size", "flush", "load"):
+            with self.subTest(name=name):
+                self.assertIn(name, text)
+
+    def test_it_keeps_the_signature(self):
+        """The signature is the whole point: an agent has to know what to pass without opening
+        the file."""
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        self.assertIn("path: str", text)
+        self.assertIn("strict: bool = False", text)
+        self.assertIn("-> Store", text)
+
+    def test_it_shows_a_decorator_because_it_changes_the_call(self):
+        """`size` is a property. Calling it as a method is the mistake this prevents."""
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        self.assertIn("@property", text)
+
+    def test_it_says_async(self):
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        self.assertIn("async def flush", text)
+
+    def test_it_gives_a_line_number_to_jump_to(self):
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        self.assertRegex(text, r"\b21\b.*def load|def load.*\b21\b")
+
+    def test_the_body_is_not_in_it(self):
+        """The control that decides whether this saves anything at all."""
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        self.assertNotIn("SENTINEL_INSIDE_A_BODY", text)
+
+    def test_a_method_reads_as_belonging_to_its_class(self):
+        """Flat, `__init__` could be anybody's."""
+        _, text = self.shape_of(os.path.join(self.dir, "pkg/store.py"))
+        lines = [l for l in text.splitlines() if "__init__" in l or "class Store" in l]
+        self.assertEqual(len(lines), 2, text)
+        # Measured AFTER the line number, not from the start of the line: every row begins with
+        # a right-aligned number, so the leading whitespace is the same on both and the first
+        # version of this compared 5 against 5 and called it a failure of the code.
+        bare = [re.sub(r"^\s*\d+ {2}", "", l) for l in lines]
+        depth = [len(b) - len(b.lstrip()) for b in bare]
+        self.assertGreater(depth[1], depth[0], text)
+
+    # -------------------------------------------------------------------- how it is asked
+    def test_it_takes_a_module_id_too(self):
+        """An agent that has been reading graph output has ids, not paths."""
+        rc, text = self.shape_of("pkg/store")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("def load", text)
+
+    def test_it_is_also_an_mcp_tool(self):
+        replies = []
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_shape", "arguments": {"name": "pkg/store"}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        for line in r.stdout.splitlines():
+            if line.strip():
+                replies.append(json.loads(line))
+        self.assertIn("def load", json.dumps(replies[-1]), r.stderr[-300:])
+
+    # ------------------------------------------------------------------- when it cannot
+    def test_a_file_that_does_not_parse_says_so(self):
+        self.write("pkg/broken.py", "def oops(:\n")
+        rc, text = self.shape_of(os.path.join(self.dir, "pkg/broken.py"))
+        self.assertEqual(rc, 1)
+        self.assertIn("parse", text.lower() + " ")
+
+    def test_a_missing_file_says_so(self):
+        rc, text = self.shape_of(os.path.join(self.dir, "pkg/nope.py"))
+        self.assertEqual(rc, 1)
+        self.assertNotIn("Traceback", text)
+
+    def test_a_file_with_nothing_in_it_is_not_an_error(self):
+        """An empty module is a normal thing to meet, and "no definitions" is an answer."""
+        self.write("pkg/empty.py", "# nothing here yet\n")
+        rc, text = self.shape_of(os.path.join(self.dir, "pkg/empty.py"))
+        self.assertEqual(rc, 0, text)
