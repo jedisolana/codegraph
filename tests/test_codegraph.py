@@ -6774,13 +6774,28 @@ class NothingPrivateGetsPublished(unittest.TestCase):
         self.commit("notes.md", "the box is at 10.1.2.3 over the tunnel\n")  # scrub: fixture
         self.assertIn("ip address", self.labels())
 
-    def test_it_catches_assistant_attribution(self):
+    def test_it_catches_a_word_from_a_deny_list_in_a_message(self):
         """Via the hashed deny list rather than a written-out pattern: an older test forbids any
         shipped file from naming an assistant, and the first version of this scanner failed it
-        by spelling the names into its own regex."""
+        by spelling the names into its own regex.
+
+        It brings its OWN list. The previous version relied on whatever sat in the developer's
+        ~/.config, so it passed here and failed on every CI runner - a test that asks about the
+        machine it is running on rather than about the code.
+        """
+        deny = os.path.join(self.dir, "deny.txt")
+        word = "notarealassistantname"
+        with open(deny, "w", encoding="utf-8") as fh:
+            fh.write(scrub._hash(word) + "\n")
         self.commit("a.py", "x = 1\n",
-                    message="a change\n\nCo-Authored-By: Claude <x@y.invalid>")  # scrub: fixture
-        self.assertIn("private word", self.labels())
+                    message=f"a change\n\nCo-Authored-By: {word} <x@y.invalid>")
+        real = scrub.DENY
+        scrub.DENY = deny
+        try:
+            labels = {lab for _w, _l, lab, _f in scrub.scan(self.dir)}
+        finally:
+            scrub.DENY = real
+        self.assertIn("private word", labels)
 
     def test_it_catches_a_date(self):
         self.commit("CHANGELOG.md", "## Released 2026-09-07\n")  # scrub: fixture

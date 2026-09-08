@@ -149,12 +149,12 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4656,
-  "call_sites": 6194,
-  "edge_confidence": {"EXTERNAL": 2481, "INHERITED": 657, "BUILTIN": 515, "SELF-METHOD": 419,
-                      "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 127, "TYPED": 5,
+  "call_edges": 4660,
+  "call_sites": 6198,
+  "edge_confidence": {"EXTERNAL": 2484, "INHERITED": 657, "BUILTIN": 516, "SELF-METHOD": 418,
+                      "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 128, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1533,
+  "resolved_to_one_def": 1532,
   "could_have_been_resolved": 1660,
   "resolution_rate": 0.923
 }
