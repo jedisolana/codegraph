@@ -8966,3 +8966,85 @@ class TheTestSuiteIsNotWhatTheCodebaseIs(Sandbox):
         it. Only the ranking changes."""
         _, text = self.ranked()
         self.assertIn("_testing", text)
+
+
+class AnAnswerThatDestroysTheSession(Sandbox):
+    """`codegraph_blast` on `find_stack_level` in pandas returns 11,200 lines - 795,039
+    characters, near enough 199,000 tokens. That does not fill an agent's context, it ends the
+    conversation.
+
+    The command line has always had `--only` and `--exclude`, and a person can pipe to `head`.
+    An agent gets whatever comes back, in one message, and cannot recover from it.
+
+    Capped, and the cap says so. Silence would be worse than the flood: an answer cut off
+    without a word is one an agent reads as complete, and `1,200 of 11,200` is a different fact
+    from `1,200`. It also says which files they are in and how to narrow, because a wall of
+    names is not the useful shape of that answer anyway - `this function is used everywhere` is
+    what it means."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def hub():\n    return 1\n")
+        for i in range(300):
+            self.write(f"pkg/m{i}.py",
+                       f"from pkg.core import hub\n\n\ndef f{i}():\n    return hub()\n")
+        self.graph()
+
+    def ask(self, tool="codegraph_blast", **args):
+        args.setdefault("name", "hub")
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": args}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=180)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_a_huge_answer_is_capped(self):
+        text, _ = self.ask()
+        self.assertLess(len(text.splitlines()), 160, f"{len(text.splitlines())} lines came back")
+
+    def test_and_the_cap_says_so(self):
+        """An answer cut off without a word is one an agent reads as complete."""
+        text, _ = self.ask()
+        self.assertIn("300", text, text[:400])
+        self.assertRegex(text.lower(), r"showing|first|of 300|truncat")
+
+    def test_it_says_how_to_narrow(self):
+        """A cap with no way past it is a dead end. The command line has had `--only` for
+        months; the door needs the same door handle."""
+        text, _ = self.ask()
+        self.assertIn("filter", text.lower())
+
+    def test_and_the_filter_works(self):
+        """Ids look like `pkg/m10.f10` - no `.py` in them. The first version of this globbed
+        for `pkg/m1?.py*`, matched nothing, and found the tool answering `nothing calls this`
+        for a function with three hundred callers."""
+        text, _ = self.ask(filter="pkg/m1?*")
+        self.assertNotIn("pkg/m250", text)
+        self.assertIn("pkg/m1", text)
+
+    def test_a_filter_that_matches_nothing_says_that_and_not_something_worse(self):
+        """`nothing calls this` for a function with three hundred callers, because a glob had
+        a typo in it. The worst answer this tool can give, for a reason that has nothing to do
+        with the code."""
+        text, _ = self.ask(filter="no/such/thing*")
+        self.assertNotRegex(text.lower(), r"nothing calls")
+        self.assertIn("300", text)
+        self.assertIn("filter", text.lower())
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_small_answer_is_untouched(self):
+        """Most answers are small, and a cap that announces itself on every one of them is
+        noise on every one of them."""
+        text, _ = self.ask(tool="codegraph_callers", name="f7")
+        self.assertNotRegex(text.lower(), r"showing|truncat")
+
+    def test_the_names_that_are_shown_are_real(self):
+        text, _ = self.ask()
+        shown = [l for l in text.splitlines() if l.startswith("pkg/")]
+        self.assertTrue(shown)
+        self.assertTrue(all(".f" in l for l in shown), shown[:3])

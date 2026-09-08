@@ -212,13 +212,13 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,133 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,140 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
 A full pass has been run over an earlier version of the file and **killed every one, with no
 survivors** — 954 by a failing test and two by a timeout. The file has grown since: an MCP
-server, a shape reader, a saving footer and an incompleteness warning, a hundred and forty-six
+server, a shape reader, a saving footer and an incompleteness warning, a hundred and fifty-three
 more sites, not yet covered by a pass of their own. The count above is a fact
 about the file today; that result is a fact about the file as it was.
 Two of them were killed by the timeout rather than by a failing test, because they make the

@@ -3322,6 +3322,32 @@ def _unread_warning(g):
             f"read, so this answer may be incomplete: {', '.join(shown)}{more}")
 
 
+MCP_MAX_ROWS = 120               # measured: see `_capped`
+
+
+def _capped(rows):
+    """At most `MCP_MAX_ROWS` of them, and it says when it cut.
+
+    `blast` on `find_stack_level` in a clone of pandas returns 11,200 lines - 795,039
+    characters, near enough 199,000 tokens. That does not fill an agent's context, it ends the
+    conversation. A person has `--only`, `--exclude` and a pipe to `head`; an agent gets
+    whatever comes back, in one message, and cannot recover from it.
+
+    Silence would be worse than the flood. An answer cut off without a word is one an agent
+    reads as complete, and `120 of 11,200` is a different fact from `120`. So the count is
+    first, the way to narrow is last, and the names are in between - because when a list is
+    that long, `this function is used everywhere` is what it actually means.
+    """
+    rows = [str(r) for r in rows]
+    if len(rows) <= MCP_MAX_ROWS:
+        return "\n".join(rows)
+    head = f"{len(rows)} results, showing the first {MCP_MAX_ROWS}:"
+    tail = ("\n\nThat is most of this tree, which is the answer: it is used everywhere. To see "
+            "a part of it, ask again with `filter` - a glob over the id or its module, like "
+            "`pkg/thing*` or `*/api/*`.")
+    return "\n".join([head] + rows[:MCP_MAX_ROWS]) + tail
+
+
 def _where_they_live(g, ids):
     """Which files the answers are in - a fact, not a comparison.
 
@@ -3494,6 +3520,23 @@ def _mcp_call(tool, args):
                            "these exact ids:\n" + "\n".join(hits))
     target = hits[0]
     out = MCP_TOOLS[tool][2](g, target, raw)
+    keep = (args.get("filter") or "").strip()
+    if keep and out:
+        # The same idea as the command line's `--only`, which has existed for months and had no
+        # door handle. Matched against the id and against its module, because both are what
+        # somebody reaches for.
+        narrowed = [i for i in out
+                    if fnmatch.fnmatch(str(i), keep)
+                    or fnmatch.fnmatch(_module_of(str(i)), keep)]
+        if not narrowed:
+            # NOT "nothing calls this". A filter that excluded everything is a fact about the
+            # filter, and saying the other thing here would be this tool's worst answer given
+            # for a reason that has nothing to do with the code.
+            return _mcp_result(f"{len(out)} result(s), and none of them match filter "
+                               f"{keep!r}. The ids look like `pkg/module.function`, so a glob "
+                               "over the module is usually what you want: `pkg/thing*`."
+                               + _unread_warning(g))
+        out = narrowed
     if not out:
         # THE MOST DANGEROUS ANSWER THIS TOOL CAN GIVE. A function reached through a dispatch
         # table and one that is genuinely dead both had nothing calling them, and both got
@@ -3512,7 +3555,7 @@ def _mcp_call(tool, args):
     # the thing `a saving with no stated baseline is a marketing number` was written to stop.
     #
     # What IS true and worth saying: where the answers live, so the next step is one file away.
-    return _mcp_result("\n".join(out) + _where_they_live(g, out) + _unread_warning(g))
+    return _mcp_result(_capped(out) + _where_they_live(g, out) + _unread_warning(g))
 
 
 def _mcp_serve(stream_in=None, stream_out=None):
@@ -3535,6 +3578,11 @@ def _mcp_serve(stream_in=None, stream_out=None):
             return ({}, [])                          # it asks about the whole tree, not a name
         if n == "codegraph_changed":
             return ({"diff": {"type": "string"}}, ["diff"])
+        if n in ("codegraph_blast", "codegraph_callers", "codegraph_calls", "codegraph_sites"):
+            return ({"name": {"type": "string"},
+                     "filter": {"type": "string",
+                                "description": "optional glob over the id or its module, to "
+                                               "narrow a very large answer"}}, ["name"])
         return ({"name": {"type": "string"}}, ["name"])
 
     tools = []
