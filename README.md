@@ -212,6 +212,23 @@ is a dynamic task registry and unannotated fixtures; the standard library is old
 annotated, and spends its time on strings and dicts — which is the blind spot named further
 down, showing up as a number.
 
+It is also fast enough to ask casually, which is the point of a tool an agent talks to. Measured
+on the same clones, on a laptop:
+
+| repo | call edges | build, cold | build after one file changed | a query |
+|---|---|---|---|---|
+| pandas | 191,470 | 11.2s | 4.1s | 0.5s |
+| sqlalchemy | 153,034 | 8.1s | 2.9s | 0.5s |
+| stdlib | 62,552 | 4.2s | 1.2s | 0.2s |
+| rich | 9,279 | 0.5s | — | — |
+
+That is about seventeen thousand call edges a second to build, on the largest Python
+repositories there are, and a query is mostly the cost of loading the graph back off disk. The
+MCP server keeps the parsed graph for the life of the session, so an agent pays that once
+rather than per question. "After one file changed" is the loop you are actually in: edit, ask,
+edit — and nothing has to be rebuilt by hand, because a query notices the tree moved and
+rebuilds what moved.
+
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
 resolved. And **every resolved call's target bears the name that was called**, with three
