@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  # The same tests.yml the branch runs, called rather than copied. A release that skipped them
+  # The same ci.yml the branch runs, called rather than copied. A release that skipped them
   # would be a release nobody checked, and a gate written as a second copy of the job is a gate
   # that drifts out of step with the first. That matrix also builds the wheel and asks the
   # installed command a question from a directory that is not the checkout.
   test:
-    uses: ./.github/workflows/tests.yml
+    uses: ./.github/workflows/ci.yml
 
   publish:
     needs: test

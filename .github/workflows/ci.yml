@@ -1,5 +1,10 @@
 name: tests
 
+# Renamed from tests.yml. After this repository was deleted and recreated, GitHub recorded
+# every push - the events are there, with the right ref and the right actor - and dispatched
+# no workflow run for any of them. Manual runs worked, so Actions was healthy and the file
+# parsed; the registration for this path was simply stuck. Renaming forces a new one.
+
 on:
   push:
     branches: [main]
