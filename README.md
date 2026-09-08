@@ -189,6 +189,20 @@ On other people's code, measured on a clone of each and built from its own root:
 | ansible | 0.379 | **0.726** |
 | pandas | 0.359 | **0.811** |
 
+A rate has a denominator, and two of the changes below move it, so here are the counts as well
+— how many calls are pinned to exactly one definition, and how many the tool answers "I cannot
+tell" about. Neither column can be flattered by anything but resolving more.
+
+Read the baselines carefully, because they are not the same one. The `before` above is the
+first measurement this README ever published. The `before` here is the build immediately
+preceding the most recent round of work, so this table is that round on its own:
+
+| repo | pinned, before → after | cannot tell, before → after |
+|---|---|---|
+| flask | 1,045 → **1,471** | 1,112 → **477** |
+| ansible | 17,553 → **20,120** | 11,309 → **7,584** |
+| pandas | 96,759 → **102,318** | 31,635 → **23,892** |
+
 Ten rules and four bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
