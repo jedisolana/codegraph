@@ -802,12 +802,13 @@ interesting output: it names a behaviour nothing is checking.
 
 **The file admits 1,401 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
-an incompleteness warning, and the rules and fixes above. Three samples have been drawn from it as it changed: 150, then 300, then 300 again, and every
-one of the 750 was killed — one of them by hanging rather than failing, which is counted apart
-because "hung" and "failed" are different facts. The most recent is two changes short of this
-file, so it is not a result about this one: the number is a fact about this version, the
-results are facts about older ones. The pass is re-run whenever the file changes, because a
-result about an older version of a file is not a result about this one, and a count that
+an incompleteness warning, and the rules and fixes above. **A sample of 300 drawn from this file killed 300**, none surviving and none hanging. Four
+samples have been taken as the file changed — 150, then 300 three times — and all 1,050 were
+killed, one of them by hanging rather than failing, which is counted apart because "hung" and
+"failed" are different facts. Only the last is a result about the file as it stands; the
+earlier three are facts about older ones and are not quoted as if they were not. The pass is
+re-run whenever the file changes, because a result about an older version of a file is not a
+result about this one, and a count that
 happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
