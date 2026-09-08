@@ -562,16 +562,21 @@ def _defs_and_calls(path, mod):
             # not its contents, and _annotated_class already refuses those.
             rt = _annotated_class(node.returns) if node.returns is not None else None
             if rt: d["returns"] = rt
+            brt = _annotated_builtin(node.returns)
+            if brt: d["returns_builtin"] = brt
             defs.append(d)
             self.scope.append(node.name); self.owner.append(qid)
             # A parameter's ANNOTATION is the type, stated outright. `def send(c: Client)` then
             # c.get() was UNTYPED - the tool inferring around an answer the source had written
             # down. *args and **kwargs are skipped: the annotation there describes the ELEMENTS.
             seeded = {}
+            lseeded = {}
             for arg in [*getattr(node.args, "posonlyargs", []), *node.args.args,
                         *node.args.kwonlyargs]:
                 cls = _annotated_class(arg.annotation)
                 if cls: seeded[arg.arg] = cls
+                bt = _annotated_builtin(arg.annotation)
+                if bt: lseeded[arg.arg] = bt
             # A MODULE-LEVEL BINDING IS VISIBLE IN HERE - that is what module level means. So
             # `display = Display()` at the top of a file types `display.warning(...)` inside
             # every function in it, which is how almost every Python program keeps a logger, a
@@ -591,8 +596,8 @@ def _defs_and_calls(path, mod):
                      if k not in binds and k not in seeded} if self.vtypes else {}
             self.ctypes.append({})
             louter = {k: v for k, v in self.ltypes[0].items()
-                      if k not in binds and k not in seeded} if self.ltypes else {}
-            self.ltypes.append(louter)
+                      if k not in binds and k not in seeded and k not in lseeded} if self.ltypes else {}
+            self.ltypes.append({**louter, **lseeded})
             self.vtypes.append({**outer, **seeded})             # calls inside this body belong to qid; its own var-type scope
             self.bound.append(shadowed)
             self.rets.append([])
@@ -1454,6 +1459,31 @@ def _is_builtin_method(recv_type, callee, shadowed):
     return hasattr(getattr(builtins, recv_type, None), callee)
 
 
+_TYPING_ALIAS = {"List": "list", "Dict": "dict", "Set": "set", "Tuple": "tuple",
+                 "FrozenSet": "frozenset", "Text": "str", "ByteString": "bytes"}
+
+
+def _annotated_builtin(ann):
+    """The builtin type an annotation plainly names. `rows: list` and `rows: list[str]` are both
+    a list - unlike `list[Client]`, where the CONTENTS are not the type, which is why the CLASS
+    reading refuses a subscript and this one does not. `t.List[str]` is the same sentence in the
+    spelling a generation of Python was written in."""
+    if ann is None:
+        return None
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):   # a forward reference
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return None
+    if isinstance(ann, ast.Subscript):
+        ann = ann.value
+    name = ann.attr if isinstance(ann, ast.Attribute) else (ann.id if isinstance(ann, ast.Name) else None)
+    if not name:
+        return None
+    name = _TYPING_ALIAS.get(name, name)
+    return name if name in _BUILTIN_CTOR else None
+
+
 def _literal_type(value):
     """The builtin type a right-hand side plainly is. `cmd = []` says list as plainly as
     `c = Client()` says Client, and was read as nothing at all - so `cmd.append(...)` came back
@@ -2305,6 +2335,7 @@ def build(dirs=None, write=True):
     # definition's return class, resolves the NAME in the module the function was defined in -
     # where the name means something - and walks the MRO like every other typed receiver.
     returns_of = {n["id"]: n["returns"] for n in nodes if n.get("returns")}
+    returns_builtin = {n["id"]: n["returns_builtin"] for n in nodes if n.get("returns_builtin")}
     # A recorded class name that names no class in this tree is not an answer, so those fall
     # through to what the call hands back. This is the same "tried first, fallen back from"
     # order the two-line form uses, one level up.
@@ -2420,7 +2451,14 @@ def build(dirs=None, write=True):
             here = (e["src"], e["recv_call"], e.get("line"))
             target = resolved_at[here] if here in resolved_at \
                 else resolved_in.get((e["src"], e["recv_call"]))
-            if not target or target not in returns_of:
+            if not target:
+                continue
+            if target in returns_builtin and not e.get("builtin_recv"):
+                # `d = make()` where `make() -> dict`. The same reading as `d = {}`, one call
+                # away, and settled here because it needs the call resolved first.
+                e["builtin_recv"] = returns_builtin[target]
+                changed = True
+            if target not in returns_of:
                 continue
             cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target,
                               e["callee"], e)
@@ -2456,8 +2494,17 @@ def build(dirs=None, write=True):
     # which is this tool sending an agent to look for something it has already proved is not
     # there.
     for e in calls:
-        if e["confidence"] == "UNTYPED" and e.get("typed_miss"):
+        if e["confidence"] != "UNTYPED":
+            continue
+        if e.get("typed_miss"):
             e["confidence"] = "EXTERNAL"
+        elif e.get("builtin_recv"):
+            # Settled in the rounds above rather than at the call site: a builtin handed back by
+            # a function this file called.
+            m = e.get("mod") or ""
+            if _is_builtin_method(e["builtin_recv"], e["callee"],
+                                  defined_here[m] | imported_in.get(m, set())):
+                e["confidence"] = "BUILTIN"
 
     keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",
             "candidates")

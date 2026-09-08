@@ -23,7 +23,13 @@ takes the name back. And that check is scoped to the module rather than the tree
 version asked whether the whole repository defined anything of that name and cost 811 correct
 answers on ansible, because one file has a function called `set`.
 
-1,093 calls on ansible, 699 on pandas and 7 on flask stop being "cannot tell" and are named for
+An annotation says the same thing and was read as neither: `rows: list`, `rows: list[str]`,
+`t.List[str]`, or a `-> dict` on a function one call away. A subscript IS that container here,
+which is the same sentence the CLASS reading refuses for the opposite and equally correct
+reason - `list[Client]` is a list, and reading Client out of it would answer `d.get()` with
+`Client.get`.
+
+1,355 calls on ansible, 878 on pandas and 11 on flask stop being "cannot tell" and are named for
 what they are. Nothing gained, nothing lost, and the rates move because the denominator does.
 
 ### An imported class is still a class receiver
@@ -486,7 +492,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,335 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,342 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

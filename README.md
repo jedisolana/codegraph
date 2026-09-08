@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6330,
-  "call_sites": 8281,
-  "edge_confidence": {"EXTERNAL": 3201, "INHERITED": 985, "BUILTIN": 740, "SELF-METHOD": 586,
-                      "QUALIFIED": 418, "LOCAL": 219, "UNTYPED": 173, "TYPED": 5,
+  "call_edges": 6347,
+  "call_sites": 8311,
+  "edge_confidence": {"EXTERNAL": 3207, "INHERITED": 989, "BUILTIN": 742, "SELF-METHOD": 590,
+                      "QUALIFIED": 418, "LOCAL": 220, "UNTYPED": 173, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2216,
-  "could_have_been_resolved": 2389,
+  "resolved_to_one_def": 2225,
+  "could_have_been_resolved": 2398,
   "resolution_rate": 0.928
 }
 ```
@@ -185,9 +185,9 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.754** |
-| ansible | 0.379 | **0.721** |
-| pandas | 0.359 | **0.810** |
+| flask | 0.241 | **0.755** |
+| ansible | 0.379 | **0.726** |
+| pandas | 0.359 | **0.811** |
 
 Ten rules and four bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
@@ -305,7 +305,10 @@ size has its own class with a `get` on it somewhere. A list's `append` is not in
 The interpreter is asked whether the method really is that type's, so `config = 'text'` followed
 by `config.dumps(1)` — broken code — is not called a builtin either; and a module that can see
 its own `dict` or `list` takes the name back for that module only, because one file defining a
-function called `set` should not make every `set()` in the repository doubtful.
+function called `set` should not make every `set()` in the repository doubtful. An annotation
+says the same thing — `rows: list`, `rows: list[str]`, `t.List[str]`, or a `-> dict` one call
+away — and `list[Client]` is read here as a list, which is the same sentence the CLASS reading
+refuses for the opposite and equally correct reason: its contents are not its type.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -625,7 +628,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,335 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,342 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. A sample of 150 drawn from the file as
 it stood a few changes short of this one killed 150, one of them by hanging rather than failing.
@@ -675,7 +678,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 843 more. Grouped, because a list of every one of them stopped being
+The test suite adds 847 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

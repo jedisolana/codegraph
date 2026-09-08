@@ -4329,15 +4329,19 @@ class TheSourceSaysWhatTypeItIs(Sandbox):
         self.assertEqual(self.edge(g, "app.send"), ("svc.Client.get", "TYPED"))
 
     def test_a_container_annotation_is_not_its_contents(self):
-        """The guard, and the reason only a bare name counts: `Dict[str, Client]` is a dict.
-        Reading Client out of it would resolve d.get() - a dict method - to Client.get."""
+        """The guard, and the reason only a bare name counts as a CLASS: `Dict[str, Client]` is
+        a dict. Reading Client out of it would resolve d.get() - a dict method - to Client.get.
+
+        The label is `BUILTIN` rather than `UNTYPED`, which is the same sentence read the other
+        way round: the annotation says the receiver is a dict, and `dict.get` is the
+        interpreter's. What must never happen is the target being `svc.Client.get`."""
         self.write("app.py", "from typing import Dict\n"
                              "from svc import Client\n"
                              "\n"
                              "def send(d: Dict[str, Client]):\n"
                              "    return d.get('k')\n")
         g = self.graph(write=False)
-        self.assertEqual(self.edge(g, "app.send"), (None, "UNTYPED"))
+        self.assertEqual(self.edge(g, "app.send"), (None, "BUILTIN"))
 
     def test_a_chained_assignment_binds_every_name(self):
         """`a = b = Client()` bound neither: the check wanted exactly one target."""
@@ -9711,6 +9715,30 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
     def test_a_comprehension(self):
         self.write("f.py", "def go(rows):\n    out = [r for r in rows]\n    out.append(1)\n")
         self.assertEqual(self.edge("append", "f.go")["confidence"], "BUILTIN")
+
+    def test_an_annotation_says_it_too(self):
+        """The tool reads `x: Client`, and it now reads `x = []`. `x: list` is the same sentence
+        and was read as neither."""
+        self.write("m.py", "def go(rows: list):\n    rows.append(1)\n")
+        self.assertEqual(self.edge("append", "m.go")["confidence"], "BUILTIN")
+
+    def test_a_subscripted_annotation_is_still_that_container(self):
+        """`list[str]` IS a list - unlike `list[Client]`, where the CONTENTS are not the type,
+        which is why the class reading refuses subscripts and this one does not."""
+        self.write("n.py", "def go(rows: list[str], m: dict[str, int]):\n"
+                           "    rows.append('a')\n    return m.keys()\n")
+        self.assertEqual(self.edge("append", "n.go")["confidence"], "BUILTIN")
+        self.assertEqual(self.edge("keys", "n.go")["confidence"], "BUILTIN")
+
+    def test_the_typing_spellings_too(self):
+        self.write("o.py", "import typing as t\n\n\n"
+                           "def go(rows: t.List[str]):\n    rows.append('a')\n")
+        self.assertEqual(self.edge("append", "o.go")["confidence"], "BUILTIN")
+
+    def test_a_return_annotation_reaches_the_caller(self):
+        self.write("p.py", "def make() -> dict:\n    return {}\n\n\n"
+                           "def go(k):\n    d = make()\n    return d.get(k)\n")
+        self.assertEqual(self.edge("get", "p.go")["confidence"], "BUILTIN")
 
     # ------------------------------------------------------------------------- the controls
     def test_a_method_the_builtin_does_not_have_is_not_a_builtin_call(self):
