@@ -2909,10 +2909,8 @@ def unused(g):
         if name in seen:
             return False                        # a cycle in the bases is expressible; stop
         seen.add(name)
-        for base in parents.get(name, ()):
-            if base not in known or _inherits_from_outside(base, seen):
-                return True
-        return False
+        return any(base not in known or _inherits_from_outside(base, seen)
+                   for base in parents.get(name, ()))
 
     foreign_names = {nm for nm in parents if _inherits_from_outside(nm, set())}
     foreign = {n["id"] for n in g["nodes"]
