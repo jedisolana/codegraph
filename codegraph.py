@@ -1016,6 +1016,14 @@ def _defs_and_calls(path, mod):
                         # or the class of that name - it is whatever the local name holds
                         "recv_local": bool(recv) and any(recv in v or recv in d
                                                          for v, d in self.bound),
+                        # And the same question for the ROOT of a dotted chain. `recv_local` is
+                        # about a one-name receiver and is False for every `a.b.c()`, so a
+                        # parameter called `pkg` in a file that also imports `pkg` had
+                        # `pkg.mod.func()` resolved into the module - QUALIFIED, the highest
+                        # confidence there is, on a name that means whatever the caller passed.
+                        # An import is not a shadow, which is what makes this readable at all.
+                        "recv_root_local": bool(recv_root) and any(recv_root in v or recv_root in d
+                                                                   for v, d in self.bound),
                         # a BARE call to a name holding a value is not the module-level function
                         # of that name either. Nested defs are excluded: `def g()` then `g()`
                         # inside the same function really is that g.
@@ -1151,8 +1159,9 @@ ATTR_IDENTITY = ("src", "callee", "recv", "encl_class", "recv_type")
 ATTR_IDENTITY_MARK = "\0attr"        # so a short key can never collide with a long one
 
 EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", "recv_path",
-                 "recv_local", "callee_local", "encl_class", "recv_type", "recv_call",
-                 "invoke_type", "super_of", "super_from", "alt", "syntax", "attr_read")
+                 "recv_local", "recv_root_local", "callee_local", "encl_class", "recv_type",
+                 "recv_call", "invoke_type", "super_of", "super_from", "alt", "syntax",
+                 "attr_read")
 
 # Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
 # built from ast.Call nodes cannot see any of them: in the standard library 2,780 definitions
@@ -1834,6 +1843,33 @@ def build(dirs=None, write=True):
             # unbound call. The receiver is a class in this module, not an unknown object.
             cand = cls_ids[srcmod][recv] + "." + callee
             if cand in def_ids: dst = cand; conf = "CLASS"
+        if (not dst and method and e.get("recv_path") and "/" in e["recv_path"]
+                and not e.get("recv_root_local")
+                and e.get("recv_root") in imported_in.get(srcmod, ())):
+            # A CLASS NAMED IN FULL, THROUGH A MODULE. `pd.MultiIndex.from_product(...)` - the
+            # receiver is a module this file imported and then a class that module holds or
+            # re-exports. `Parent.method()` resolved and this never did, though it is the same
+            # statement with the class written out properly, and it is how library code is
+            # called from outside: `from_tuples`, `from_arrays` and `from_product` alone are
+            # 1,417 calls written this way in a clone of pandas, every one unresolved.
+            #
+            # Everything needed was already here. The chain is on the edge, and turning
+            # `pkg.Frame` into the class it means - through a package's re-export, or a dotted
+            # module path - is the lookup class annotations already use, which answers only for
+            # a real class and only when exactly one answers to the name.
+            #
+            # The chain has to START with a name this file imported. `recv_local` cannot say
+            # so here - it is about `recv`, which is None for any dotted receiver - so a
+            # parameter called `pkg` would have been read as the module `pkg`, which is the
+            # confidently-wrong answer this tool has been bitten by before.
+            #
+            # The `"/" in recv_path` test above is a cheap pre-filter, not a safeguard: a
+            # one-name receiver names no class here anyway. It keeps a lookup off a hot path.
+            for c in _classes_named(e["recv_path"].replace("/", "."), srcmod, e["src"]):
+                for b in _mro(c, bases_of, mro_cache):
+                    if (b + "." + callee) in def_ids:
+                        dst = b + "." + callee; conf = "CLASS"; break
+                if dst: break
         it = e.get("invoke_type")
         if not dst and it:
             hits = []
@@ -1905,6 +1941,7 @@ def build(dirs=None, write=True):
                 if len(hits) == 1: dst = hits[0]; conf = "TYPED"
                 elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(set(hits))
         if (not dst and method and not e.get("recv_local")
+                and not e.get("recv_root_local")
                 and e.get("recv_path") in allmods
                 and e.get("recv_root") in imported_in.get(srcmod, ())):
             # pkg.mod.func() where pkg/mod is ours - but ONLY if this module imported the name

@@ -84,7 +84,7 @@ not work out are listed as exactly that, rather than quietly guessed:
 | `RE-EXPORT` | `flask.abort()`, where `abort` is not defined in `flask/__init__.py` but re-exported by it — the shape of nearly every library API | yes |
 | `SELF-METHOD` | `self.helper()`, resolved inside the enclosing class | yes |
 | `INHERITED` | `self.method()` or `super().method()`, where the method lives on a base class | yes |
-| `CLASS` | `Parent.method()` — the receiver is a class in this module | yes |
+| `CLASS` | `Parent.method()` or `pd.MultiIndex.from_product()` — the receiver is a class, written out: defined here, or held by a module this file imported | yes |
 | `TYPED` | the receiver's class is known: `x = Foo()`, `x = svc.Foo()`, or an annotation that says so | yes |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__new__` and `__init__` it runs | yes |
 | `FIXTURE` | a test's parameter, filled by the pytest fixture that name resolves to — the module's own, then `conftest.py` in its directory, then each directory above | yes |
@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6087,
-  "call_sites": 7965,
-  "edge_confidence": {"EXTERNAL": 3202, "INHERITED": 891, "BUILTIN": 633, "SELF-METHOD": 570,
-                      "QUALIFIED": 388, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 6143,
+  "call_sites": 8037,
+  "edge_confidence": {"EXTERNAL": 3216, "INHERITED": 919, "BUILTIN": 634, "SELF-METHOD": 570,
+                      "QUALIFIED": 401, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2074,
-  "could_have_been_resolved": 2252,
-  "resolution_rate": 0.921
+  "resolved_to_one_def": 2115,
+  "could_have_been_resolved": 2293,
+  "resolution_rate": 0.922
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.922 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -186,10 +186,10 @@ On other people's code, measured on a clone of each and built from its own root:
 | repo | before | after |
 |---|---|---|
 | flask | 0.241 | **0.644** |
-| ansible | 0.379 | **0.646** |
-| pandas | 0.359 | **0.773** |
+| ansible | 0.379 | **0.649** |
+| pandas | 0.359 | **0.789** |
 
-Eight rules and one bug did that, and none of them is clever. A name a package **re-exports** —
+Nine rules and two bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -240,9 +240,22 @@ the right side first. A variable rebound from its own method is how a great deal
 query-builder and string-handling code is written: 1,015 unresolved calls on `df` alone in a
 clone of pandas, 696 of them now answered.
 
-Every one of these was checked edge by edge against the build before it: 2,411 calls gained
-across the three repositories, and 5 lost — all five answers the old order reached by reading
-the NEW type on the OLD name, which was right by luck and labelled `TYPED` either way.
+The ninth is a class written out in full through a module: `pd.MultiIndex.from_product(...)`.
+`Parent.method()` resolved and this never did, though it is the same statement with the class
+named properly — and it is how library code is called from outside, which is most calls in most
+test suites. `from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls written that
+way in pandas. Everything needed was already recorded; nothing had ever asked.
+
+The second bug came out of building that. A parameter called `pkg`, in a file that also imports
+`pkg`, had `pkg.mod.func()` resolved into the module — `QUALIFIED`, the highest confidence
+there is, on a name that means whatever the caller passed. The guard against exactly this
+existed and only ever looked at a ONE-NAME receiver, so every dotted one walked past it.
+
+Every one of these was checked edge by edge against the build before it: 4,564 calls gained
+across the three repositories, and 7 lost. Five were answers the old reading order reached by
+using the NEW type on the OLD name — right by luck, and labelled `TYPED` either way. The other
+two are a function that calls `.append()` on two different classes: resolving one of them made
+the pair ambiguous, and two answers is not an answer.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -562,7 +575,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,270 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,281 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
 and six rules that carry a type across an import, a return, a chained call, a test's
 arguments and a second call, which are 280 of those mutations
@@ -612,7 +625,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 796 more. Grouped, because a list of every one of them stopped being
+The test suite adds 809 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

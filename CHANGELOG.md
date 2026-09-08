@@ -4,6 +4,36 @@
 
 First release.
 
+### A class reached through a module
+
+`pd.MultiIndex.from_product(...)`. The receiver is a class named in full: a module this file
+imported, then a class that module holds or re-exports. `Parent.method()` resolved and this
+never did, though it is the same statement with the class written out properly - and it is how
+library code is called from outside, which is most of the calls in most test suites.
+`from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls written this way in a
+clone of pandas, every one unresolved.
+
+Everything needed was already here. The chain is recorded on the edge, and turning `pkg.Frame`
+into the class it means - through a package's re-export, or a dotted module path - is the
+lookup class annotations already use. It answers only for a real class, and only when exactly
+one answers to the name.
+
+2,081 more resolved calls on pandas and 72 on ansible. Two stopped resolving: a function that
+calls `.append()` on both a MultiIndex and an Index, where resolving one of them made the pair
+ambiguous. Two answers is not an answer, and that rule fired correctly on information it did
+not have before.
+
+### A parameter shadowing a module, in a dotted call
+
+Found while building the above. `def use(pkg)` in a file that also does `import pkg`, then
+`pkg.mod.func()` - resolved into the module and labelled `QUALIFIED`, this tool's highest
+confidence, on a name that means whatever the caller passed.
+
+The guard against exactly this has been here for a long time and only ever looked at `recv`,
+the receiver when it is a single name. It is None for every dotted receiver, so `a.b.c()`
+walked straight past it. The root of a chain is now asked the same question, which is readable
+because an import is deliberately not counted as a shadow.
+
 ### The right side is evaluated first
 
 `df = df.where(df > 0)`. The receiver on the right is the OLD `df`, typed a line earlier. The
@@ -340,7 +370,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,270 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,281 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

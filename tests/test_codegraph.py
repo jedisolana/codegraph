@@ -9662,6 +9662,123 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class AClassReachedThroughAModule(Sandbox):
+    """`pd.MultiIndex.from_product(...)`. The receiver is a class, named in full: a module this
+    file imported, then a class that module holds or re-exports. `Parent.method()` resolved and
+    this never did, though it is the same statement with the class written out properly - and it
+    is how library code is called from the outside, which is most calls in most test suites.
+
+    In a clone of pandas, `from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls
+    written this way, every one of them unresolved.
+
+    Everything needed was already here. The chain is recorded on the edge, and the lookup that
+    turns `pkg.Frame` into the class it means - through a package's re-export, or through a
+    dotted module path - is the one class annotations already use."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "from pkg.frame import Frame as Frame\n")
+        self.write("pkg/frame.py",
+                   "class Frame:\n"
+                   "    @classmethod\n"
+                   "    def build(cls):\n        return cls()\n\n"
+                   "    def go(self):\n        return 1\n")
+
+    def test_through_a_package_re_export(self):
+        self.write("b.py", "import pkg\n\n\n"
+                           "def use():\n    return pkg.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), ["b.use"])
+
+    def test_through_the_full_module_path(self):
+        self.write("c.py", "import pkg.frame\n\n\n"
+                           "def use():\n    return pkg.frame.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), ["c.use"])
+
+    def test_through_an_alias(self):
+        self.write("d.py", "import pkg as p\n\n\n"
+                           "def use():\n    return p.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), ["d.use"])
+
+    def test_it_walks_the_bases(self):
+        self.write("pkg/sub.py", "from pkg.frame import Frame\n\n\n"
+                                 "class Sub(Frame):\n    pass\n")
+        self.write("e.py", "import pkg.sub\n\n\n"
+                           "def use():\n    return pkg.sub.Sub.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), ["e.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_module_this_file_never_imported_is_not_read(self):
+        self.write("f.py", "def use():\n    return pkg.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+    def test_a_local_named_after_a_module_this_file_never_imported(self):
+        self.write("j.py", "def use(pkg):\n    return pkg.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+    def test_a_parameter_shadowing_a_module_this_file_did_import(self):
+        """The sharp one, and a hole the tool had before this rule existed too. `recv_local` is
+        about a ONE-NAME receiver and is False for every dotted one, and requiring the chain to
+        start with an imported name does not help when the file imports that very name. A
+        parameter called `pkg` is whatever the caller passed."""
+        self.write("j2.py", "import pkg\n\n\n"
+                            "def use(pkg):\n    return pkg.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+    def test_the_same_shadowing_of_a_dotted_module_call(self):
+        """The pre-existing half: `pkg.mod.func()` under a parameter named `pkg` resolved
+        QUALIFIED - this tool's highest confidence - to a module the name does not mean here."""
+        self.write("pkg/mod.py", "def func():\n    return 1\n")
+        self.write("j3.py", "import pkg.mod\n\n\n"
+                            "def use(pkg):\n    return pkg.mod.func()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/mod.func"), [])
+
+    def test_an_unshadowed_dotted_module_call_still_resolves(self):
+        """The positive control for the two above."""
+        self.write("pkg/mod2.py", "def func():\n    return 1\n")
+        self.write("j4.py", "import pkg.mod2\n\n\n"
+                            "def use():\n    return pkg.mod2.func()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/mod2.func"), ["j4.use"])
+
+    def test_a_class_of_the_same_name_defined_here_is_not_the_imported_one(self):
+        self.write("k.py", "class pkg:\n"
+                           "    class Frame:\n"
+                           "        @classmethod\n"
+                           "        def build(cls):\n            return 1\n\n\n"
+                           "def use():\n    return pkg.Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+    def test_a_name_the_module_does_not_hold_answers_nothing(self):
+        self.write("g.py", "import pkg\n\n\n"
+                           "def use():\n    return pkg.Missing.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+    def test_a_module_attribute_that_is_not_a_class_answers_nothing(self):
+        """`pkg.helper.build()` where `helper` is a function, not a class."""
+        self.write("pkg/util.py", "def helper():\n    def build():\n        return 1\n"
+                                  "    return build\n")
+        self.write("h.py", "import pkg.util\n\n\n"
+                           "def use():\n    return pkg.util.helper.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/util.helper.build"), [])
+
+    def test_a_receiver_that_is_not_a_plain_chain_answers_nothing(self):
+        self.write("i.py", "import pkg\n\n\n"
+                           "def use(rows):\n    return rows[0].Frame.build()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/frame.Frame.build"), [])
+
+
 class TheRightSideIsEvaluatedFirst(Sandbox):
     """`df = df.where(df > 0)`. The receiver on the right is the OLD `df`, which was typed one
     line up - and it was read as the new one, which has no type yet, so the call on its own line
