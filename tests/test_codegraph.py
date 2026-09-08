@@ -9666,6 +9666,89 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class FromDotImportIsNotAlwaysASubmodule(Sandbox):
+    """`from . import app`, where `app` is an object the package's `__init__.py` built. The
+    relative branch treated every name after `from .` as a module of its own, so the name was
+    recorded as living in `pkg/app` - a module that does not exist - and everything the object
+    could have told us was lost. `from pkg import app`, the same import written out, worked.
+
+    It is flask's own examples: `app = Flask(__name__)` in `__init__.py` and `from . import app`
+    in the file next to it, then `@app.route(...)` on every view. Those were the last three
+    call sites `impact Scaffold.route` could not resolve.
+
+    A phantom module also went into the import graph, so `deps` could name a file that is not
+    there. The absolute branch has always recorded the package as the home and the submodule
+    only as a CANDIDATE, kept if a module of that id really exists. Both branches now do."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("lib.py", "class App:\n    def route(self, r):\n        return r\n")
+        self.write("pkg/__init__.py", "from lib import App\n\napp = App()\n")
+
+    def test_a_relative_import_of_a_package_level_object(self):
+        self.write("pkg/views.py", "from . import app\n\n\n"
+                                   "@app.route('/')\n"
+                                   "def index():\n    return 1\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.App.route"), ["pkg/views"])
+
+    def test_the_absolute_form_still_works(self):
+        self.write("pkg/other.py", "from pkg import app\n\n\n"
+                                   "@app.route('/x')\n"
+                                   "def other():\n    return 2\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "lib.App.route"), ["pkg/other"])
+
+    def test_a_relative_import_of_a_real_submodule_still_binds_the_module(self):
+        """The shape the old reading was written for, and it has to keep working."""
+        self.write("pkg/helpers.py", "def load():\n    return 1\n")
+        self.write("pkg/uses.py", "from . import helpers\n\n\n"
+                                  "def go():\n    return helpers.load()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/helpers.load"), ["pkg/uses.go"])
+
+    def test_importing_a_sub_PACKAGE_binds_it_as_a_module(self):
+        """A package is a submodule too, and its id ends in `/__init__` - so the test for "does
+        that module exist" never matched one. `from .. import _profiles`, where `_profiles` is a
+        package, bound nothing at all, and every class inheriting through it lost its base.
+
+        Ansible writes this 869 times."""
+        self.write("pkg/sub/__init__.py",
+                   "class Encoder:\n    def encode(self):\n        return 1\n")
+        # A decoy of the same name elsewhere, so a tree-wide "only one class answers to that
+        # name" match cannot pass this test for the wrong reason.
+        self.write("decoy.py", "class Encoder:\n    def encode(self):\n        return 99\n")
+        self.write("pkg/deep/__init__.py", "")
+        self.write("pkg/deep/user.py",
+                   "from .. import sub\n\n\n"
+                   "class Mine(sub.Encoder):\n    pass\n\n\n"
+                   "def go():\n    return Mine().encode()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/sub/__init__.Encoder.encode"),
+                         ["pkg/deep/user.go"])
+        self.assertEqual(codegraph.callers_of(g, "decoy.Encoder.encode"), [])
+
+    def test_the_absolute_form_of_a_sub_package_too(self):
+        self.write("pkg/sub2/__init__.py",
+                   "class Writer:\n    def write(self):\n        return 1\n")
+        self.write("decoy2.py", "class Writer:\n    def write(self):\n        return 99\n")
+        self.write("user2.py",
+                   "from pkg import sub2\n\n\n"
+                   "def go():\n    return sub2.Writer().write()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/sub2/__init__.Writer.write"), ["user2.go"])
+        self.assertEqual(codegraph.callers_of(g, "decoy2.Writer.write"), [])
+
+    def test_no_phantom_module_enters_the_import_graph(self):
+        self.write("pkg/views2.py", "from . import app\n\n\n"
+                                    "def index():\n    return app\n")
+        g = self.graph()
+        mods = {n["id"] for n in g["nodes"] if n["kind"] == "module"}
+        targets = {i["callee"] for i in g["imports"] if i["src"] == "pkg/views2"}
+        self.assertEqual(targets - mods, set(),
+                         "an import points at a module that does not exist")
+
+
 class ABaseClassImportedUnderAnAlias(Sandbox):
     """`from .sansio.blueprints import Blueprint as SansioBlueprint`, then
     `class Blueprint(SansioBlueprint)`. Flask's own shape, and the inheritance link was dropped:

@@ -4,6 +4,31 @@
 
 First release.
 
+### `from . import app` is not always a submodule
+
+Every name after `from .` was read as a module of its own. So `from . import app`, beside an
+`app = Flask(__name__)` in the package's `__init__.py`, recorded the name as living in a module
+that does not exist: the object's class was lost, every `@app.route(...)` in the file next to it
+went unresolved, and a phantom module went into the import graph where `deps` could name it.
+Written out as `from pkg import app`, the same import worked. It is flask's own examples, and
+the last three call sites `impact Scaffold.route` could not resolve.
+
+The absolute branch has always recorded the PACKAGE as the home and the submodule only as a
+candidate, kept if a module of that id really exists. Both branches do now.
+
+Underneath it, a second one. A sub-*package* imported that way bound nothing at all: a package's
+id ends in `/__init__`, and the test for "does that module exist" compared against the bare
+path, which never matches one. `from .. import _profiles` bound no module, so every class
+inheriting through it lost its base - ansible writes that shape 869 times, and 16 answers that
+looked like losses from the first fix were this second one showing through.
+
+1,097 more resolved calls across the three test repositories, none lost.
+
+A third edit went in with these and came back out. It looked right - the same normalisation
+applied to the other table that carries submodule candidates - and changed nothing on any of
+the three repositories and no test, because the first table already reaches that conclusion. An
+edit that cannot be shown to do anything is a claim that it handles a case, and it does not.
+
 ### A base class imported under an alias
 
 `from .sansio.blueprints import Blueprint as SansioBlueprint`, then
@@ -423,7 +448,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,299 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,298 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

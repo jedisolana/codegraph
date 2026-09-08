@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6210,
-  "call_sites": 8127,
-  "edge_confidence": {"EXTERNAL": 3248, "INHERITED": 944, "BUILTIN": 638, "SELF-METHOD": 574,
-                      "QUALIFIED": 408, "LOCAL": 217, "UNTYPED": 173, "TYPED": 5,
+  "call_edges": 6239,
+  "call_sites": 8171,
+  "edge_confidence": {"EXTERNAL": 3256, "INHERITED": 958, "BUILTIN": 640, "SELF-METHOD": 574,
+                      "QUALIFIED": 413, "LOCAL": 217, "UNTYPED": 173, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2151,
-  "could_have_been_resolved": 2324,
+  "resolved_to_one_def": 2170,
+  "could_have_been_resolved": 2343,
   "resolution_rate": 0.926
 }
 ```
@@ -185,11 +185,11 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.749** |
-| ansible | 0.379 | **0.654** |
-| pandas | 0.359 | **0.799** |
+| flask | 0.241 | **0.750** |
+| ansible | 0.379 | **0.675** |
+| pandas | 0.359 | **0.801** |
 
-Nine rules and three bugs did that, and none of them is clever. A name a package **re-exports** —
+Nine rules and four bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -266,10 +266,19 @@ different name from the one the class was defined under. So the lookup found the
 check threw it away, and every method Blueprint inherits from Scaffold was invisible. 78 more
 calls on flask, 15 on ansible, and one correction: a `super()` that was skipping a level.
 
-Every one of these was checked edge by edge against the build before it: 4,662 calls gained
+Every one of these was checked edge by edge against the build before it: 5,759 calls gained
 across the three repositories, and 6 lost — five that the old reading order reached by using
 the NEW type on the OLD name, right by luck and labelled `TYPED` either way, and one `super()`
 answer that was simply wrong.
+
+The fourth bug was `from . import app`. Every name after `from .` was read as a module of its
+own, so a name the package's `__init__.py` built — `app = Flask(__name__)`, and `from . import
+app` in the file beside it — was recorded as living in a module that does not exist. Its class
+was lost, every `@app.route(...)` next to it went unresolved, and a phantom module went into
+the import graph where `deps` could name it. Underneath that, a sub-*package* imported the same
+way bound nothing at all, because a package's id ends in `/__init__` and the test for "does
+that module exist" never matched one: ansible writes that 869 times, and every class inheriting
+through it had lost its base. 1,097 more resolved calls, none lost.
 
 **The last column also moved because the denominator did, and that is worth being plain
 about.** `UNTYPED` is a claim — the receiver could not be typed, so the target might be yours —
@@ -280,7 +289,7 @@ has the method rather than whether anything does. It resolves nothing new. It mo
 on flask, 220 on ansible and 1,564 on pandas out of a denominator of winnable calls they were
 never winnable in, and out of the "unsure" list `impact` prints — which is this tool sending an
 agent to look for something it has already proved is not there. Resolved counts, unchanged by
-it: flask 1,390 → 1,468 from the alias fix alone, ansible 18,723 → 18,737, pandas 101,572.
+it: flask 1,470, ansible 19,606, pandas 101,798.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -600,7 +609,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,299 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,298 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
 and six rules that carry a type across an import, a return, a chained call, a test's
 arguments and a second call, which are 280 of those mutations
@@ -650,7 +659,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 820 more. Grouped, because a list of every one of them stopped being
+The test suite adds 826 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

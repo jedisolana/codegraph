@@ -399,13 +399,30 @@ def _defs_and_calls(path, mod):
                         imports.append({"src": mod, "callee": f"{target}/{a.name}",
                                         "kind": "IMPORT", "line": node.lineno,
                                         "module_level": ml, "maybe": True})
-                else:                                            # from . import thing - each NAME is itself a module
+                else:
+                    # `from . import thing` - the name may be a submodule, and may just as
+                    # easily be something the package's `__init__.py` built. Every name was
+                    # read as a module of its own, so `from . import app` beside
+                    # `app = Flask(__name__)` recorded the name as living in `pkg/app`, a module
+                    # that does not exist: the object's class was lost, every `@app.route(...)`
+                    # next to it went unresolved, and a phantom module went into the import
+                    # graph where `deps` could name it.
+                    #
+                    # The absolute branch has always recorded the PACKAGE as the home and the
+                    # submodule only as a candidate, kept if a module of that id really exists.
+                    # The two branches have to learn the same things or one of them lags behind.
+                    home = "/".join(base)
                     for a in node.names:
-                        target = "/".join([*base, a.name])
-                        imports.append({"src": mod, "callee": target, "kind": "IMPORT", "line": node.lineno, "module_level": ml})
-                        aliases[a.asname or a.name] = target
-                        _bind(fromimp, fromalt, a.asname or a.name, target)   # `from . import thing` also allows a bare thing() if it is a func
+                        name = a.asname or a.name
+                        if home:
+                            imports.append({"src": mod, "callee": home, "kind": "IMPORT",
+                                            "line": node.lineno, "module_level": ml})
+                        _bind(fromimp, fromalt, name, home)   # `from . import thing` also allows a bare thing() if it is a func
                         if a.asname: fromorig[a.asname] = a.name
+                        target = "/".join([*base, a.name])
+                        submodules[name] = target
+                        imports.append({"src": mod, "callee": target, "kind": "IMPORT",
+                                        "line": node.lineno, "module_level": ml, "maybe": True})
                 return
             if node.module:
                 top = node.module.split(".")[0]
@@ -1667,8 +1684,13 @@ def build(dirs=None, write=True):
     # mod.func() resolves. Confirmed here, where the whole module list is finally known.
     for mid, cand in mod_sub.items():
         for name, target in cand.items():
-            if target in allmods:
-                mod_alias.setdefault(mid, {}).setdefault(name, target)
+            # A PACKAGE is a submodule too, and its id ends in `/__init__` - so this test for
+            # "does that module exist" never matched one. `from .. import _profiles`, where
+            # `_profiles` is a package, bound nothing at all, and every class inheriting through
+            # it lost its base. Ansible writes that shape 869 times.
+            real = _real_module(target)
+            if real in allmods:
+                mod_alias.setdefault(mid, {}).setdefault(name, real)
     # RE-EXPORTS. `pkg/__init__` does `from .thing import load`, and another module does
     # `from pkg import load`. The name is not defined in pkg/__init__ at all, so the import
     # pointed at a module that does not have it. It happened to resolve anyway whenever the
