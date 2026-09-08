@@ -9282,3 +9282,80 @@ class TheTreeIsNotGoneItIsJustReadOnly(Sandbox):
         with self.assertRaises(SystemExit) as caught:
             codegraph.load()
         self.assertIn("gone", str(caught.exception))
+
+
+class TellingTheAgentWhenToAsk(Sandbox):
+    """Ten tools with good descriptions, and nothing saying when to reach for which.
+
+    A tool an agent does not think to call is a tool that does not exist. The handshake has a
+    field for exactly this - `instructions`, which a client shows the model once, at the top -
+    and it was empty, so every one of these had to be rediscovered from its own description in
+    the middle of doing something else.
+
+    What goes in it is the ORDER, and the one rule that matters: ask what you broke before
+    saying the work is done. Everything else the tool can already answer for itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        self.graph()
+
+    def handshake(self):
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                              "params": {}}) + "\n"
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        return json.loads(r.stdout.splitlines()[0])["result"], r
+
+    def test_the_handshake_carries_instructions(self):
+        result, r = self.handshake()
+        self.assertIn("instructions", result, r.stdout[:300])
+        self.assertTrue(result["instructions"].strip())
+
+    def test_they_say_what_to_ask_first(self):
+        result, _ = self.handshake()
+        self.assertIn("codegraph_repo_map", result["instructions"])
+
+    def test_they_say_what_to_ask_before_finishing(self):
+        """The one rule worth spending an instruction on. An agent that edits and stops has
+        skipped the only question this tool exists to answer."""
+        result, _ = self.handshake()
+        self.assertIn("codegraph_changed", result["instructions"])
+
+    def test_they_are_honest_about_the_language(self):
+        """It reads Python and nothing else. An agent asking it about a TypeScript file should
+        learn that from the instructions rather than from an empty answer."""
+        result, _ = self.handshake()
+        self.assertIn("python", result["instructions"].lower())
+
+    def test_they_warn_about_the_answer_that_looks_like_nothing(self):
+        """`nothing calls this` is the sentence most likely to be misread, and the instructions
+        are where an agent is told how to read it before it ever sees one."""
+        result, _ = self.handshake()
+        self.assertRegex(result["instructions"].lower(), r"nothing calls|reached|delete")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_every_tool_named_in_them_exists(self):
+        """Instructions that name a tool the server does not have are worse than none: the
+        agent tries it, fails, and trusts the rest less."""
+        result, _ = self.handshake()
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        listed = {t["name"] for t in
+                  json.loads(r.stdout.splitlines()[-1])["result"]["tools"]}
+        named = {w.strip("`,.:") for w in result["instructions"].split()
+                 if w.strip("`,.:").startswith("codegraph_")}
+        self.assertTrue(named)
+        self.assertEqual(named - listed, set(), named - listed)
+
+    def test_they_stay_short(self):
+        """It is spent from the model's context every session. A page of prose here costs more
+        than the tools save."""
+        result, _ = self.handshake()
+        self.assertLess(len(result["instructions"]), 1200, len(result["instructions"]))

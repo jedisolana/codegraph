@@ -3266,6 +3266,28 @@ def repo_map(g, limit=12):
 # changes when the protocol does, not when somebody sits down at a keyboard. It lives in one
 # named constant so the no-dates rule can make a single narrow exception it can see, rather
 # than a general one it cannot.
+# What a client shows the model once, at the top of a session. A tool an agent does not think
+# to call is a tool that does not exist, and ten good descriptions do not say which to reach for
+# first. It is spent from the model's context every session, so it buys the ORDER and the one
+# rule that matters, and leaves everything else to the tools' own descriptions.
+MCP_INSTRUCTIONS = (
+    "codegraph answers structural questions about the PYTHON in this repository, from a graph "
+    "it builds by parsing it. It reads no other language.\n"
+    "\n"
+    "In a repository you have not seen, ask codegraph_repo_map first: it names the modules "
+    "everything leans on and where execution starts.\n"
+    "Before reading a file you only need the shape of, ask codegraph_shape - signatures and "
+    "line numbers, no bodies.\n"
+    "Before changing a shared function, ask codegraph_blast: it is the transitive callers, not "
+    "just the direct ones.\n"
+    "After editing and BEFORE saying the work is done, hand codegraph_changed your `git diff`. "
+    "It finds the names itself, so you do not have to know what to ask about.\n"
+    "\n"
+    "One answer to read carefully: `nothing calls X` is not the same as `X is unreachable`. "
+    "The reply says which, because a function reached through a dispatch table or a decorator "
+    "has no callers this graph can name and deleting it still breaks the code."
+)
+
 MCP_PROTOCOL = "2024-11-05"  # scrub: fixture -- a protocol identifier, not a date
 
 MCP_TOOLS = {
@@ -3663,6 +3685,7 @@ def _mcp_serve(stream_in=None, stream_out=None):
             send({"jsonrpc": "2.0", "id": mid,
                   "result": {"protocolVersion": MCP_PROTOCOL,
                              "capabilities": {"tools": {}},
+                             "instructions": MCP_INSTRUCTIONS,
                              "serverInfo": {"name": "codegraph",
                                             "version": str(_VERSION)}}})
         elif method == "tools/list":
