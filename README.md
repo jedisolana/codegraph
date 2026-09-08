@@ -149,9 +149,9 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 4637,
-  "call_sites": 6176,
-  "edge_confidence": {"EXTERNAL": 2465, "INHERITED": 657, "BUILTIN": 513, "SELF-METHOD": 418,
+  "call_edges": 4638,
+  "call_sites": 6177,
+  "edge_confidence": {"EXTERNAL": 2465, "INHERITED": 657, "BUILTIN": 514, "SELF-METHOD": 418,
                       "QUALIFIED": 294, "LOCAL": 155, "UNTYPED": 127, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
   "resolved_to_one_def": 1532,
