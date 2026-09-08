@@ -4,6 +4,44 @@
 
 First release.
 
+### A base class imported under an alias
+
+`from .sansio.blueprints import Blueprint as SansioBlueprint`, then
+`class Blueprint(SansioBlueprint)` - flask's own shape, and the inheritance link was dropped.
+Every method Blueprint gets from Scaffold was invisible, so `bp.route()` resolved to nothing on
+a receiver the tool had typed perfectly.
+
+A base is looked up by name and then checked by name, to stop it matching some other class that
+happens to answer to the spelling. The check compared against the name written HERE, and an
+alias is by definition a different name from the one the class was defined under - so the
+lookup found the class and the check threw it away. The import already says which class the
+alias means; the check only has to accept the name it means it by.
+
+78 more resolved calls on flask, 15 on ansible. One answer changed: `super(ActionModule,
+self).__init__()` in an ansible test plugin was reaching `ActionBase.__init__`, two classes up,
+because the class in between was linked under an alias. It now reaches the one in between.
+
+Found while checking something else. A relabelling pass was about to call `bp.route()` external
+- on a method sitting in that very repository - and the sample that was meant to confirm the
+relabelling was right is what caught it.
+
+### A typed receiver whose class does not have the method
+
+`UNTYPED` is a claim: the receiver could not be typed, so the target might be in this tree. For
+`client.get()` in flask's own tests it is false. `client` is a `FlaskClient`, `get` is
+werkzeug's, and the tool can prove no class it can see carries it.
+
+The name-wide version of this already ran - a method no definition in the tree carries is
+EXTERNAL, not a blind spot. This is the same test with better evidence: not "does anything
+define it" but "does THIS class, or any base of it this tree can see". Only for a method call,
+where the name written IS the target's name, and only when exactly one class answered to the
+receiver - several means the tool DECLINED to type it, which is not evidence about anything.
+
+It resolves nothing new. It moves 200 calls on flask, 220 on ansible and 1,564 on pandas out of
+the "unsure" list `impact` prints - which is this tool sending an agent to look for something it
+has already proved is not there - and out of a denominator of winnable calls they were never
+winnable in. The published rates move with it, and the README says so where it states them.
+
 ### Two chains in one function are two questions
 
 `x.clone().go()` and `y.clone().go()`, on two different classes. What `clone` returned was
@@ -385,7 +423,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,286 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,299 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

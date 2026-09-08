@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6159,
-  "call_sites": 8059,
-  "edge_confidence": {"EXTERNAL": 3220, "INHERITED": 927, "BUILTIN": 635, "SELF-METHOD": 570,
-                      "QUALIFIED": 404, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 6210,
+  "call_sites": 8127,
+  "edge_confidence": {"EXTERNAL": 3248, "INHERITED": 944, "BUILTIN": 638, "SELF-METHOD": 574,
+                      "QUALIFIED": 408, "LOCAL": 217, "UNTYPED": 173, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2126,
-  "could_have_been_resolved": 2304,
-  "resolution_rate": 0.923
+  "resolved_to_one_def": 2151,
+  "could_have_been_resolved": 2324,
+  "resolution_rate": 0.926
 }
 ```
 
@@ -169,8 +169,8 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.923 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.926 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
@@ -185,11 +185,11 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.644** |
-| ansible | 0.379 | **0.649** |
-| pandas | 0.359 | **0.789** |
+| flask | 0.241 | **0.749** |
+| ansible | 0.379 | **0.654** |
+| pandas | 0.359 | **0.799** |
 
-Nine rules and two bugs did that, and none of them is clever. A name a package **re-exports** —
+Nine rules and three bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -258,9 +258,29 @@ right there, on the same line, already resolved on its own. Reading it from the 
 both and answers three more. Where one line genuinely holds two, the scope-wide rule is still
 the right one.
 
-Every one of these was checked edge by edge against the build before it: 4,569 calls gained
-across the three repositories, and 5 lost — all five answers the old reading order reached by
-using the NEW type on the OLD name, right by luck and labelled `TYPED` either way.
+The third bug was inheritance through an alias. `from .sansio.blueprints import Blueprint as
+SansioBlueprint`, then `class Blueprint(SansioBlueprint)` — flask's own shape. A base is looked
+up by name and then checked by name, to stop it matching some other class that answers to the
+spelling; the check compared against the name written *here*, and an alias is by definition a
+different name from the one the class was defined under. So the lookup found the class and the
+check threw it away, and every method Blueprint inherits from Scaffold was invisible. 78 more
+calls on flask, 15 on ansible, and one correction: a `super()` that was skipping a level.
+
+Every one of these was checked edge by edge against the build before it: 4,662 calls gained
+across the three repositories, and 6 lost — five that the old reading order reached by using
+the NEW type on the OLD name, right by luck and labelled `TYPED` either way, and one `super()`
+answer that was simply wrong.
+
+**The last column also moved because the denominator did, and that is worth being plain
+about.** `UNTYPED` is a claim — the receiver could not be typed, so the target might be yours —
+and for `client.get()` in flask's tests it is false: `client` is a `FlaskClient`, `get` is
+werkzeug's, and the tool can prove no class it can see carries it. The name-wide version of
+this test already ran; this is the same test with better evidence, asking whether THIS class
+has the method rather than whether anything does. It resolves nothing new. It moves 200 calls
+on flask, 220 on ansible and 1,564 on pandas out of a denominator of winnable calls they were
+never winnable in, and out of the "unsure" list `impact` prints — which is this tool sending an
+agent to look for something it has already proved is not there. Resolved counts, unchanged by
+it: flask 1,390 → 1,468 from the alias fix alone, ansible 18,723 → 18,737, pandas 101,572.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -580,7 +600,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,286 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,299 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
 and six rules that carry a type across an import, a return, a chained call, a test's
 arguments and a second call, which are 280 of those mutations
@@ -630,7 +650,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 812 more. Grouped, because a list of every one of them stopped being
+The test suite adds 820 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

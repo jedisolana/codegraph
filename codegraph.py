@@ -1807,8 +1807,16 @@ def build(dirs=None, write=True):
                 # inherited from cryptography's x509 Extension. Both wrong, both confident, and
                 # both then feeding the method lookup, super() and the constructor edges.
                 want = b.rsplit(".", 1)[-1]              # `core.Handler` is named Handler
+                # ...and an ALIAS is a different name from the one the class was defined under.
+                # `from .sansio.blueprints import Blueprint as SansioBlueprint`, then
+                # `class Blueprint(SansioBlueprint)` - flask's own shape - found the class and
+                # then threw it away, because "Blueprint" is not "SansioBlueprint". Every method
+                # that Blueprint gets from Scaffold was invisible, so `bp.route()` resolved to
+                # nothing on a receiver typed perfectly. The import already says which class the
+                # alias means; this only has to accept the name it means it BY.
+                real = mod_orig.get(n["module"], {}).get(want, want).rsplit(".", 1)[-1]
                 hits = [c for c in _classes_named(b, n["module"], n["id"].rsplit(".", 1)[0])
-                        if c.split(".")[-1] == want]
+                        if c.split(".")[-1] in (want, real)]
                 if len(hits) == 1: resolved.append(hits[0])
             bases_of[n["id"]] = resolved
     imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
@@ -1816,10 +1824,17 @@ def build(dirs=None, write=True):
     mro_cache = {}                                                # linearisation is reused across edges
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
+        # DID ANYTHING PUT A CLASS TO THE RECEIVER? Not the same question as whether a target
+        # was found. `self.render()` in a class that inherits from a library base has a known
+        # receiver and no findable method, and calling that UNTYPED - "could not be typed, so
+        # the target might be yours" - is a claim the tool can disprove. It is what `impact`
+        # prints as "unsure", which is the tool telling an agent to go and look.
+        knew_class = False
         ec = e.get("encl_class")
         if ec and (ec + "." + callee) in def_ids:                # self.method()/cls.method() -> the method in the ENCLOSING class (exact scope)
             dst = ec + "." + callee; conf = "SELF-METHOD"
         elif ec:
+            knew_class = True
             # INHERITED: self.method() where the method lives on a base class. Looked up in
             # Python's own order - C3, not depth-first - because those differ exactly where a
             # diamond makes the answer interesting.
@@ -1865,7 +1880,9 @@ def build(dirs=None, write=True):
             #
             # The `"/" in recv_path` test above is a cheap pre-filter, not a safeguard: a
             # one-name receiver names no class here anyway. It keeps a lookup off a hot path.
-            for c in _classes_named(e["recv_path"].replace("/", "."), srcmod, e["src"]):
+            cands = _classes_named(e["recv_path"].replace("/", "."), srcmod, e["src"])
+            knew_class = knew_class or len(cands) == 1
+            for c in cands:
                 for b in _mro(c, bases_of, mro_cache):
                     if (b + "." + callee) in def_ids:
                         dst = b + "." + callee; conf = "CLASS"; break
@@ -1873,7 +1890,8 @@ def build(dirs=None, write=True):
         it = e.get("invoke_type")
         if not dst and it:
             hits = []
-            for c in _classes_named(it, srcmod, e["src"]):
+            cands = _classes_named(it, srcmod, e["src"])
+            for c in cands:
                 for b in _mro(c, bases_of, mro_cache):           # inherited __call__ counts,
                     if (b + ".__call__") in def_ids:             # the same way an inherited
                         hits.append(b + ".__call__"); break      # __init__ does
@@ -1891,7 +1909,11 @@ def build(dirs=None, write=True):
             # `x = Sub(); x.method()` found nothing whenever the method lived on the parent -
             # which in ordinary class hierarchies is most of them.
             hits = []
-            for c in _classes_named(rt, srcmod, e["src"]):
+            cands = _classes_named(rt, srcmod, e["src"])
+            # Exactly one, deliberately: several classes answering to the name means the tool
+            # DECLINED to type the receiver, which is not evidence about where the method is.
+            knew_class = knew_class or len(cands) == 1
+            for c in cands:
                 for b in _mro(c, bases_of, mro_cache):
                     if (b + "." + callee) in def_ids:
                         hits.append(b + "." + callee); break
@@ -2029,6 +2051,16 @@ def build(dirs=None, write=True):
                 # resolution rate mean something: it is the denominator of what was winnable.
                 conf = "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
+        # Only for a METHOD call, where the name written IS the target's name - the same limit
+        # the name-wide rule keeps. `p = Plain(); p()` is a bare call on a typed local whose
+        # class has no `__call__`: broken code, not a library's method, and nothing about where
+        # a target lives.
+        #
+        # Every branch above that types a receiver is a method call already, so no test can
+        # tell this condition from its absence today. It is kept because it states the rule: a
+        # branch added later that types the receiver of a BARE call would otherwise start
+        # relabelling silently, and a wrong EXTERNAL is a claim the tool cannot take back.
+        if not dst and knew_class and method: e["typed_miss"] = True
     # UNTYPED is a claim: the receiver could not be typed, so the target MIGHT be in this tree.
     # For a call like `rows.append(x)` or `text.strip()` that claim is false and the tool can
     # prove it - no definition anywhere in the tree carries that name, so the target is not
@@ -2195,9 +2227,13 @@ def build(dirs=None, write=True):
                 return got
         return None
 
-    def _method_on(cls_name, where, scope, callee):
+    def _method_on(cls_name, where, scope, callee, e=None):
         """The definition `callee` names on a class called `cls_name`, read in `where`'s
-        scope. One class or none: several answering to the name is not an answer."""
+        scope. One class or none: several answering to the name is not an answer.
+
+        When the class was found and the method was not, that is recorded on the edge - it is
+        the difference between "could not type the receiver" and "typed it, and the method is
+        not in this tree"."""
         hits = _classes_named(cls_name, where, scope)
         if len(hits) != 1:
             return None
@@ -2205,6 +2241,8 @@ def build(dirs=None, write=True):
             cand = f"{c}.{callee}"
             if cand in def_ids:
                 return cand
+        if e is not None:
+            e["typed_miss"] = True
         return None
 
     for _round in range(6):
@@ -2266,7 +2304,8 @@ def build(dirs=None, write=True):
                 else resolved_in.get((e["src"], e["recv_call"]))
             if not target or target not in returns_of:
                 continue
-            cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target, e["callee"])
+            cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target,
+                              e["callee"], e)
             if cand:
                 e["dst"] = cand
                 e["confidence"] = "TYPED"
@@ -2281,7 +2320,7 @@ def build(dirs=None, write=True):
             found = _visible_fixture(e.get("mod") or "", e["fixture_param"])
             if not found:
                 continue
-            cand = _method_on(found[0], found[1], found[2], e["callee"])
+            cand = _method_on(found[0], found[1], found[2], e["callee"], e)
             if cand:
                 e["dst"] = cand
                 e["confidence"] = "FIXTURE"
@@ -2289,6 +2328,18 @@ def build(dirs=None, write=True):
 
         if not changed:
             break
+
+    # A RECEIVER THAT WAS TYPED, AND A METHOD THAT IS NOT HERE. The name-wide version of this
+    # already runs above: a method no definition in the tree carries is EXTERNAL, not a blind
+    # spot. This is the same test with better evidence - not "does anything define it" but
+    # "does THIS class, or any base of it this tree can see". Every `client.get()` in flask's
+    # test suite is werkzeug's; 161 calls on `self` alone in a clone of ansible are a library
+    # base's. Left as UNTYPED they are counted as winnable and printed by `impact` as "unsure",
+    # which is this tool sending an agent to look for something it has already proved is not
+    # there.
+    for e in calls:
+        if e["confidence"] == "UNTYPED" and e.get("typed_miss"):
+            e["confidence"] = "EXTERNAL"
 
     keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",
             "candidates")

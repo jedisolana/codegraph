@@ -4935,7 +4935,11 @@ class CallingAnInstanceRunsItsCall(Sandbox):
 
     def test_a_class_that_is_not_callable_invents_nothing(self):
         """The guard: most objects are not callable, and calling one is a TypeError, not an
-        edge to be found."""
+        edge to be found.
+
+        It stays UNTYPED rather than becoming EXTERNAL. The class IS known and has no
+        `__call__`, but a bare call writes the VARIABLE's name, not a method's - so its absence
+        says nothing about where any target lives. The same limit the name-wide rule keeps."""
         self.write("m.py", "class Plain:\n"
                            "    def work(self):\n"
                            "        return 1\n"
@@ -9660,6 +9664,133 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
                    "import flat\n\n\ndef test_four():\n    return flat.flat_thing()\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
+
+
+class ABaseClassImportedUnderAnAlias(Sandbox):
+    """`from .sansio.blueprints import Blueprint as SansioBlueprint`, then
+    `class Blueprint(SansioBlueprint)`. Flask's own shape, and the inheritance link was dropped:
+    every method Blueprint gets from Scaffold was invisible, so `bp.route()` resolved to nothing
+    on a receiver the tool had typed correctly.
+
+    A base is looked up by name and then filtered by name, to stop a base matching some other
+    class that happens to answer. The filter compared against the name written HERE, and an
+    alias is by definition a different name from the one the class was defined under - so the
+    lookup found the class and the filter threw it away.
+
+    Found while checking something else: a relabelling pass was about to call `bp.route()`
+    external, on a method sitting in this very repository."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/base.py",
+                   "class Scaffold:\n"
+                   "    def route(self):\n        return 1\n\n"
+                   "class Blueprint(Scaffold):\n    pass\n")
+
+    def test_a_base_under_an_alias_still_inherits(self):
+        self.write("pkg/blueprints.py",
+                   "from pkg.base import Blueprint as SansioBlueprint\n\n\n"
+                   "class Blueprint(SansioBlueprint):\n    pass\n")
+        self.write("b.py", "from pkg.blueprints import Blueprint\n\n\n"
+                           "def use():\n    bp = Blueprint()\n    return bp.route()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/base.Scaffold.route"), ["b.use"])
+
+    def test_the_unaliased_form_still_works(self):
+        """The positive control - the shape the filter was written for."""
+        self.write("pkg/plain.py",
+                   "from pkg.base import Blueprint\n\n\n"
+                   "class Sub(Blueprint):\n    pass\n")
+        self.write("c.py", "from pkg.plain import Sub\n\n\n"
+                           "def use():\n    s = Sub()\n    return s.route()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/base.Scaffold.route"), ["c.use"])
+
+    def test_the_alias_does_not_open_a_door_to_a_class_of_that_spelling(self):
+        """What the filter is for, kept. Accepting the name the class was DEFINED under must not
+        let in a different class that happens to be spelled like the alias."""
+        self.write("pkg/decoy.py",
+                   "class SansioBlueprint:\n    def route(self):\n        return 99\n")
+        self.write("pkg/blueprints.py",
+                   "from pkg.base import Blueprint as SansioBlueprint\n\n\n"
+                   "class Blueprint(SansioBlueprint):\n    pass\n")
+        self.write("d.py", "from pkg.blueprints import Blueprint\n\n\n"
+                           "def use():\n    bp = Blueprint()\n    return bp.route()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/base.Scaffold.route"), ["d.use"])
+        self.assertEqual(codegraph.callers_of(g, "pkg/decoy.SansioBlueprint.route"), [])
+
+
+class AKnownClassWithoutTheMethodIsNotAMystery(Sandbox):
+    """`UNTYPED` is a claim: the receiver could not be typed, so the target might be in your
+    tree. For `self.render()` inside a class that inherits from a library base, that claim is
+    false and the tool can prove it - the class is known, its bases in this tree are known, and
+    none of them defines `render`. The method is the library's.
+
+    It matters because `impact` prints these as "unsure", which is the tool telling an agent to
+    go and look. Sending it after a method that is provably not here is worse than saying
+    nothing. 161 calls on `self` alone in a clone of ansible, and every `client.get()` in
+    flask's test suite, where `client` is a `FlaskClient` and `get` is werkzeug's.
+
+    The tool already does exactly this by NAME - a method no definition in the tree carries is
+    EXTERNAL. This is the same test with better evidence: not "does anything define it" but
+    "does THIS class"."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("app.py",
+                   "class Base:\n"
+                   "    def here(self):\n        return 1\n\n"
+                   "class Other:\n"
+                   "    def elsewhere(self):\n        return 2\n")
+
+    def edge(self, callee, src):
+        hits = [e for e in self.graph()["calls"]
+                if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(hits), 1, hits)
+        return hits[0]
+
+    def test_a_method_the_enclosing_class_does_not_have(self):
+        self.write("b.py", "from app import Base\n\n\n"
+                           "class Thing(Base):\n"
+                           "    def go(self):\n        return self.elsewhere()\n")
+        e = self.edge("elsewhere", "b.Thing.go")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "EXTERNAL")
+
+    def test_a_typed_local_whose_class_does_not_have_it(self):
+        self.write("c.py", "from app import Base\n\n\n"
+                           "def go():\n    b = Base()\n    return b.elsewhere()\n")
+        e = self.edge("elsewhere", "c.go")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "EXTERNAL")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_receiver_with_no_class_is_still_untyped(self):
+        """The claim UNTYPED makes is true here, and this is what it is for."""
+        self.write("d.py", "def go(thing):\n    return thing.elsewhere()\n")
+        e = self.edge("elsewhere", "d.go")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "UNTYPED")
+
+    def test_a_method_the_class_does_have_still_resolves(self):
+        self.write("e.py", "from app import Base\n\n\n"
+                           "class Thing(Base):\n"
+                           "    def go(self):\n        return self.here()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Base.here"), ["e.Thing.go"])
+
+    def test_an_ambiguous_receiver_is_not_called_external(self):
+        """Two classes answer to the name; the tool has not typed the receiver, it has declined
+        to. That is not proof the method is elsewhere."""
+        self.write("f.py", "class Base:\n    def other(self):\n        return 1\n")
+        self.write("g.py", "import app\nimport f\n\n\n"
+                           "def go(flag):\n"
+                           "    b = app.Base() if flag else f.Base()\n"
+                           "    return b.elsewhere()\n")
+        e = self.edge("elsewhere", "g.go")
+        self.assertNotEqual(e["confidence"], "EXTERNAL")
 
 
 class TwoChainsInOneFunctionAreTwoQuestions(Sandbox):
