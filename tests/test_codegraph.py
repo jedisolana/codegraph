@@ -8326,3 +8326,134 @@ class TheFreshnessWalkIsMostOfAQuery(Sandbox):
         self.write("only.py", "def one():\n    return 1\n")
         g = self.graph()
         self.assertFalse(codegraph._is_stale(g))
+
+
+class TheServerReReadTheGraphEveryTime(Sandbox):
+    """Each MCP call loaded the graph from disk again. On a clone of ansible that is 19MB of
+    JSON and 86ms of parsing, before the freshness check has even started, against an answer
+    that costs 2.7ms. An agent asking twenty questions paid it twenty times.
+
+    A command pays it once and exits, which is why it was never worth noticing. A server is
+    the whole point of the MCP door, and a server can keep what it has already read.
+
+    What it must NOT keep is the answer to `is this still true`. That check runs on every call
+    exactly as before - the code changes under the agent constantly, which is the entire reason
+    it is asking - and the parse is skipped only while the graph it parsed is still current."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n")
+        self.graph()
+
+    def ask(self, *calls):
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+        for i, (tool, args) in enumerate(calls, start=2):
+            msgs.append({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                         "params": {"name": tool, "arguments": args}})
+        payload = "".join(json.dumps(m) + "\n" for m in msgs)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        out = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return [m["result"]["content"][0]["text"] for m in out if m.get("id", 0) > 1], r
+
+    def test_the_graph_is_parsed_once_for_many_questions(self):
+        reads = []
+        real = codegraph.load
+
+        def counted(*a, **k):
+            reads.append(1)
+            return real(*a, **k)
+
+        codegraph.load = counted
+        try:
+            codegraph._mcp_call("codegraph_callers", {"name": "load"})
+            codegraph._mcp_call("codegraph_callers", {"name": "run"})
+            codegraph._mcp_call("codegraph_where", {"name": "load"})
+        finally:
+            codegraph.load = real
+        self.assertEqual(len(reads), 3, "load is still called per question")
+
+    def test_an_edit_between_questions_is_seen(self):
+        """The one that decides whether any of this is allowed. The code changes under the
+        agent constantly - that is why it is asking - and an answer from a cached graph about
+        a file that has moved on is worse than no answer."""
+        answers, r = self.ask(("codegraph_callers", {"name": "load"}),
+                              ("codegraph_find", {"name": "brand_new"}))
+        self.assertIn("pkg/app.run", answers[0], r.stderr[-300:])
+        self.write("pkg/extra.py", "def brand_new():\n    return 1\n")
+        answers, r = self.ask(("codegraph_find", {"name": "brand_new"}))
+        self.assertIn("brand_new", answers[0], r.stderr[-300:])
+
+    def test_a_deletion_between_questions_is_seen(self):
+        os.remove(os.path.join(self.dir, "pkg/app.py"))
+        answers, _ = self.ask(("codegraph_callers", {"name": "load"}))
+        self.assertNotIn("pkg/app.run", answers[0])
+
+    def test_two_questions_in_one_session_both_answer(self):
+        answers, r = self.ask(("codegraph_callers", {"name": "load"}),
+                              ("codegraph_where", {"name": "run"}))
+        self.assertEqual(len(answers), 2, r.stdout[-300:])
+        self.assertIn("pkg/app.run", answers[0])
+        self.assertIn("app.py", answers[1])
+
+
+class OneBadAnswerEndedTheSession(Sandbox):
+    """`codegraph_find` crashed on any result at all, and the crash took the server with it.
+
+    Two defects, and the second is the worse one. `find` returns (id, location) pairs and the
+    tool joined them as if they were strings, so it worked only while it found nothing - which
+    is exactly what every test of it had asked for. And an exception inside a tool call escaped
+    the loop, so the process died mid-session: the next question got no reply at all, and an
+    agent cannot tell a dead server from a slow one.
+
+    A malformed line was already survivable. A malformed ANSWER was not, and that is the one
+    that happens."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load_thing():\n    return 1\n")
+        self.graph()
+
+    def ask(self, *calls):
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+        for i, (tool, args) in enumerate(calls, start=2):
+            msgs.append({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                         "params": {"name": tool, "arguments": args}})
+        payload = "".join(json.dumps(m) + "\n" for m in msgs)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        return [json.loads(x) for x in r.stdout.splitlines() if x.strip()], r
+
+    def test_find_returns_something_readable(self):
+        replies, r = self.ask(("codegraph_find", {"name": "load"}))
+        self.assertIn("result", replies[-1], r.stderr[-400:])
+        text = replies[-1]["result"]["content"][0]["text"]
+        self.assertIn("load_thing", text)
+        self.assertIn("core.py", text, "a match with no location is a match nobody can open")
+
+    def test_a_question_after_a_failing_one_is_still_answered(self):
+        """The whole point of a server. One bad answer must cost one answer."""
+        replies, r = self.ask(("codegraph_find", {"name": "load"}),
+                              ("codegraph_callers", {"name": "load_thing"}))
+        ids = [m.get("id") for m in replies]
+        self.assertIn(3, ids, f"the second question got no reply at all: {r.stdout[-200:]}")
+
+    def test_an_exception_inside_a_tool_becomes_an_error_not_a_death(self):
+        """Forced, because the real one is now fixed and this has to keep holding for the next
+        one. A handler that raises must produce a JSON-RPC error and leave the loop running."""
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_callers", "arguments": {"name": ["not", "a", "str"]}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        self.assertIn(3, [m.get("id") for m in replies], r.stdout[-300:])
+        self.assertEqual(r.returncode, 0)

@@ -3279,8 +3279,12 @@ def _mcp_call(tool, args):
         body = "\n".join([head] + out) if out else head + "\n(no definitions)"
         return _mcp_result(body + _saving(len(out) + 1, [found]) + _unread_warning(g))
     if tool == "codegraph_find":
+        # `find` returns (id, file:line) PAIRS. Joining them as strings worked only while it
+        # found nothing, which is exactly what every test of it had asked for - and a match
+        # with no location is a match nobody can open.
         found = find(g, raw)
-        return _mcp_result("\n".join(found) or f"nothing matching {raw!r}")
+        return _mcp_result("\n".join(f"{i}  {loc}" for i, loc in found)
+                           or f"nothing matching {raw!r}")
     # `_describe` is the CLI's own answer to "how does this graph know that name", and the
     # three ways it can fail are three different things to tell an agent. Never "(none)": an
     # agent that reads an empty answer for a misspelled name concludes nothing depends on it,
@@ -3361,7 +3365,19 @@ def _mcp_serve(stream_in=None, stream_out=None):
             send({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
         elif method == "tools/call":
             params = msg.get("params") or {}
-            got = _mcp_call(params.get("name"), params.get("arguments") or {})
+            try:
+                got = _mcp_call(params.get("name"), params.get("arguments") or {})
+            except Exception as e:                   # noqa: BLE001 - a server outlives its bugs
+                # One bad answer must cost ONE answer. An exception used to escape this loop
+                # and end the process mid-session, so the next question got no reply at all -
+                # and an agent cannot tell a dead server from a slow one. It found out the
+                # hard way: `codegraph_find` joined tuples as strings and took the session
+                # down with it.
+                send({"jsonrpc": "2.0", "id": mid,
+                      "error": {"code": -32603,
+                                "message": f"{params.get('name')} failed: "
+                                           f"{type(e).__name__}: {e}"}})
+                continue
             if got is None:
                 send({"jsonrpc": "2.0", "id": mid,
                       "error": {"code": -32602,
