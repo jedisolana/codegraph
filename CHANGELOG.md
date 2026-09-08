@@ -4,6 +4,40 @@
 
 First release.
 
+### A return class that is another call's return class
+
+`def client(app): return app.test_client()` — flask's own fixture, and 204 unresolved calls in
+its test suite. The class is stated two functions away, by what `test_client` declares, and
+reading return classes stopped at the first hop.
+
+These facts depend on each other. A fixture's class can come from a call inside another
+fixture, which cannot resolve until that fixture has a class, which needs the call resolved.
+One pass in a fixed order cannot settle that, so the return classes, the fixture values and the
+calls that rest on them now run in rounds until a round changes nothing — bounded, so two
+functions that return each other stop rather than spin.
+
+The name of a call is carried ALONGSIDE the class reading, never instead of it, which is the
+order the two-line form already used: `return make()` reads as the class name "make" the same
+way `x = make()` does, and that name usually belongs to a function, so what the call hands back
+is read when the class reading names nothing.
+
+### An imported name that is not a class
+
+Found while building the above, and the worst class of bug this tool can have. Asking which
+class a name means, for a name the module imported, answered with whatever definition of that
+name the other module holds — function or class, unchecked.
+
+`x = connect()` reads "connect" as a class name, the way every call on the right of an
+assignment is read. When `connect` is a function with something nested inside it,
+`app.connect.get` is a real id, so `x.get()` resolved to that nested function and was labelled
+TYPED: the highest confidence this tool has, on an object that is what the function returned.
+
+The importing module says outright what the name is. If it is not a class it is not a class,
+and looking for a class of that name elsewhere in the tree would be a guess of exactly the kind
+this refuses everywhere else.
+
+306 more resolved calls across the three test repositories, none lost.
+
 ### A test's parameters are not unknowns
 
 pytest fills them from fixtures, by name. The rule is written down and decidable from the
@@ -286,7 +320,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,251 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,267 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

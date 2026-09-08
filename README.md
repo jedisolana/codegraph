@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5997,
-  "call_sites": 7862,
-  "edge_confidence": {"EXTERNAL": 3175, "INHERITED": 859, "BUILTIN": 624, "SELF-METHOD": 570,
-                      "QUALIFIED": 375, "LOCAL": 208, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 6061,
+  "call_sites": 7931,
+  "edge_confidence": {"EXTERNAL": 3194, "INHERITED": 879, "BUILTIN": 631, "SELF-METHOD": 570,
+                      "QUALIFIED": 384, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2020,
-  "could_have_been_resolved": 2198,
-  "resolution_rate": 0.919
+  "resolved_to_one_def": 2058,
+  "could_have_been_resolved": 2236,
+  "resolution_rate": 0.92
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.919 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.92 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -185,11 +185,11 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.634** |
+| flask | 0.241 | **0.644** |
 | ansible | 0.379 | **0.646** |
-| pandas | 0.359 | **0.767** |
+| pandas | 0.359 | **0.769** |
 
-Seven rules did that, and none of them is clever. A name a package **re-exports** —
+Eight rules did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -227,7 +227,13 @@ Only functions pytest actually calls: a test function in a test file, a `Test*` 
 or a fixture, which receives fixtures too. Anything the body rebinds or annotates is left
 alone. 297 more calls on flask, 1,073 on pandas.
 
-Every one of these was checked edge by edge against the build before it: 1,402 calls gained
+The eighth is the one that made the others reach: a return class that is another call's return
+class. `def client(app): return app.test_client()` — flask's own fixture — states its class two
+functions away, and reading one hop stopped short of it. These facts depend on each other, so
+they are settled in rounds until a round changes nothing, rather than in one pass in a fixed
+order.
+
+Every one of these was checked edge by edge against the build before it: 1,708 calls gained
 across the three repositories, **none lost**.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
@@ -548,10 +554,10 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,251 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,267 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
-and five rules that carry a type across an import, a return, a chained call and a
-test's arguments, which are 264 of those mutations
+and six rules that carry a type across an import, a return, a chained call, a test's
+arguments and a second call, which are 280 of those mutations
 and have not had a pass of their own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -598,7 +604,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 782 more. Grouped, because a list of every one of them stopped being
+The test suite adds 791 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

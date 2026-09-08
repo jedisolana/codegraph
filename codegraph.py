@@ -624,6 +624,12 @@ def _defs_and_calls(path, mod):
                 seen = {c for c in got if c != _RET_NONE}
                 if len(seen) == 1 and None not in seen:
                     d["returns"] = seen.pop()
+                # Carried ALONGSIDE, never instead. `return make()` reads as the class name
+                # "make" here, exactly as `x = make()` does, and that name usually belongs to a
+                # function rather than a class - so what the call HANDS BACK is carried too and
+                # read when the class reading turns out to name nothing.
+                c = _handoff_call(node)
+                if c: d["returns_call"] = c
             if is_fixture:
                 # What the fixture HANDS OVER - returned or yielded, since most are written as a
                 # generator so teardown can follow the value. Not `returns`: a fixture that
@@ -648,6 +654,12 @@ def _defs_and_calls(path, mod):
                     if len(names) == 1:
                         nm = names.pop()
                         if nm in pyp: d["fixture_alias"] = nm
+                if not d.get("fixture_alias"):                  # inside `is_fixture`
+                    # `def client(app): return app.test_client()` - flask's own shape, and 204
+                    # unresolved calls in its own test suite. Settled in the rounds below, once
+                    # `app` has a class of its own.
+                    c = _handoff_call(node)
+                    if c: d["fixture_call"] = c
             self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
 
         def visit_Return(self, node):
@@ -1337,6 +1349,19 @@ def _own_handoffs(node):
         yield from _own_handoffs(c)
 
 
+def _handoff_call(node):
+    """The one call this function hands back, when every `return` and `yield` in it hands back
+    a call of the same name. The NAME only: which function it is cannot be decided here, so it
+    is looked up after resolution, like `x = make()` already is."""
+    names = set()
+    for h in _own_handoffs(node):
+        v = h.value
+        if v is None or (isinstance(v, ast.Constant) and v.value is None):
+            continue
+        names.add(_returning_call(v) if isinstance(v, ast.Call) else None)
+    return names.pop() if len(names) == 1 and None not in names else None
+
+
 def _yields(node):
     """Does this function body contain a `yield` of its OWN - not one belonging to a function
     written inside it. A generator returns a generator object, so its returns say nothing about
@@ -1727,11 +1752,23 @@ def build(dirs=None, write=True):
             nested = f"{outer}.{cname}" if outer else None
             return [nested] if nested and kind_of.get(nested) == "class" else []
         real = mod_orig.get(srcmod, {}).get(rt, rt)              # from svc import Client as C
-        scoped = (cls_ids.get(srcmod, {}).get(rt)
-                  or by_modname.get((mod_from.get(srcmod, {}).get(rt), real))
-                  or by_modname.get((mod_sub.get(srcmod, {}).get(rt), real)))
-        if scoped:
-            return [scoped]
+        here = cls_ids.get(srcmod, {}).get(rt)
+        if here:
+            return [here]
+        imported = (by_modname.get((mod_from.get(srcmod, {}).get(rt), real))
+                    or by_modname.get((mod_sub.get(srcmod, {}).get(rt), real)))
+        if imported:
+            # WHATEVER THE OTHER MODULE HOLDS UNDER THAT NAME - and it was taken without ever
+            # asking whether it is a class. `x = connect()` reads "connect" as a class name,
+            # the way every call on the right of an assignment is read; when `connect` is a
+            # function with something nested in it, `app.connect.get` is a real id, so
+            # `x.get()` resolved to a nested function and was labelled TYPED. The highest
+            # confidence this tool has, on an object that is what the function returned.
+            #
+            # The importing module says outright what the name is. If it is not a class it is
+            # not a class, and looking for one of that name elsewhere in the tree would be a
+            # guess of exactly the kind this refuses everywhere else.
+            return [imported] if kind_of.get(imported) == "class" else []
         if rt in mod_from.get(srcmod, ()) or "*" in mod_from.get(srcmod, ()):
             return []                    # imported from somewhere named, and not found there:
                                          # the same rule bare calls follow. `from io import
@@ -2059,52 +2096,42 @@ def build(dirs=None, write=True):
     # `method` is a fact about the CALL SITE - was it written `f()` or `x.f()` - not machinery
     # from resolving it, and without it nothing downstream can tell the two apart. `recv` does
     # not answer that: it is None both for a bare call and for `get_thing().f()`.
-    # A DECLARED RETURN TYPE, applied last, because it needs the calls resolved first.
-    # `def session(...) -> Estimate` states outright what `est = cost.session(...)` is, and
-    # ignoring it left `est.human()` unresolved - which put a method that runs three times in
-    # the same program onto the "nothing calls this" list. The dangerous direction.
+    # WHAT A CALL HANDS BACK, settled last and all together, because these facts depend on one
+    # another. `def session(...) -> Estimate` says outright what `est = cost.session(...)` is,
+    # and ignoring it left `est.human()` unresolved - a method that runs three times in the same
+    # program reported as called by nothing. A fixture's class can come from a call inside
+    # another fixture, which cannot resolve until THAT fixture has a class. One pass in a fixed
+    # order cannot settle that, so these run in rounds until a round changes nothing.
     #
-    # It reuses the answers already worked out rather than resolving anything again: the
-    # assignment's own call is an ordinary edge and has already been pointed at a definition.
-    # Look up that definition's declared return class, resolve THAT name in the module the
-    # function was defined in - which is where the name means something - and then ask the
-    # class for the method, through the same MRO walk everything else uses.
+    # Nothing here resolves a call from scratch. Each round reuses answers already worked out:
+    # the call is an ordinary edge that has been pointed at a definition, and this reads that
+    # definition's return class, resolves the NAME in the module the function was defined in -
+    # where the name means something - and walks the MRO like every other typed receiver.
     returns_of = {n["id"]: n["returns"] for n in nodes if n.get("returns")}
-    if returns_of:
-        resolved_in = {}
-        for e in calls:
-            if e.get("dst") and e["dst"] in returns_of:
-                key = (e["src"], e["callee"])
-                # Two different functions of one name reached from one scope is not an answer.
-                resolved_in[key] = None if key in resolved_in and resolved_in[key] != e["dst"] \
-                    else e["dst"]
-        mod_of_def = {n["id"]: n["module"] for n in nodes}
-        for e in calls:
-            if e.get("dst") or not e.get("recv_call"):
-                continue
-            target = resolved_in.get((e["src"], e["recv_call"]))
-            if not target:
-                continue
-            cls_name = returns_of.get(target)
-            hits = _classes_named(cls_name, mod_of_def.get(target, ""), target)
-            if len(hits) != 1:
-                continue
-            for c in _mro(hits[0], bases_of, mro_cache):
-                cand = f"{c}.{e['callee']}"
-                if cand in def_ids:
-                    e["dst"] = cand
-                    e["confidence"] = "TYPED"
-                    break
+    # A recorded class name that names no class in this tree is not an answer, so those fall
+    # through to what the call hands back. This is the same "tried first, fallen back from"
+    # order the two-line form uses, one level up.
+    ret_pending = {}
+    mod_of_def = {n["id"]: n["module"] for n in nodes}
+    fixtures = {}
+    for n in nodes:
+        if n.get("fixture"):
+            fixtures.setdefault(n["module"], {})[n["name"]] = (n["fixture"], n["module"], n["id"])
+    fix_pending = []
 
-    # WHAT PYTEST PUTS IN A TEST'S ARGUMENTS. Applied last, and only to calls nothing else
-    # could answer. The lookup is pytest's own and no more: the module's own fixtures, then
-    # `conftest.py` in its directory, then each directory above it, first match winning - so
-    # two fixtures of one name are an ORDER, not an ambiguity, which is why this does not
-    # report AMBIGUOUS. A sibling directory's conftest is not on that path and is not read.
-    #
-    # The class is resolved in the module the FIXTURE lives in, because that is where its name
-    # means something, and then walked through the MRO like every other typed receiver.
+    def _names_a_class(cls_name, where, scope):
+        return bool(cls_name) and len(_classes_named(cls_name, where, scope)) == 1
+
+    for n in nodes:
+        if n.get("returns_call") and not _names_a_class(n.get("returns"), n["module"], n["id"]):
+            ret_pending[n["id"]] = n["returns_call"]
+        if ((n.get("fixture_alias") or n.get("fixture_call"))
+                and not _names_a_class(n.get("fixture"), n["module"], n["id"])):
+            fix_pending.append(n)
+
     def _fixture_chain(home):
+        """Where pytest looks, in the order it looks: this module, then `conftest.py` in its
+        directory, then each directory above it."""
         parts = home.split("/")[:-1]
         chain = [home]
         while True:
@@ -2114,53 +2141,94 @@ def build(dirs=None, write=True):
             parts = parts[:-1]
         return chain
 
-    fixtures = {}
-    for n in nodes:
-        if n.get("fixture"):
-            fixtures.setdefault(n["module"], {})[n["name"]] = (n["fixture"], n["module"], n["id"])
-    # A fixture that hands back another fixture takes its class, followed one link at a time
-    # until nothing more can be settled. Bounded, so a pair that name each other stops rather
-    # than spinning.
-    pending = [n for n in nodes if n.get("fixture_alias") and not n.get("fixture")]
-    for _ in range(4):
-        if not pending:
-            break
+    def _visible_fixture(home, name):
+        for m in _fixture_chain(home):
+            got = fixtures.get(m, {}).get(name)
+            if got:
+                return got
+        return None
+
+    def _method_on(cls_name, where, scope, callee):
+        """The definition `callee` names on a class called `cls_name`, read in `where`'s
+        scope. One class or none: several answering to the name is not an answer."""
+        hits = _classes_named(cls_name, where, scope)
+        if len(hits) != 1:
+            return None
+        for c in _mro(hits[0], bases_of, mro_cache):
+            cand = f"{c}.{callee}"
+            if cand in def_ids:
+                return cand
+        return None
+
+    for _round in range(6):
+        changed = False
+        # Which definition a name reached from a given scope. Two different ones is not an
+        # answer, the same way a bare call with two candidates is not.
+        resolved_in = {}
+        for e in calls:
+            if e.get("dst"):
+                k = (e["src"], e["callee"])
+                resolved_in[k] = None if k in resolved_in and resolved_in[k] != e["dst"] \
+                    else e["dst"]
+
+        # A return class that is another call's return class. `def open_client(): return
+        # connect().session()` states it two functions away.
+        for nid, callee in list(ret_pending.items()):
+            tgt = resolved_in.get((nid, callee))
+            if tgt and tgt in returns_of:
+                returns_of[nid] = returns_of[tgt]
+                mod_of_def[nid] = mod_of_def.get(tgt, mod_of_def.get(nid, ""))
+                del ret_pending[nid]
+                changed = True
+
+        # A fixture whose value is another fixture's, or another call's.
         rest = []
-        for n in pending:
+        for n in fix_pending:
             got = None
-            for m in _fixture_chain(n["module"]):
-                got = fixtures.get(m, {}).get(n["fixture_alias"])
-                if got:
-                    break
+            if n.get("fixture_alias"):
+                got = _visible_fixture(n["module"], n["fixture_alias"])
+            elif n.get("fixture_call"):
+                tgt = resolved_in.get((n["id"], n["fixture_call"]))
+                if tgt and tgt in returns_of:
+                    got = (returns_of[tgt], mod_of_def.get(tgt, ""), tgt)
             if got:
                 n["fixture"] = got[0]
-                fixtures.setdefault(n["module"], {})[n["name"]] = (got[0], *got[1:])
+                fixtures.setdefault(n["module"], {})[n["name"]] = got   # replaces a name that named nothing
+                changed = True
             else:
                 rest.append(n)
-        if len(rest) == len(pending):
-            break
-        pending = rest
-    if fixtures:
+        fix_pending = rest
+
+        # `est = cost.session(...)` then `est.human()`, and `make().go()` written on one line.
+        for e in calls:
+            if e.get("dst") or not e.get("recv_call"):
+                continue
+            target = resolved_in.get((e["src"], e["recv_call"]))
+            if not target or target not in returns_of:
+                continue
+            cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target, e["callee"])
+            if cand:
+                e["dst"] = cand
+                e["confidence"] = "TYPED"
+                changed = True
+
+        # WHAT PYTEST PUTS IN A TEST'S ARGUMENTS. The lookup is pytest's own and no more, so
+        # two fixtures of one name are an ORDER, not an ambiguity - which is why this never
+        # reports AMBIGUOUS - and a sibling directory's conftest is not on the path.
         for e in calls:
             if e.get("dst") or not e.get("fixture_param"):
                 continue
-            found = None
-            for m in _fixture_chain(e.get("mod") or ""):
-                found = fixtures.get(m, {}).get(e["fixture_param"])
-                if found:
-                    break
+            found = _visible_fixture(e.get("mod") or "", e["fixture_param"])
             if not found:
                 continue
-            cls_name, fmod, fid = found
-            hits = _classes_named(cls_name, fmod, fid)
-            if len(hits) != 1:
-                continue
-            for c in _mro(hits[0], bases_of, mro_cache):
-                cand = f"{c}.{e['callee']}"
-                if cand in def_ids:
-                    e["dst"] = cand
-                    e["confidence"] = "FIXTURE"
-                    break
+            cand = _method_on(found[0], found[1], found[2], e["callee"])
+            if cand:
+                e["dst"] = cand
+                e["confidence"] = "FIXTURE"
+                changed = True
+
+        if not changed:
+            break
 
     keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",
             "candidates")

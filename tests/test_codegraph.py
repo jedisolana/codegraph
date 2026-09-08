@@ -9662,6 +9662,125 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class AnImportedNameThatIsNotAClass(Sandbox):
+    """The worst class of bug this tool can have, found while building something else. Asking
+    which class a name means, for a name the module imported, answered with whatever definition
+    of that name the other module holds - function or class, unchecked.
+
+    `x = connect()` reads "connect" as a class name, the way it reads every call on the right of
+    an assignment. When `connect` is a FUNCTION with something nested inside it, the nested name
+    is a real id: `x.get()` resolved to `app.connect.get` and was labelled TYPED. The tool's
+    highest confidence, on an object that is the returned function, not the function.
+
+    A module that imports the name says outright what it is. If it is not a class, it is not a
+    class - and looking for a class of that name elsewhere in the tree would be a guess."""
+
+    def test_an_imported_function_is_not_a_class(self):
+        self.write("app.py",
+                   "def connect():\n"
+                   "    def get():\n        return 1\n"
+                   "    return get\n")
+        self.write("b.py", "from app import connect\n\n\n"
+                           "def use():\n    x = connect()\n    return x.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.connect.get"), [])
+
+    def test_an_imported_class_still_is_one(self):
+        """The positive control: the same shape, with a class, must still resolve."""
+        self.write("app2.py", "class Conn:\n    def get(self):\n        return 1\n")
+        self.write("c.py", "from app2 import Conn\n\n\n"
+                           "def use():\n    x = Conn()\n    return x.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app2.Conn.get"), ["c.use"])
+
+
+class AReturnThatIsAnotherCallsReturn(Sandbox):
+    """`def open_client(): return connect().session()` - the class is stated, two functions
+    away, by whatever `session` declares or plainly returns. Return-class reading stopped at
+    the first hop, so a function whose value came from another call had no type and neither did
+    any variable it was assigned to.
+
+    The shape that makes this worth having is flask's own test suite: `app` is a fixture that
+    builds a `Flask`, and `client` is a fixture that returns `app.test_client()`. `app` resolved
+    and `client` did not, and `client` alone is 204 unresolved calls - a tenth of everything
+    that could resolve in that repository.
+
+    Settling this needs more than one pass. A fixture's class can depend on a call inside
+    another fixture, which cannot resolve until that fixture has a class. So the return classes,
+    the fixture values and the calls that depend on them are settled together, over and over,
+    until a round changes nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("app.py",
+                   "class Session:\n"
+                   "    def get(self):\n        return 1\n\n"
+                   "class Engine:\n"
+                   "    def session(self) -> Session:\n        return Session()\n"
+                   "    def plain(self):\n        return Session()\n\n"
+                   "def connect():\n    return Engine()\n")
+
+    def test_a_return_of_a_declared_call(self):
+        self.write("a.py", "from app import connect\n\n\n"
+                           "def open_client():\n    return connect().session()\n\n\n"
+                           "def use():\n    c = open_client()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), ["a.use"])
+
+    def test_it_chains_through_an_undeclared_one_too(self):
+        self.write("b.py", "from app import connect\n\n\n"
+                           "def open_client():\n    return connect().plain()\n\n\n"
+                           "def use():\n    c = open_client()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), ["b.use"])
+
+    def test_a_fixture_whose_value_is_another_fixtures_method(self):
+        """flask's own shape, and the reason this exists."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import connect\n\n\n"
+                   "@pytest.fixture\n"
+                   "def engine():\n    return connect()\n\n\n"
+                   "@pytest.fixture\n"
+                   "def session(engine):\n    return engine.session()\n")
+        self.write("tests/test_a.py", "def test_it(session):\n    session.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_a.test_it", codegraph.callers_of(g, "app.Session.get"))
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_call_that_resolves_to_nothing_answers_nothing(self):
+        self.write("c.py", "import json\n\n\n"
+                           "def open_client():\n    return json.loads('{}').thing()\n\n\n"
+                           "def use():\n    c = open_client()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), [])
+
+    def test_a_call_whose_target_states_no_class_answers_nothing(self):
+        self.write("d.py", "from app import connect\n\n\n"
+                           "def blank():\n    return 1\n\n\n"
+                           "def open_client():\n    return blank()\n\n\n"
+                           "def use():\n    c = open_client()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), [])
+
+    def test_two_functions_that_return_each_other_settle_rather_than_spin(self):
+        """A cycle must end the rounds, not run them forever."""
+        self.write("e.py", "def a():\n    return b()\n\n\n"
+                           "def b():\n    return a()\n\n\n"
+                           "def use():\n    c = a()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), [])
+
+    def test_a_return_that_is_not_the_only_one_answers_nothing(self):
+        self.write("f.py", "from app import connect\n\n\n"
+                           "def open_client(f):\n"
+                           "    if f:\n        return connect().session()\n"
+                           "    return connect()\n\n\n"
+                           "def use():\n    c = open_client(1)\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Session.get"), [])
+
+
 class APytestFixtureHasAType(Sandbox):
     """A test function's parameters are not unknowns. pytest fills them from fixtures, by name,
     following a scoping rule that is written down and decidable from the tree: the module's own
