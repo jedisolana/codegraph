@@ -137,8 +137,8 @@ Where one line genuinely holds two of them, the scope-wide rule applies and stil
 imported, then a class that module holds or re-exports. `Parent.method()` resolved and this
 never did, though it is the same statement with the class written out properly - and it is how
 library code is called from outside, which is most of the calls in most test suites.
-`from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls written this way in a
-clone of pandas, every one unresolved.
+`from_tuples`, `from_arrays` and `from_product` alone are written this way 2,046 times in a
+clone of pandas, and 1,417 of those were unresolved.
 
 Everything needed was already here. The chain is recorded on the edge, and turning `pkg.Frame`
 into the class it means - through a package's re-export, or a dotted module path - is the
@@ -169,8 +169,8 @@ and went unresolved - and so did every call after it. Python evaluates the right
 and a name means what it meant a line earlier until the assignment completes.
 
 A variable rebound from its own method is how a great deal of dataframe, query-builder and
-string-handling code is written. In a clone of pandas, `df` alone was 1,015 unresolved calls;
-696 of them now resolve, plus 7 on ansible.
+string-handling code is written. In a clone of pandas, `df` alone was 1,012 unresolved calls
+and 126 of those now resolve; across the whole repository it is 696, plus 7 on ansible.
 
 Five edges stopped resolving, and all five were the old order reading the NEW type on the OLD
 name - `left = pd.Series(JSONArray(left.values...))`, where the `left.values` inside the call is
@@ -263,8 +263,8 @@ generator, which hands back a generator object rather than what it yields, and n
 never could: a receiver that is a call had its name read only as a CLASS, which is why
 `Leg(100).payoff()` worked and `make().go()` did not, on the identical expression shape. The
 same name is now carried as a function too, read only when the class reading names nothing,
-and answered by the code that already answers the two-line form. 13,321 calls in a clone of
-pandas are written on a receiver that is a call.
+and answered by the code that already answers the two-line form. 10,657 calls in a clone of
+pandas are written directly on the result of another call.
 
 Together the two are 681 more resolved calls on pandas, 101 on ansible and 4 on flask. Every
 call edge was compared against the previous build: none was lost. The first comparison said 80

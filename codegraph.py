@@ -800,7 +800,8 @@ def _defs_and_calls(path, mod):
             # before the value was ever walked, so that call read a name with no type yet and
             # went unresolved, taking every call after it with it. A variable rebound from its
             # own method is how a great deal of dataframe, query-builder and string code is
-            # written: 1,015 unresolved calls on `df` alone in a clone of pandas.
+            # written: 1,012 unresolved calls on `df` alone in a clone of pandas, 126 of them
+            # answered by reading the two sides in the order the interpreter does.
             self.visit(node.value)
             if not (isinstance(node.value, ast.Constant) and node.value.value is None):
                 cls = _called_class(node.value)
@@ -1096,8 +1097,8 @@ def _defs_and_calls(path, mod):
                     # reading turns out to name nothing. `make().go()` and `x = make()` then
                     # `x.go()` are one expression written two ways, and only the two-line form
                     # was ever answered: the one-liner's receiver was read as a class name and
-                    # never as a function whose return class is already known. 13,321 calls in
-                    # a clone of pandas are written on a receiver that is a call.
+                    # never as a function whose return class is already known. 10,657 calls in
+                    # a clone of pandas are written directly on the result of another call.
                     edge["recv_call"] = _returning_call(fn.value)
                 elif (isinstance(fn, ast.Attribute) and _is_self_attr(fn.value)
                       and self.atypes[-1].get(fn.value.attr)):

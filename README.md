@@ -225,8 +225,8 @@ evidence, the body was, and that reading is already trusted one scope down where
 `c = Client()` types `c`. Every return has to agree, `return None` excepted, and a generator is
 not what it yields. Then `make().go()`, which is `x = make()` and `x.go()` written on one line:
 the receiver's name was read as a class and never as a function whose return class was, by
-then, already known. 13,321 calls in a clone of pandas are written on a receiver that is a
-call. Together: 681 more resolved calls on pandas, 101 on ansible, 4 on flask.
+then, already known. 10,657 calls in a clone of pandas are written directly on the result of
+another call. Together: 681 more resolved calls on pandas, 101 on ansible, 4 on flask.
 
 The seventh is the largest single one, and it reads pytest. A test function's parameters are
 not unknowns — pytest fills them from fixtures, by name, under a scoping rule that is written
@@ -251,14 +251,14 @@ The bug was reading order. `df = df.where(df > 0)` names the OLD `df` on the rig
 line earlier — and the target was retyped before the value was ever walked, so that call read a
 name with no type yet and went unresolved, taking every call after it along. Python evaluates
 the right side first. A variable rebound from its own method is how a great deal of dataframe,
-query-builder and string-handling code is written: 1,015 unresolved calls on `df` alone in a
-clone of pandas, 696 of them now answered.
+query-builder and string-handling code is written: 1,012 unresolved calls on `df` alone in a
+clone of pandas, 126 of those now answered and 696 across the whole repository.
 
 The ninth is a class written out in full through a module: `pd.MultiIndex.from_product(...)`.
 `Parent.method()` resolved and this never did, though it is the same statement with the class
 named properly — and it is how library code is called from outside, which is most calls in most
-test suites. `from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls written that
-way in pandas. Everything needed was already recorded; nothing had ever asked.
+test suites. `from_tuples`, `from_arrays` and `from_product` alone are written that way 2,046
+times in pandas, and 1,417 of those were unresolved. Everything needed was already recorded; nothing had ever asked.
 
 The second bug came out of building that. A parameter called `pkg`, in a file that also imports
 `pkg`, had `pkg.mod.func()` resolved into the module — `QUALIFIED`, the highest confidence

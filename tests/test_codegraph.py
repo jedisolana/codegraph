@@ -10120,8 +10120,8 @@ class AClassReachedThroughAModule(Sandbox):
     this never did, though it is the same statement with the class written out properly - and it
     is how library code is called from the outside, which is most calls in most test suites.
 
-    In a clone of pandas, `from_tuples`, `from_arrays` and `from_product` alone are 1,417 calls
-    written this way, every one of them unresolved.
+    In a clone of pandas, `from_tuples`, `from_arrays` and `from_product` alone are written this
+    way 2,046 times, and 1,417 of those were unresolved.
 
     Everything needed was already here. The chain is recorded on the edge, and the lookup that
     turns `pkg.Frame` into the class it means - through a package's re-export, or through a
@@ -10241,7 +10241,8 @@ class TheRightSideIsEvaluatedFirst(Sandbox):
     them in the wrong order made a variable rebound from its own method a blind spot, which is
     how a great deal of dataframe, query-builder and string-handling code is written.
 
-    1,015 unresolved calls on `df` alone in a clone of pandas."""
+    1,012 unresolved calls on `df` alone in a clone of pandas, 126 of them answered by this and
+    696 across the whole repository."""
 
     def setUp(self):
         super().setUp()
@@ -10676,7 +10677,7 @@ class AMethodCalledOnWhatAFunctionReturned(Sandbox):
     from the definition the inner call was pointed at. The one-line form now carries the same
     fallback and gets the same answer from the same code.
 
-    13,321 calls in a clone of pandas are written on a receiver that is a call."""
+    10,657 calls in a clone of pandas are written directly on the result of another call."""
 
     def setUp(self):
         super().setUp()
