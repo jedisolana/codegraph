@@ -28,6 +28,10 @@ same-named functions would be worse than no blast radius at all.
   codegraph unused             definitions nothing calls AND nothing names
   codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
+  codegraph ... --saved        add a line saying what the answer replaced: `12 line(s)
+                               here, instead of reading 4 file(s) whole (2,140 lines)`.
+                               Opt-in, because scripts parse the current output; always on
+                               over MCP, where an agent is deciding whether to open them.
   codegraph shape <file>       every signature in a file and its line number, no bodies -
                                3,600 lines of source as 110 lines of what it offers
   codegraph mcp                serve the graph to a coding agent over MCP (stdin/stdout).
@@ -3129,6 +3133,51 @@ def _shape_target(g, raw):
     return None
 
 
+def _lines_of(paths):
+    """(files sized, total lines). A file that cannot be read is left OUT rather than guessed.
+
+    A graph can outlive the files it names, and an estimate built on a file that is gone is a
+    wrong number. A smaller baseline is the honest answer.
+    """
+    n = total = 0
+    for p in dict.fromkeys(paths):
+        try:
+            with open(p, "rb") as fh:
+                total += fh.read().count(b"\n") + 1
+            n += 1
+        except OSError:
+            continue
+    return n, total
+
+
+def _files_for(g, ids):
+    """The files somebody would have opened to learn what this answer told them."""
+    by_id = {n["id"]: n.get("file") for n in g["nodes"]}
+    out = []
+    for i in ids:
+        f = by_id.get(i) or by_id.get(_module_of(i))
+        if f:
+            out.append(f)
+    return out
+
+
+def _saving(answer_lines, paths):
+    """One line saying what this replaced, with its baseline written down.
+
+    codegraph has always reported its resolution rate - a number about itself - and never the
+    number a person cares about: how much reading this answer stood in for. An agent with no
+    way to know that asking was cheaper than opening the files opens the files anyway.
+
+    The baseline is an ASSUMPTION - that you would otherwise have read those files whole - so
+    it is stated rather than implied. A saving with no stated baseline is a marketing number.
+    """
+    files, total = _lines_of(paths)
+    if not files or total <= answer_lines:
+        return ""                                    # nothing honest to claim
+    return (f"\n\n{answer_lines} line(s) here, instead of reading {files} file(s) whole "
+            f"({total} lines).")
+
+
 def _mcp_result(text):
     return {"content": [{"type": "text", "text": text}]}
 
@@ -3166,7 +3215,8 @@ def _mcp_call(tool, args):
         except (OSError, SyntaxError, ValueError) as e:
             return _mcp_result(f"cannot read {raw}: {e}")
         head = f"{raw}  -  {len(out)} definition(s) of {total} lines"
-        return _mcp_result("\n".join([head] + out) if out else head + "\n(no definitions)")
+        body = "\n".join([head] + out) if out else head + "\n(no definitions)"
+        return _mcp_result(body + _saving(len(out) + 1, [found]))
     if tool == "codegraph_find":
         found = find(g, raw)
         return _mcp_result("\n".join(found) or f"nothing matching {raw!r}")
@@ -3192,7 +3242,11 @@ def _mcp_call(tool, args):
                            "these exact ids:\n" + "\n".join(hits))
     target = hits[0]
     out = MCP_TOOLS[tool][2](g, target, raw)
-    return _mcp_result("\n".join(out) if out else f"(nothing for {target})")
+    if not out:
+        return _mcp_result(f"(nothing for {target})")
+    # The ids in the answer name the files somebody would otherwise have opened to learn the
+    # same thing. That is the baseline, and it is the honest one to compare against.
+    return _mcp_result("\n".join(out) + _saving(len(out), _files_for(g, out)))
 
 
 def _mcp_serve(stream_in=None, stream_out=None):
@@ -3318,6 +3372,11 @@ def _main(argv=None):
     # gives the same answers to whatever is going to parse them.
     as_json = "--json" in a
     a = [x for x in a if x != "--json"]
+    # Opt-in on the command line, because every script anybody has written parses the current
+    # output. Default only over MCP, where the reader is an agent deciding whether to open the
+    # files anyway - which is the decision this number exists to inform.
+    saved = "--saved" in a
+    a = [x for x in a if x != "--saved"]
     show_all = "--all" in a          # `unused --all`: also the names that carry a reason
     a = [x for x in a if x != "--all"]
     # --only and --exclude, because the first real use of `unused` on a shipped repository
@@ -3429,7 +3488,10 @@ def _main(argv=None):
         found = keep_ids(callers_of(g, t) if a[0] == "callers" else calls_from(g, t))
         if as_json: _emit({"query": a[0], "target": t[0] if isinstance(t, list) else t,
                            "results": found})
-        else: print("\n".join(found) or "(none)")
+        else:
+            print("\n".join(found) or "(none)")
+            if saved and found:
+                print(_saving(len(found), _files_for(g, found)).strip())
     elif a[0] == "blast":
         g = load()
         t, rc = _one_target(g, a[1], as_json)

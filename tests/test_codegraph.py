@@ -7732,16 +7732,19 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         # disk, which is exactly how a real client will meet it.
         return self.graph()
 
+    # A method rather than a class attribute: a mutable one needs a ClassVar annotation to
+    # satisfy the linter, and a fresh dict per call is what every caller here wants anyway.
     # Taken from the module rather than written out again, so the protocol version lives in
     # exactly one place and the no-dates rule has one line to make an exception for.
-    HELLO = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-             "params": {"protocolVersion": codegraph.MCP_PROTOCOL, "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "0"}}}
+    def hello(self):
+        return {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": codegraph.MCP_PROTOCOL, "capabilities": {},
+                           "clientInfo": {"name": "test", "version": "0"}}}
 
     # ------------------------------------------------------------------ it speaks the protocol
     def test_it_answers_initialize(self):
         self.build_a_tree()
-        replies, r = self.rpc(self.HELLO)
+        replies, r = self.rpc(self.hello())
         self.assertTrue(replies, r.stderr[-400:])
         self.assertEqual(replies[0]["id"], 1)
         self.assertIn("serverInfo", replies[0]["result"])
@@ -7749,7 +7752,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
 
     def test_it_lists_its_tools(self):
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in replies[-1]["result"]["tools"]]
         self.assertIn("codegraph_callers", names)
@@ -7759,7 +7762,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         """A tool with no schema is a tool an agent guesses at, and a guessed argument is a
         failed call the model then tries to reason its way out of."""
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         for t in replies[-1]["result"]["tools"]:
             with self.subTest(tool=t["name"]):
@@ -7769,7 +7772,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
     # ------------------------------------------------------------------------ it answers
     def test_it_answers_who_calls_this(self):
         self.build_a_tree()
-        replies, r = self.rpc(self.HELLO,
+        replies, r = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                                "params": {"name": "codegraph_callers",
                                           "arguments": {"name": "load"}}})
@@ -7778,7 +7781,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
 
     def test_it_answers_what_would_break(self):
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                "params": {"name": "codegraph_blast",
                                           "arguments": {"name": "load"}}})
@@ -7788,7 +7791,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         """MCP hands content back as typed parts. A raw Python repr in there is a thing the
         model has to decode before it can use it."""
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                                "params": {"name": "codegraph_where",
                                           "arguments": {"name": "save"}}})
@@ -7799,14 +7802,14 @@ class ADoorAnAgentCanKnockOn(Sandbox):
     # ------------------------------------------------------------- it fails like a server
     def test_an_unknown_method_is_an_error_not_a_crash(self):
         self.build_a_tree()
-        replies, r = self.rpc(self.HELLO,
+        replies, r = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 6, "method": "does/not/exist"})
         self.assertIn("error", replies[-1])
         self.assertEqual(r.returncode, 0, "a bad request must not take the server down")
 
     def test_an_unknown_tool_is_an_error_not_a_crash(self):
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                                "params": {"name": "codegraph_nonsense", "arguments": {}}})
         self.assertIn("error", replies[-1])
@@ -7814,7 +7817,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
     def test_a_broken_line_does_not_stop_the_next_one(self):
         """A client that writes half a line, or a stray newline, must not end the session.
         The agent has no way to tell a crashed server from a slow one."""
-        payload = "not json at all\n" + json.dumps(self.HELLO) + "\n"
+        payload = "not json at all\n" + json.dumps(self.hello()) + "\n"
         self.build_a_tree()
         r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
                            input=payload, capture_output=True, text=True,
@@ -7826,7 +7829,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         """A JSON-RPC message with no id is a notification. Answering one is a protocol error
         and some clients hang waiting for a response they will never match."""
         self.build_a_tree()
-        replies, _ = self.rpc(self.HELLO,
+        replies, _ = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.assertEqual([m.get("id") for m in replies], [1])
 
@@ -7834,7 +7837,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         """The commonest first run: an agent asks before anything has been built."""
         empty = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
-        replies, r = self.rpc(self.HELLO,
+        replies, r = self.rpc(self.hello(),
                               {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                                "params": {"name": "codegraph_callers",
                                           "arguments": {"name": "load"}}}, cwd=empty)
@@ -7848,7 +7851,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
         self.build_a_tree()
         before = {p: os.stat(os.path.join(dp, p)).st_mtime
                   for dp, _, fs in os.walk(self.dir) for p in fs}
-        self.rpc(self.HELLO, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        self.rpc(self.hello(), {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                               "params": {"name": "codegraph_blast",
                                          "arguments": {"name": "load"}}})
         after = {p: os.stat(os.path.join(dp, p)).st_mtime
@@ -7858,7 +7861,7 @@ class ADoorAnAgentCanKnockOn(Sandbox):
     def test_nothing_but_json_goes_to_stdout(self):
         """stdout IS the protocol. One stray print and the client cannot parse the stream."""
         self.build_a_tree()
-        _, r = self.rpc(self.HELLO,
+        _, r = self.rpc(self.hello(),
                         {"jsonrpc": "2.0", "id": 10, "method": "tools/list"})
         for line in r.stdout.splitlines():
             if line.strip():
@@ -7996,3 +7999,85 @@ class TheShapeOfAFileWithoutItsBody(Sandbox):
         self.write("pkg/empty.py", "# nothing here yet\n")
         rc, text = self.shape_of(os.path.join(self.dir, "pkg/empty.py"))
         self.assertEqual(rc, 0, text)
+
+
+class WhatTheAnswerSavedYou(Sandbox):
+    """codegraph reports its resolution rate - a number about itself. It never reports the
+    number a user actually cares about: how much reading this answer replaced.
+
+    An agent has no way to know that asking was cheaper than opening the files, so it opens the
+    files anyway. The saving is only real if it is stated, and only honest if the baseline is
+    stated with it - which is `you would otherwise have read these files whole`, an assumption,
+    written down as one.
+
+    Written before the footer existed."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n" + "# padding\n" * 300)
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n"
+                                 + "# padding\n" * 200)
+        self.graph()
+
+    def call(self, tool, **args):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": args}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_the_shape_of_a_file_says_what_it_replaced(self):
+        with open(os.path.join(self.dir, "pkg/core.py"), "rb") as fh:
+            real = fh.read().count(b"\n") + 1        # counted, not assumed: the first version
+        text, r = self.call("codegraph_shape", name="pkg/core")   # of this hardcoded 302 and
+        self.assertIn(str(real), text, text[:300])   # the file was 303
+        self.assertRegex(text.lower(), r"instead of|rather than|whole")
+
+    def test_a_list_of_callers_says_which_files_it_saved_opening(self):
+        text, _ = self.call("codegraph_callers", name="load")
+        self.assertRegex(text.lower(), r"\bfile|line", text[:300])
+
+    def test_the_baseline_is_named_not_implied(self):
+        """A saving with no stated baseline is a marketing number. The claim here is `you would
+        otherwise have read these files whole`, and it has to be readable as that."""
+        text, _ = self.call("codegraph_shape", name="pkg/core")
+        self.assertRegex(text.lower(), r"reading .*whole")
+
+    def test_nothing_is_claimed_for_an_empty_answer(self):
+        """`no symbol named that` saved nobody anything, and a footer under it is noise that
+        makes the next real one easier to skip."""
+        text, _ = self.call("codegraph_callers", name="definitely_not_here")
+        self.assertNotRegex(text.lower(), r"instead of|saved")
+
+    def test_the_answer_is_still_the_first_thing(self):
+        """A footer under the answer, never mixed into it: the caller ids have to stay
+        readable line by line."""
+        text, _ = self.call("codegraph_callers", name="load")
+        self.assertTrue(text.splitlines()[0].startswith("pkg/app.run"), text[:200])
+
+    def test_a_file_it_cannot_size_is_left_out_rather_than_guessed(self):
+        """A graph can outlive the files it names. An estimate built on a file that is gone is
+        a wrong number, and a smaller baseline is the honest answer."""
+        os.remove(os.path.join(self.dir, "pkg/core.py"))
+        text, r = self.call("codegraph_where", name="run")
+        self.assertNotIn("Traceback", r.stderr, r.stderr[-300:])
+
+    # ------------------------------------------------------------------------- the control
+    def test_the_command_line_is_unchanged_unless_asked(self):
+        """Every script anybody has written against this parses the current output. The footer
+        is opt-in on the CLI for that reason, and default only where an agent reads it."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            codegraph._main(["callers", "load"])
+        self.assertEqual(out.getvalue().strip(), "pkg/app.run")
+
+    def test_and_it_appears_when_asked(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            codegraph._main(["callers", "load", "--saved"])
+        self.assertRegex(out.getvalue().lower(), r"instead of|whole")
