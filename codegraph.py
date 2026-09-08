@@ -2175,6 +2175,29 @@ def _stamp(path):
     return [len(b), hashlib.blake2b(b, digest_size=16).hexdigest()]
 
 
+def _stamps(paths):
+    """{path: stamp} for many files. A file that cannot be read is left out rather than raising.
+
+    THIS WAS PARALLEL FOR AN HOUR AND IS NOT ANY MORE. Deciding whether the graph is current
+    costs far more than the answer it guards - on a clone of ansible, 2.7ms to answer and over
+    a hundred to check - and a thread pool over the hashing benchmarked at 5.5x on that tree.
+
+    In the real path it was worth nothing: 120ms against 114ms serial, measured three times.
+    The benchmark had read the files cold. Here they are always warm, because the build or the
+    previous query has just read every one of them, so the work is CPU-bound hashing of small
+    buffers and threads have nothing to overlap.
+
+    Kept as a function because gathering the paths first and stamping them second is clearer
+    than doing both in one walk. The pool is gone: code that changes nothing is code that will
+    be wrong later with nobody noticing.
+    """
+    out = {}
+    for p in paths:
+        with contextlib.suppress(OSError):
+            out[p] = _stamp(p)
+    return out
+
+
 def _is_stale(g):
     """True if the graph no longer describes what is on disk.
 
@@ -2192,7 +2215,7 @@ def _is_stale(g):
     if not os.path.exists(OUT): return True
     known = g.get("sources")
     if not isinstance(known, dict): return True   # a graph from before stamps: rebuild once
-    seen = {}
+    todo = set()                                  # every file worth stamping, gathered first
     winner = {}                                   # realpath -> the path the BUILD would keep
     for d in g.get("dirs", [HOME]):
         for dp, dns, fns in os.walk(d):
@@ -2214,18 +2237,15 @@ def _is_stale(g):
                 if real in winner:
                     if os.path.islink(full):
                         continue                  # the build keeps the other one
-                    seen.pop(winner[real], None)  # ...and this is the other one
+                    todo.discard(winner[real])    # ...and this is the other one
                 winner[real] = full
-                try:
-                    stamp = _stamp(full)
-                except OSError:
-                    # A DANGLING SYMLINK, which every long-lived repo has one of. This used to
-                    # return True - "something changed" - so a single broken link meant every
-                    # query rebuilt the whole graph, for ever, in silence. The build already
-                    # skips these; the freshness check has to skip the same ones or the two
-                    # disagree about what the tree even contains.
-                    continue
-                seen[full] = stamp
+                todo.add(full)
+    # A DANGLING SYMLINK, which every long-lived repo has one of, is dropped by `_stamps`
+    # rather than raising. This used to return True - "something changed" - so a single broken
+    # link meant every query rebuilt the whole graph, for ever, in silence. The build already
+    # skips these; the freshness check has to skip the same ones or the two disagree about what
+    # the tree even contains.
+    seen = _stamps(sorted(todo))
     # An exact comparison of content, not of clocks. A file restored from a backup, a
     # checkout, cp -p, rsync -t or a container layer keeps the timestamp it had, so it lands
     # OLDER than the graph while holding different code - and a test built on timestamps

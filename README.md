@@ -149,14 +149,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5020,
-  "call_sites": 6652,
-  "edge_confidence": {"EXTERNAL": 2674, "INHERITED": 681, "BUILTIN": 541, "SELF-METHOD": 486,
-                      "QUALIFIED": 302, "LOCAL": 183, "UNTYPED": 145, "TYPED": 5,
+  "call_edges": 5072,
+  "call_sites": 6705,
+  "edge_confidence": {"EXTERNAL": 2697, "INHERITED": 689, "BUILTIN": 544, "SELF-METHOD": 493,
+                      "QUALIFIED": 312, "LOCAL": 184, "UNTYPED": 145, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1660,
-  "could_have_been_resolved": 1805,
-  "resolution_rate": 0.92
+  "resolved_to_one_def": 1686,
+  "could_have_been_resolved": 1831,
+  "resolution_rate": 0.921
 }
 ```
 
@@ -167,7 +167,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.92 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -501,7 +501,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 640 more. Grouped, because a list of every one of them stopped being
+The test suite adds 648 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

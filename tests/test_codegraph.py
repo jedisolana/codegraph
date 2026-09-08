@@ -8241,3 +8241,88 @@ class EveryQueryRebuiltTheWholeGraph(Sandbox):
         g = self.graph()
         self.assertIn("far_away", " ".join(n["name"] for n in g["nodes"]))
         self.assertFalse(codegraph._is_stale(g))
+
+
+class TheFreshnessWalkIsMostOfAQuery(Sandbox):
+    """Measured on a clone of ansible, 1,821 files: the answer costs 2.7ms and deciding whether
+    the graph is current costs 247ms. Ninety times the work of the thing it guards, on every
+    question anybody asks - and for an agent asking twenty, that is five seconds of hashing.
+
+    The check reads and digests every file, and it does so on purpose: timestamps lie. A file
+    restored from a backup, a checkout, `cp -p` or a container layer keeps the timestamp it had
+    while holding different code, so a cheaper test would call that fresh. That is not a
+    tradeoff this repository is willing to make, and there is a test named after it.
+
+    A thread pool over the hashing benchmarked at 5.5x on that tree, and was worth nothing in
+    the real path: 120ms against 114ms, measured three times. The benchmark had read the files
+    cold; here they are always warm, because the build or the previous query has just read
+    every one of them. The pool came out again.
+
+    These tests stay, because what they pin is the freshness contract itself - and that is
+    worth holding whether the walk is fast or slow."""
+
+    def tree(self, n=40):
+        self.write("pkg/__init__.py", "")
+        for i in range(n):
+            self.write(f"pkg/m{i}.py", f"def f{i}():\n    return {i}\n")
+        return self.graph()
+
+    def test_an_unchanged_tree_is_fresh(self):
+        g = self.tree()
+        self.assertFalse(codegraph._is_stale(g))
+
+    def test_an_edited_file_is_stale(self):
+        g = self.tree()
+        self.write("pkg/m7.py", "def f7():\n    return 999\n")
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_a_new_file_is_stale(self):
+        g = self.tree()
+        self.write("pkg/extra.py", "def extra():\n    return 1\n")
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_a_deleted_file_is_stale(self):
+        g = self.tree()
+        os.remove(os.path.join(self.dir, "pkg/m3.py"))
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_an_edit_that_holds_the_clock_still_is_still_caught(self):
+        """The whole reason the check digests rather than compares timestamps. Parallel or not,
+        this has to keep working - it is the failure the design was chosen for."""
+        g = self.tree()
+        p = os.path.join(self.dir, "pkg/m5.py")
+        before = os.stat(p)
+        self.write("pkg/m5.py", "def f5():\n    return 5555\n")   # same length, different bytes
+        os.utime(p, (before.st_atime, before.st_mtime))
+        self.assertTrue(codegraph._is_stale(g))
+
+    def test_the_gathered_walk_agrees_with_stamping_each_file(self):
+        """The invariant that made the parallel version safe to try, and still worth holding:
+        whatever `_stamps` does inside, it returns what stamping each file one at a time
+        returns."""
+        self.tree(30)
+        paths = []
+        for dp, dns, fns in os.walk(self.dir):
+            dns[:] = [x for x in dns if not codegraph._prune_dir(dp, x)]
+            paths += [os.path.join(dp, f) for f in fns if f.endswith(".py")]
+        serial = {p: codegraph._stamp(p) for p in paths}
+        self.assertEqual(codegraph._stamps(paths), serial)
+
+    def test_a_dangling_symlink_does_not_take_a_worker_down(self):
+        """One broken link used to mean a rebuild for ever. In a pool it could mean an
+        exception surfacing from a thread instead, which is worse - it is an exception the
+        caller never asked for."""
+        self.tree(5)
+        try:
+            os.symlink(os.path.join(self.dir, "gone.py"), os.path.join(self.dir, "pkg/dead.py"))
+        except (OSError, NotImplementedError, AttributeError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g))
+
+    def test_a_tiny_tree_still_works(self):
+        """Most repositories are small, and a pool for four files must not be the slow path or
+        a broken one."""
+        self.write("only.py", "def one():\n    return 1\n")
+        g = self.graph()
+        self.assertFalse(codegraph._is_stale(g))
