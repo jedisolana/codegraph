@@ -3325,7 +3325,16 @@ def _unread_warning(g):
 MCP_MAX_ROWS = 120               # measured: see `_capped`
 
 
-def _capped(rows):
+NARROW_WITH_FILTER = ("That is most of this tree, which is the answer: it is used everywhere. "
+                      "To see a part of it, ask again with `filter` - a glob over the id or "
+                      "its module, like `pkg/thing*` or `*/api/*`.")
+NARROW_THE_SEARCH = ("A substring that matches this much is not a search. Ask again with a "
+                     "longer one, or use `codegraph_where` if you already know the name.")
+NARROW_THE_DIFF = ("That diff touches most of the tree. Ask about a part of it, or about one "
+                   "file at a time.")
+
+
+def _capped(rows, how=NARROW_WITH_FILTER):
     """At most `MCP_MAX_ROWS` of them, and it says when it cut.
 
     `blast` on `find_stack_level` in a clone of pandas returns 11,200 lines - 795,039
@@ -3342,9 +3351,7 @@ def _capped(rows):
     if len(rows) <= MCP_MAX_ROWS:
         return "\n".join(rows)
     head = f"{len(rows)} results, showing the first {MCP_MAX_ROWS}:"
-    tail = ("\n\nThat is most of this tree, which is the answer: it is used everywhere. To see "
-            "a part of it, ask again with `filter` - a glob over the id or its module, like "
-            "`pkg/thing*` or `*/api/*`.")
+    tail = "\n\n" + how
     return "\n".join([head] + rows[:MCP_MAX_ROWS]) + tail
 
 
@@ -3459,6 +3466,7 @@ def _mcp_call(tool, args):
             out.append(f"  blast:   {len(t['blast'])} function(s) downstream")
         if not got["touched"]:
             out.append("no changed line is inside a function this graph knows")
+        out = _capped(out, NARROW_THE_DIFF).splitlines()
         # The two that are NOT `touched` are the point, and over MCP silence is the only way
         # they could be lost - the command line prints them on stderr, which nothing here has.
         if got["module_level"]:
@@ -3494,9 +3502,14 @@ def _mcp_call(tool, args):
         # `find` returns (id, file:line) PAIRS. Joining them as strings worked only while it
         # found nothing, which is exactly what every test of it had asked for - and a match
         # with no location is a match nobody can open.
+        # Capped like the rest. `find` returned early with its own text and never reached the
+        # cap, so a one-letter query on a clone of pandas came back with 3,668,564 characters -
+        # about 917,000 tokens, four and a half times worse than the answer that motivated
+        # capping anything. Fixing one path and not the others is how a cap becomes decoration.
         found = find(g, raw)
-        return _mcp_result("\n".join(f"{i}  {loc}" for i, loc in found)
-                           or f"nothing matching {raw!r}")
+        if not found:
+            return _mcp_result(f"nothing matching {raw!r}")
+        return _mcp_result(_capped([f"{i}  {loc}" for i, loc in found], NARROW_THE_SEARCH))
     # `_describe` is the CLI's own answer to "how does this graph know that name", and the
     # three ways it can fail are three different things to tell an agent. Never "(none)": an
     # agent that reads an empty answer for a misspelled name concludes nothing depends on it,

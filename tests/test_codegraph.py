@@ -9048,3 +9048,79 @@ class AnAnswerThatDestroysTheSession(Sandbox):
         shown = [l for l in text.splitlines() if l.startswith("pkg/")]
         self.assertTrue(shown)
         self.assertTrue(all(".f" in l for l in shown), shown[:3])
+
+
+class TheOtherTwoDoorsThatWereStillOpen(Sandbox):
+    """Capping `blast` fixed one flood and left two.
+
+    `find` with the substring `e` on a clone of pandas returns 3,668,564 characters - about
+    917,000 tokens, four and a half times worse than the answer I had just capped. It returns
+    early with its own text and never reached the cap.
+
+    `changed` builds its own answer too, and a large diff is a normal thing to hand it.
+
+    Fixing one path and not the others is how a cap becomes decoration: the next flood arrives
+    through the door nobody measured. So this measures all of them, and the test that keeps it
+    honest asks every tool for the biggest answer it can give."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        for i in range(400):
+            self.write(f"pkg/m{i}.py", f"def widely_named_thing_{i}():\n    return {i}\n")
+        self.graph()
+
+    def ask(self, tool, **args):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": args}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=180)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_a_vague_search_is_capped(self):
+        text, _ = self.ask("codegraph_find", name="widely")
+        self.assertLess(len(text.splitlines()), 160, f"{len(text.splitlines())} lines")
+
+    def test_and_says_how_many_there_were(self):
+        text, _ = self.ask("codegraph_find", name="widely")
+        self.assertIn("400", text, text[:300])
+
+    def test_and_tells_a_searcher_to_search_better(self):
+        """The first version reused the blast radius's sentence - `it is used everywhere` -
+        which is a true thing about a blast radius and nonsense about a query that matched
+        thirty-one thousand names."""
+        text, _ = self.ask("codegraph_find", name="widely")
+        self.assertNotIn("used everywhere", text)
+        self.assertRegex(text.lower(), r"substring|longer")
+
+    def test_no_tool_can_return_an_answer_that_ends_the_conversation(self):
+        """The one that keeps this honest. Every tool, asked for the biggest answer it has, and
+        none of them may come back with something that costs more than reading the code."""
+        asks = (("codegraph_find", {"name": "widely"}),
+                ("codegraph_callers", {"name": "widely_named_thing_1"}),
+                ("codegraph_blast", {"name": "widely_named_thing_1"}),
+                ("codegraph_sites", {"name": "widely_named_thing_1"}),
+                ("codegraph_where", {"name": "widely_named_thing_1"}),
+                ("codegraph_repo_map", {}))
+        for tool, args in asks:
+            with self.subTest(tool=tool):
+                text, _ = self.ask(tool, **args)
+                self.assertLess(len(text), 40_000, f"{tool} returned {len(text)} characters")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_search_that_finds_a_few_is_untouched(self):
+        text, _ = self.ask("codegraph_find", name="widely_named_thing_11")
+        self.assertNotRegex(text.lower(), r"showing the first")
+
+    def test_the_shape_of_one_file_is_not_capped(self):
+        """Deliberately different. `shape` is bounded by the file you asked about and its whole
+        purpose is to be proportional to it - capping that would break the thing it is for, and
+        it reports its own size in the footer instead."""
+        self.write("pkg/big.py", "".join(f"def f{i}():\n    return {i}\n\n\n" for i in range(300)))
+        self.graph()
+        text, _ = self.ask("codegraph_shape", name="pkg/big")
+        self.assertGreater(len(text.splitlines()), 200, text[:200])
