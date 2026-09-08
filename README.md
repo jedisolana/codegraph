@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6566,
-  "call_sites": 8609,
-  "edge_confidence": {"EXTERNAL": 3296, "INHERITED": 1057, "BUILTIN": 759, "SELF-METHOD": 597,
+  "call_edges": 6589,
+  "call_sites": 8634,
+  "edge_confidence": {"EXTERNAL": 3313, "INHERITED": 1061, "BUILTIN": 760, "SELF-METHOD": 598,
                       "QUALIFIED": 447, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2337,
-  "could_have_been_resolved": 2511,
+  "resolved_to_one_def": 2342,
+  "could_have_been_resolved": 2516,
   "resolution_rate": 0.931
 }
 ```
@@ -251,6 +251,14 @@ through those and no others. It agrees on all five: a name `__all__` lists, one 
 an underscore name, a plain name from a module with no `__all__`, and an underscore name from
 one. Asking also turned up a detail worth knowing — `__all__` naming something the module does
 not define makes `import *` raise, so that shape cannot occur in code that runs.
+
+The calls Python makes from SYNTAX are checked the same way: `x += y`, `with c`, `for r in
+rows`, `len(x)`. Which method actually runs is a fact about the class, so Python is asked and
+the tool has to agree. The interesting one is `+=`, which runs `__iadd__` when the class has
+one and falls back to `__add__` when it does not — never both, because only one of them runs —
+and a subclass inherits that choice from wherever the method really lives. Removing the
+fallback, or looking for it only on the class itself rather than up its bases, each turn the
+comparison red.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -801,7 +809,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 883 more. Grouped, because a list of every one of them stopped being
+The test suite adds 885 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

@@ -9885,6 +9885,85 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class TheInterpreterIsAskedWhichDunderRuns(Sandbox):
+    """Python runs these from SYNTAX: `x += y`, `with c`, `for r in rows`, `len(x)`. The tool
+    records an edge for each, and which method actually runs is a fact about the class that
+    Python can be asked directly rather than reasoned about here.
+
+    The interesting one is `+=`: it runs `__iadd__` when the class has one and falls back to
+    `__add__` when it does not - never both, because only one of them runs - and a subclass
+    inherits that choice from wherever the method really lives."""
+
+    SOURCE = (
+        "class Both:\n"
+        "    def __iadd__(self, other):\n        return self\n\n"
+        "    def __add__(self, other):\n        return self\n\n\n"
+        "class OnlyAdd:\n"
+        "    def __add__(self, other):\n        return self\n\n\n"
+        "class Sub(Both):\n    pass\n\n\n"
+        "class SubOnly(OnlyAdd):\n    pass\n\n\n"
+        "class Box:\n"
+        "    def __enter__(self):\n        return self\n\n"
+        "    def __exit__(self, *a):\n        return False\n\n"
+        "    def __iter__(self):\n        return iter([])\n\n"
+        "    def __len__(self):\n        return 0\n\n\n"
+        "class SubBox(Box):\n"
+        "    def __len__(self):\n        return 1\n\n\n"
+    )
+    # (function name, source line, class of the receiver, dunder the tool should record)
+    CASES = (
+        ("aug_both", "    x += 1\n", "Both", "__iadd__"),
+        ("aug_only", "    x += 1\n", "OnlyAdd", "__add__"),
+        ("aug_sub", "    x += 1\n", "Sub", "__iadd__"),
+        ("aug_subonly", "    x += 1\n", "SubOnly", "__add__"),
+        ("with_box", "    with x:\n        pass\n", "Box", "__enter__"),
+        ("for_box", "    for _ in x:\n        pass\n", "Box", "__iter__"),
+        ("len_box", "    return len(x)\n", "Box", "__len__"),
+        ("len_sub", "    return len(x)\n", "SubBox", "__len__"),
+    )
+
+    def python_says(self):
+        """Which class Python would actually run each dunder from."""
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "m = importlib.import_module('o')\n"
+                f"cases = {[(c, d) for _, _, c, d in self.CASES]!r}\n"
+                "out = {}\n"
+                "for cls_name, dunder in cases:\n"
+                "    cls = getattr(m, cls_name)\n"
+                "    owner = [c for c in cls.__mro__ if dunder in c.__dict__]\n"
+                "    out[cls_name + dunder] = owner[0].__name__ if owner else None\n"
+                "print(json.dumps(out))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_every_syntax_call_lands_where_python_lands(self):
+        body = self.SOURCE + "".join(
+            f"def {fn}(x: {cls}):\n{line}" for fn, line, cls, _ in self.CASES)
+        self.write("o.py", body)
+        truth = self.python_says()
+        g = self.graph()
+        got = {(e["src"].split(".")[-1], e["callee"]): e.get("dst")
+               for e in g["calls"] if e["src"].startswith("o.")}
+        for fn, _, cls, dunder in self.CASES:
+            owner = truth[cls + dunder]
+            self.assertIsNotNone(owner, f"the fixture no longer gives {cls} a {dunder}")
+            self.assertEqual(got.get((fn, dunder)), f"o.{owner}.{dunder}",
+                             f"{cls} runs {owner}.{dunder} in Python")
+
+    def test_it_records_the_one_that_runs_and_not_the_other(self):
+        """`+=` on a class with both is `__iadd__` only. Recording `__add__` beside it would put
+        a caller on a method the interpreter never reaches."""
+        body = self.SOURCE + "def aug_both(x: Both):\n    x += 1\n"
+        self.write("o.py", body)
+        g = self.graph()
+        called = {e["callee"] for e in g["calls"] if e["src"] == "o.aug_both"}
+        self.assertIn("__iadd__", called)
+        self.assertNotIn("__add__", called)
+
+
 class TheInterpreterIsAskedWhatAStarCarries(Sandbox):
     """What `from x import *` brings is `__all__` when the module states one and otherwise the
     names that do not begin with an underscore. That rule was written here from reading the
