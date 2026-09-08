@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6628,
-  "call_sites": 8684,
-  "edge_confidence": {"EXTERNAL": 3335, "INHERITED": 1071, "BUILTIN": 762, "SELF-METHOD": 602,
+  "call_edges": 6650,
+  "call_sites": 8708,
+  "edge_confidence": {"EXTERNAL": 3349, "INHERITED": 1075, "BUILTIN": 764, "SELF-METHOD": 604,
                       "QUALIFIED": 448, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2357,
-  "could_have_been_resolved": 2531,
+  "resolved_to_one_def": 2363,
+  "could_have_been_resolved": 2537,
   "resolution_rate": 0.931
 }
 ```
@@ -275,6 +275,12 @@ form resolved to a top-level module of the same name and was labelled `QUALIFIED
 confident kind of wrong, and the exact failure the guard's own comment said it had fixed. It
 changes nothing on any repository measured, because code Python will not import does not exist
 in one; it is a wrong answer to a question that can be asked, which is enough.
+
+The last one is LEGB, which is implemented here by hand and is where a bare call gets its
+meaning: the nearest enclosing FUNCTION that defines the name, then the module — and a class
+body is not in that chain at all, so `helper()` inside a method is the module's function and
+not the method sitting beside it. Each case in the fixture returns a different string, so the
+interpreter says which definition actually ran and the tool has to have named that one.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -825,7 +831,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 889 more. Grouped, because a list of every one of them stopped being
+The test suite adds 891 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

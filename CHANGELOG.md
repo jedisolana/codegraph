@@ -25,6 +25,10 @@ believed; consulting the interpreter cannot drift from what it does.
 - **Where `super()` goes.** Both halves: at the bottom of a diamond it is exactly what runs, and
   in the middle it is right for an instance of that class and wrong for one reached through the
   diamond. Python's own answer is recorded beside the limit.
+- **Which definition a bare call means.** LEGB: the nearest enclosing function that defines the
+  name, then the module, with class bodies skipped - so `helper()` inside a method is the
+  module's function and not the method beside it, which is the one people expect to go the
+  other way. Each candidate returns a different string, so the interpreter names the winner.
 
 The dot-counting one found a bug. `from ...top import x` inside `pkg.sub.deep` means `pkg.top`;
 one dot more is beyond the top-level package and Python refuses to import at all. The guard for

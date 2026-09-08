@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -9883,6 +9884,81 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.write("j.py", "CACHE = {}\n\n\n"
                            "def go(k):\n    return CACHE.get(k)\n")
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
+
+
+class TheInterpreterIsAskedWhichNameABareCallMeans(Sandbox):
+    """LEGB, implemented here by hand and adjudicated by Python. A bare `helper()` means the
+    nearest enclosing FUNCTION that defines one, then the module - and a class body is not in
+    that chain at all, so `helper()` inside a method is the module's function and not the
+    method sitting next to it. That last one is the rule people get wrong.
+
+    Each case is a call whose answer Python can be asked for by running it, so the fixture
+    returns a different string from each candidate and the interpreter says which arrived."""
+
+    SOURCE = (
+        "def helper():\n    return 'module'\n\n\n"
+        "def outer_shadow():\n"
+        "    def helper():\n        return 'outer'\n\n"
+        "    def inner():\n        return helper()\n\n"
+        "    return inner()\n\n\n"
+        "def outer_plain():\n"
+        "    def inner():\n        return helper()\n\n"
+        "    return inner()\n\n\n"
+        "class K:\n"
+        "    def helper(self):\n        return 'method'\n\n"
+        "    def call_bare(self):\n        return helper()\n\n\n"
+        "def comp():\n"
+        "    return [helper() for _ in range(1)][0]\n\n\n"
+        "def sibling_is_not_reached():\n"
+        "    def helper():\n        return 'sibling'\n"
+        "    return helper()\n"
+    )
+    # call site -> the definition codegraph should name
+    EXPECT = types.MappingProxyType({
+        "sc.outer_shadow.inner": "sc.outer_shadow.helper",
+        "sc.outer_plain.inner": "sc.helper",
+        "sc.K.call_bare": "sc.helper",
+        "sc.comp": "sc.helper",
+        "sc.sibling_is_not_reached": "sc.sibling_is_not_reached.helper",
+    })
+
+    def python_says(self):
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "m = importlib.import_module('sc')\n"
+                "print(json.dumps({'outer_shadow': m.outer_shadow(),\n"
+                "                  'outer_plain': m.outer_plain(),\n"
+                "                  'call_bare': m.K().call_bare(),\n"
+                "                  'comp': m.comp(),\n"
+                "                  'sibling': m.sibling_is_not_reached()}))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_every_bare_call_means_what_python_says_it_means(self):
+        self.write("sc.py", self.SOURCE)
+        truth = self.python_says()
+        # Which string arrives tells us which definition ran - stated by the interpreter, not
+        # by the expectation table below.
+        self.assertEqual(truth, {"outer_shadow": "outer", "outer_plain": "module",
+                                 "call_bare": "module", "comp": "module",
+                                 "sibling": "sibling"}, truth)
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"] if e["callee"] == "helper"}
+        for src, want in sorted(self.EXPECT.items()):
+            self.assertEqual(got.get(src), want, f"{src} calls {want}")
+
+    def test_a_class_body_is_not_a_scope_its_methods_can_see(self):
+        """Stated on its own because it is the one people expect to go the other way, and
+        because answering it with the method would put a caller on code that never runs."""
+        self.write("sc.py", self.SOURCE)
+        truth = self.python_says()
+        self.assertEqual(truth["call_bare"], "module")
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"] if e["callee"] == "helper"}
+        self.assertEqual(got["sc.K.call_bare"], "sc.helper")
+        self.assertNotEqual(got["sc.K.call_bare"], "sc.K.helper")
 
 
 class TheInterpreterIsAskedWhereADotLeads(Sandbox):
