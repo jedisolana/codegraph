@@ -186,23 +186,23 @@ have been tracked from the beginning, so the `before` is where each started:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.755** |
-| ansible | 0.379 | **0.726** |
-| pandas | 0.359 | **0.817** |
+| flask | 0.241 | **0.757** |
+| ansible | 0.379 | **0.728** |
+| pandas | 0.359 | **0.819** |
 
-And the whole corpus it is measured against now — **fourteen codebases, 596,641 call edges,
+And the whole corpus it is measured against now — **fourteen codebases, 598,846 call edges,
 156,835 definitions**. They were not chosen for flattering numbers; they were chosen to be
 unalike, and the low two are here for the same reason as the high two:
 
 | repo | rate | | repo | rate |
 |---|---|---|---|---|
-| rich | 0.869 | | attrs | 0.771 |
-| click | 0.864 | | flask | 0.755 |
+| rich | 0.871 | | attrs | 0.773 |
+| click | 0.865 | | flask | 0.757 |
+| black | 0.838 | | ansible | 0.728 |
 | starlette | 0.837 | | pydantic | 0.727 |
-| black | 0.823 | | ansible | 0.726 |
-| scrapy | 0.816 | | sqlalchemy | 0.702 |
-| pandas | 0.817 | | celery | 0.596 |
-| httpx | 0.801 | | stdlib | 0.577 |
+| scrapy | 0.824 | | sqlalchemy | 0.703 |
+| pandas | 0.819 | | celery | 0.597 |
+| httpx | 0.816 | | stdlib | 0.580 |
 
 Running it over code nobody aimed it at is what has found every real bug in it, and the number
 that matters is the one that looks wrong. `httpx` first measured **0.353** against a field that
