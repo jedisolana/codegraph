@@ -339,6 +339,8 @@ def _defs_and_calls(path, mod):
             # definition Parent.make() is looking for, not a shadow of it.
             self.bound = [(_bound_names(tree)[0], set())]       # per-scope (values, defs) bound locally, which SHADOW an imported module or class of the same name
             self.rets = []                                      # per-function: the class each `return` hands back, so a function with no annotation still says what it returns
+            self.yields = []                                    # the same for `yield`, which is what a pytest fixture hands its test
+            self.pyparams = []                                  # per-function: parameters pytest itself fills in, so a test's arguments are not unknowns
 
         def _qual(self, name):
             return ".".join(self.scope + [name])
@@ -571,8 +573,37 @@ def _defs_and_calls(path, mod):
             self.vtypes.append({**outer, **seeded})             # calls inside this body belong to qid; its own var-type scope
             self.bound.append(shadowed)
             self.rets.append([])
+            self.yields.append([])
+            # A TEST'S PARAMETERS ARE NOT UNKNOWNS. pytest fills them from fixtures, by name,
+            # under a scoping rule that is written down and decidable from the tree. In a clone
+            # of flask, `app` and `client` are 548 unresolved calls between them - a quarter of
+            # everything that could resolve - and both are three-line fixtures in
+            # `tests/conftest.py` whose bodies this tool was already reading.
+            #
+            # Only for functions pytest actually calls: a test function in a test file (and, in
+            # a class, only a `Test*` one), or a fixture, which receives fixtures too. An
+            # ordinary helper with a parameter of the same name is called by whoever wrote the
+            # call, and is none of pytest's business.
+            #
+            # An annotated parameter is already typed, and a parameter the body REBINDS is not
+            # reliably the fixture any more - this tool answers for a whole scope at once, so a
+            # name that changes inside it is not answered.
+            is_fixture = any(_dec_base(x) == "fixture" for x in node.decorator_list)
+            collected = (node.name.startswith("test") and _is_test_module(mod)
+                         and (not self.classes
+                              or self.classes[-1].rsplit(".", 1)[-1].startswith("Test")))
+            pyp = set()
+            if is_fixture or collected:
+                rebound = _bound_names(ast.Module(body=node.body, type_ignores=[]))[0]
+                for arg in [*getattr(node.args, "posonlyargs", []), *node.args.args,
+                            *node.args.kwonlyargs]:
+                    if (arg.annotation is None and arg.arg not in ("self", "cls")
+                            and arg.arg not in rebound):
+                        pyp.add(arg.arg)
+            self.pyparams.append(pyp)
             for c in node.body: self.visit(c)
-            got = self.rets.pop()
+            self.pyparams.pop()
+            got = self.rets.pop(); gave = self.yields.pop()
             # WHAT THE BODY RETURNS, when there is no annotation to read. `def make(): return
             # Client()` was unresolved and `def make() -> Client:` was not, on the same
             # function - but the annotation was never the evidence, the body was, and this is
@@ -593,10 +624,38 @@ def _defs_and_calls(path, mod):
                 seen = {c for c in got if c != _RET_NONE}
                 if len(seen) == 1 and None not in seen:
                     d["returns"] = seen.pop()
+            if is_fixture:
+                # What the fixture HANDS OVER - returned or yielded, since most are written as a
+                # generator so teardown can follow the value. Not `returns`: a fixture that
+                # yields is a generator function, and calling one directly gives a generator.
+                val = rt
+                if not val:
+                    seen = {c for c in [*got, *gave] if c is not _RET_NONE}
+                    if len(seen) == 1 and None not in seen: val = seen.pop()
+                if val:
+                    d["fixture"] = val
+                else:
+                    # A FIXTURE THAT HANDS BACK ANOTHER FIXTURE. `def ready(client): ...;
+                    # return client` - the value has a class and this function is not where it
+                    # is written. The name is carried and followed after every module is read,
+                    # because which `client` it means depends on where this file sits.
+                    names = set()
+                    for h in _own_handoffs(node):
+                        v = h.value
+                        if v is None or (isinstance(v, ast.Constant) and v.value is None):
+                            continue
+                        names.add(v.id if isinstance(v, ast.Name) else None)
+                    if len(names) == 1:
+                        nm = names.pop()
+                        if nm in pyp: d["fixture_alias"] = nm
             self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
 
         def visit_Return(self, node):
             if self.rets: self.rets[-1].append(self._returned_class(node.value))
+            self.generic_visit(node)
+
+        def visit_Yield(self, node):
+            if self.yields: self.yields[-1].append(self._returned_class(node.value))
             self.generic_visit(node)
 
         def _returned_class(self, v):
@@ -982,6 +1041,15 @@ def _defs_and_calls(path, mod):
                     # object-oriented Python is written and was the one shape named in this
                     # tool's own description of its blind spot.
                     edge["recv_type"] = self.atypes[-1][fn.value.attr]
+                if recv and self.pyparams and recv in self.pyparams[-1]:
+                    # Carried, not resolved: WHICH fixture this name means depends on where the
+                    # file sits, which is not knowable until every module has been read.
+                    #
+                    # No guard here against an annotated or rebound receiver, deliberately.
+                    # Both are already out of `pyparams`, so a second test for them is a
+                    # condition nothing can reach - it reads like a safeguard and is one more
+                    # line that no test can ever fail on.
+                    edge["fixture_param"] = recv
                 if not method and isinstance(self.vtypes[-1].get(callee), str):
                     # c(1) where c is a Client. Calling an INSTANCE runs its __call__, and the
                     # call site never writes that name - the same shape as __init__, and the
@@ -1240,6 +1308,33 @@ def _self_attr_types(cls_node):
 
 
 _RET_NONE = object()          # a return that hands back nothing: it disqualifies nothing
+
+
+def _dec_base(dec):
+    """The bare name of a decorator, however it was written: `@fixture`, `@pytest.fixture`,
+    `@pytest.fixture(scope="module")` and `@pytest_asyncio.fixture` all give "fixture"."""
+    while isinstance(dec, ast.Call):
+        dec = dec.func
+    if isinstance(dec, ast.Attribute):
+        return dec.attr
+    return dec.id if isinstance(dec, ast.Name) else None
+
+
+def _is_test_module(mod):
+    """pytest's own collection rule: a file named `test_*.py` or `*_test.py`."""
+    base = mod.rsplit("/", 1)[-1]
+    return base.startswith("test_") or base.endswith("_test")
+
+
+def _own_handoffs(node):
+    """Every `return` and `yield` this function itself makes, skipping any written inside a
+    function nested in it - those hand back to their own caller."""
+    for c in ast.iter_child_nodes(node):
+        if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(c, (ast.Return, ast.Yield, ast.YieldFrom)):
+            yield c
+        yield from _own_handoffs(c)
 
 
 def _yields(node):
@@ -1999,6 +2094,72 @@ def build(dirs=None, write=True):
                 if cand in def_ids:
                     e["dst"] = cand
                     e["confidence"] = "TYPED"
+                    break
+
+    # WHAT PYTEST PUTS IN A TEST'S ARGUMENTS. Applied last, and only to calls nothing else
+    # could answer. The lookup is pytest's own and no more: the module's own fixtures, then
+    # `conftest.py` in its directory, then each directory above it, first match winning - so
+    # two fixtures of one name are an ORDER, not an ambiguity, which is why this does not
+    # report AMBIGUOUS. A sibling directory's conftest is not on that path and is not read.
+    #
+    # The class is resolved in the module the FIXTURE lives in, because that is where its name
+    # means something, and then walked through the MRO like every other typed receiver.
+    def _fixture_chain(home):
+        parts = home.split("/")[:-1]
+        chain = [home]
+        while True:
+            chain.append("/".join([*parts, "conftest"]) if parts else "conftest")
+            if not parts:
+                break
+            parts = parts[:-1]
+        return chain
+
+    fixtures = {}
+    for n in nodes:
+        if n.get("fixture"):
+            fixtures.setdefault(n["module"], {})[n["name"]] = (n["fixture"], n["module"], n["id"])
+    # A fixture that hands back another fixture takes its class, followed one link at a time
+    # until nothing more can be settled. Bounded, so a pair that name each other stops rather
+    # than spinning.
+    pending = [n for n in nodes if n.get("fixture_alias") and not n.get("fixture")]
+    for _ in range(4):
+        if not pending:
+            break
+        rest = []
+        for n in pending:
+            got = None
+            for m in _fixture_chain(n["module"]):
+                got = fixtures.get(m, {}).get(n["fixture_alias"])
+                if got:
+                    break
+            if got:
+                n["fixture"] = got[0]
+                fixtures.setdefault(n["module"], {})[n["name"]] = (got[0], *got[1:])
+            else:
+                rest.append(n)
+        if len(rest) == len(pending):
+            break
+        pending = rest
+    if fixtures:
+        for e in calls:
+            if e.get("dst") or not e.get("fixture_param"):
+                continue
+            found = None
+            for m in _fixture_chain(e.get("mod") or ""):
+                found = fixtures.get(m, {}).get(e["fixture_param"])
+                if found:
+                    break
+            if not found:
+                continue
+            cls_name, fmod, fid = found
+            hits = _classes_named(cls_name, fmod, fid)
+            if len(hits) != 1:
+                continue
+            for c in _mro(hits[0], bases_of, mro_cache):
+                cand = f"{c}.{e['callee']}"
+                if cand in def_ids:
+                    e["dst"] = cand
+                    e["confidence"] = "FIXTURE"
                     break
 
     keep = ("src", "dst", "callee", "confidence", "recv", "method", "mod", "line", "lines",

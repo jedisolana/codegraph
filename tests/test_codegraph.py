@@ -1513,7 +1513,8 @@ class TheGraphKeepsItsOwnInvariants(unittest.TestCase):
     codebases rather than fixtures. Nothing had ever asserted them."""
 
     LABELS = frozenset({"SELF-METHOD", "TYPED", "QUALIFIED", "RE-EXPORT", "LOCAL", "INHERITED",
-                        "CLASS", "CONSTRUCTOR", "AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
+                        "CLASS", "CONSTRUCTOR", "FIXTURE", "AMBIGUOUS", "EXTERNAL", "BUILTIN",
+                        "UNTYPED"})
     UNRESOLVED = frozenset({"AMBIGUOUS", "EXTERNAL", "BUILTIN", "UNTYPED"})
 
     def assert_sound(self, g):
@@ -9659,6 +9660,246 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
                    "import flat\n\n\ndef test_four():\n    return flat.flat_thing()\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
+
+
+class APytestFixtureHasAType(Sandbox):
+    """A test function's parameters are not unknowns. pytest fills them from fixtures, by name,
+    following a scoping rule that is written down and decidable from the tree: the module's own
+    fixtures first, then `conftest.py` in its directory, then each directory above it.
+
+    This is the largest single blind spot left. In a clone of flask, `app` and `client` are 548
+    unresolved calls between them - a quarter of everything that could resolve - and both are
+    three-line fixtures in `tests/conftest.py`. The tool was reading the fixture's body all
+    along; it just never connected the parameter to it.
+
+    So `blast` on a library function stopped at the library. The question this tool exists to
+    answer - what breaks if I change this - has the tests in the answer or it has half of it.
+
+    Nothing is guessed. Only pytest's own rule is read, only for functions pytest actually
+    calls, and only when the fixture's value is a class this tree can name.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write("app.py",
+                   "class Client:\n"
+                   "    def get(self):\n        return 1\n\n"
+                   "class Other:\n"
+                   "    def get(self):\n        return 2\n")
+
+    def test_a_fixture_in_the_same_module(self):
+        self.write("tests/test_a.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n\n\n"
+                   "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_a.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_a_fixture_that_yields(self):
+        """How most fixtures are written - the value is yielded so teardown can follow it."""
+        self.write("tests/test_b.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    c = Client()\n    yield c\n\n\n"
+                   "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_b.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_a_fixture_in_conftest(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_c.py", "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_c.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_a_conftest_above_reaches_a_nested_file(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/unit/test_d.py", "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/unit/test_d.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_a_fixture_receives_a_fixture(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n\n\n"
+                   "@pytest.fixture\n"
+                   "def ready(client):\n    client.get()\n    return client\n")
+        self.write("tests/test_e.py", "def test_it(ready):\n    ready.get()\n")
+        g = self.graph()
+        callers = codegraph.callers_of(g, "app.Client.get")
+        self.assertIn("tests/conftest.ready", callers)
+        self.assertIn("tests/test_e.test_it", callers)
+
+    def test_a_method_of_a_test_class(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_f.py",
+                   "class TestThing:\n    def test_it(self, client):\n        client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_f.TestThing.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_the_decorator_may_carry_arguments(self):
+        self.write("tests/test_g.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   '@pytest.fixture(scope="module")\n'
+                   "def client():\n    return Client()\n\n\n"
+                   "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_g.test_it", codegraph.callers_of(g, "app.Client.get"))
+
+    def test_the_nearer_fixture_wins(self):
+        """pytest's own rule: the module's fixture shadows conftest's, and a nearer conftest
+        shadows a further one. Two fixtures of a name is not an ambiguity - it is a lookup with
+        an order."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Other\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Other()\n")
+        self.write("tests/test_h.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n\n\n"
+                   "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_h.test_it", codegraph.callers_of(g, "app.Client.get"))
+        self.assertNotIn("tests/test_h.test_it", codegraph.callers_of(g, "app.Other.get"))
+
+    # ------------------------------------------------------------------------- the controls
+    def test_an_ordinary_function_is_not_given_fixtures(self):
+        """pytest calls test functions. Everything else is called by whoever wrote the call, and
+        a parameter named `client` there is whatever they passed."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_i.py", "def helper(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_test_function_outside_a_test_file_is_not_collected(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/helpers.py", "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_conftest_in_a_sibling_directory_is_not_visible(self):
+        self.write("other/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_j.py", "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_parameter_the_body_rebinds_is_not_the_fixture(self):
+        """It was the fixture until the line that reassigned it, and this tool answers for the
+        whole scope at once. Rebinding means the name is no longer reliably that object.
+
+        The rebinding here is to a plain attribute, deliberately. Written as
+        `client = make_something()` the test passed with this guard deleted - the call on the
+        right is read as a class name and blocks the fixture on a different rule entirely - so
+        it was a test that could not fail."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_k.py",
+                   "def test_it(client, request):\n"
+                   "    client = request.param\n"
+                   "    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_local_type_still_wins_over_the_fixture(self):
+        """`client = Other()` in the body says outright what the name holds from there on."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_n.py",
+                   "from app import Other\n\n\n"
+                   "def test_it(client):\n    client = Other()\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_n.test_it", codegraph.callers_of(g, "app.Other.get"))
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_rebinding_to_a_class_from_outside_the_tree_still_wins(self):
+        """The sharp version of the one above. `client = Session()` from a library names a class
+        this tree does not hold, so nothing resolves - and the fixture must not step in and
+        answer for a name the body has plainly rebound. Without this the fixture's class is
+        given for an object that is not it."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_p.py",
+                   "from requests import Session\n\n\n"
+                   "def test_it(client):\n    client = Session()\n    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_class_pytest_does_not_collect_is_not_given_fixtures(self):
+        """pytest collects `Test*` classes. A `test_` method on any other class is nobody's
+        test, and its parameter is whatever the caller passed."""
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Client\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Client()\n")
+        self.write("tests/test_o.py",
+                   "class Helper:\n    def test_it(self, client):\n        client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_a_fixture_whose_value_cannot_be_named_answers_nothing(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "import json\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return json.loads('{}')\n")
+        self.write("tests/test_l.py", "def test_it(client):\n    client.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "app.Client.get"), [])
+
+    def test_an_annotation_on_the_parameter_still_wins(self):
+        self.write("tests/conftest.py",
+                   "import pytest\n"
+                   "from app import Other\n\n\n"
+                   "@pytest.fixture\n"
+                   "def client():\n    return Other()\n")
+        self.write("tests/test_m.py",
+                   "from app import Client\n\n\n"
+                   "def test_it(client: Client):\n    client.get()\n")
+        g = self.graph()
+        self.assertIn("tests/test_m.test_it", codegraph.callers_of(g, "app.Client.get"))
+        self.assertEqual(codegraph.callers_of(g, "app.Other.get"), [])
 
 
 class AMethodCalledOnWhatAFunctionReturned(Sandbox):

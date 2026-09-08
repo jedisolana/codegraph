@@ -87,6 +87,7 @@ not work out are listed as exactly that, rather than quietly guessed:
 | `CLASS` | `Parent.method()` — the receiver is a class in this module | yes |
 | `TYPED` | the receiver's class is known: `x = Foo()`, `x = svc.Foo()`, or an annotation that says so | yes |
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__new__` and `__init__` it runs | yes |
+| `FIXTURE` | a test's parameter, filled by the pytest fixture that name resolves to — the module's own, then `conftest.py` in its directory, then each directory above | yes |
 | `AMBIGUOUS` | several definitions match; the candidates are listed and none is picked | no |
 | `BUILTIN` | `len()`, `open()`, `sorted()` — certainly not yours | no |
 | `EXTERNAL` | a library, the stdlib, or a method whose name nothing in your tree defines | no |
@@ -150,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5885,
-  "call_sites": 7707,
-  "edge_confidence": {"EXTERNAL": 3129, "INHERITED": 823, "BUILTIN": 618, "SELF-METHOD": 568,
-                      "QUALIFIED": 358, "LOCAL": 203, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 5997,
+  "call_sites": 7862,
+  "edge_confidence": {"EXTERNAL": 3175, "INHERITED": 859, "BUILTIN": 624, "SELF-METHOD": 570,
+                      "QUALIFIED": 375, "LOCAL": 208, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1960,
-  "could_have_been_resolved": 2138,
-  "resolution_rate": 0.917
+  "resolved_to_one_def": 2020,
+  "could_have_been_resolved": 2198,
+  "resolution_rate": 0.919
 }
 ```
 
@@ -168,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.917 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.919 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -184,11 +185,11 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.496** |
-| ansible | 0.379 | **0.645** |
-| pandas | 0.359 | **0.759** |
+| flask | 0.241 | **0.634** |
+| ansible | 0.379 | **0.646** |
+| pandas | 0.359 | **0.767** |
 
-Six rules did that, and none of them is clever. A name a package **re-exports** —
+Seven rules did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -211,8 +212,23 @@ evidence, the body was, and that reading is already trusted one scope down where
 not what it yields. Then `make().go()`, which is `x = make()` and `x.go()` written on one line:
 the receiver's name was read as a class and never as a function whose return class was, by
 then, already known. 13,321 calls in a clone of pandas are written on a receiver that is a
-call. Together: 681 more resolved calls on pandas, 101 on ansible, 4 on flask — and, checked
-edge by edge against the previous build, **none lost**.
+call. Together: 681 more resolved calls on pandas, 101 on ansible, 4 on flask.
+
+The seventh is the largest single one, and it reads pytest. A test function's parameters are
+not unknowns — pytest fills them from fixtures, by name, under a scoping rule that is written
+down and decidable from the tree: the module's own fixtures, then `conftest.py` in its
+directory, then each directory above it, first match winning. In flask, `app` and `client` were
+548 unresolved calls between them, a quarter of everything that could resolve, and both are
+three-line fixtures in `tests/conftest.py` whose bodies this tool was already reading. It never
+connected the parameter to them, so `blast` on a library function stopped at the library — and
+"what breaks if I change this" has the tests in the answer or it has half of it.
+
+Only functions pytest actually calls: a test function in a test file, a `Test*` class's method,
+or a fixture, which receives fixtures too. Anything the body rebinds or annotates is left
+alone. 297 more calls on flask, 1,073 on pandas.
+
+Every one of these was checked edge by edge against the build before it: 1,402 calls gained
+across the three repositories, **none lost**.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -532,10 +548,10 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,199 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,251 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
-and four rules that carry a type across an import, a return and a chained call,
-which are 212 of those mutations
+and five rules that carry a type across an import, a return, a chained call and a
+test's arguments, which are 264 of those mutations
 and have not had a pass of their own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
@@ -582,7 +598,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 765 more. Grouped, because a list of every one of them stopped being
+The test suite adds 782 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

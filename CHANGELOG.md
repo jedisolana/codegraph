@@ -4,6 +4,34 @@
 
 First release.
 
+### A test's parameters are not unknowns
+
+pytest fills them from fixtures, by name. The rule is written down and decidable from the
+tree - the module's own fixtures, then `conftest.py` in its directory, then each directory
+above it, first match winning - and this tool was reading those fixture bodies all along
+without ever connecting a parameter to one.
+
+In a clone of flask, `app` and `client` were 548 unresolved calls between them: a quarter of
+everything that could resolve, from two three-line fixtures in `tests/conftest.py`. So `blast`
+on a library function stopped at the library, and the question this tool exists to answer has
+the tests in the answer or it has half of it.
+
+Only where pytest itself would fill it in: a test function in a `test_*.py`, a method of a
+`Test*` class, or a fixture, which receives fixtures too. A parameter the body rebinds is not
+answered - the tool answers for a whole scope at once - and an annotated one already had its
+type. A fixture that hands back another fixture takes that one's class, followed link by link.
+Two fixtures of one name are an ORDER, not an ambiguity, so this never reports AMBIGUOUS; a
+sibling directory's `conftest.py` is not on the path and is not read. The label is `FIXTURE`,
+so an answer that came from pytest's rule can be told from one that came from the source.
+
+297 more resolved calls on flask - 0.496 to 0.634 - and 1,073 on pandas, none lost.
+
+Three of the new guards were tests that could not fail. The generator guard's test used a
+function with no `return` in it, so it passed with the guard deleted. The rebinding guard's
+test rebound to a call, which a different rule blocks first. And two conditions in the edge
+test - one for an annotated receiver, one for `self` - could not be reached at all, because
+both are already out of the parameter set; they read like safeguards and were removed.
+
 ### A function says what it returns without annotating it
 
 `def make(): return Client()` then `c = make(); c.get()` — unresolved, while the identical
@@ -258,7 +286,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,199 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,251 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
