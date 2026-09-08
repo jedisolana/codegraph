@@ -150,14 +150,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5771,
-  "call_sites": 7558,
-  "edge_confidence": {"EXTERNAL": 3095, "INHERITED": 777, "BUILTIN": 610, "SELF-METHOD": 565,
-                      "QUALIFIED": 339, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 5798,
+  "call_sites": 7604,
+  "edge_confidence": {"EXTERNAL": 3104, "INHERITED": 789, "BUILTIN": 611, "SELF-METHOD": 565,
+                      "QUALIFIED": 344, "LOCAL": 199, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1888,
-  "could_have_been_resolved": 2066,
-  "resolution_rate": 0.914
+  "resolved_to_one_def": 1905,
+  "could_have_been_resolved": 2083,
+  "resolution_rate": 0.915
 }
 ```
 
@@ -168,8 +168,8 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.914 says: of the calls that could plausibly have gone to something in this codebase,
-it placed 91%. It is not the sum being flattered — the rule is the opposite of the usual one.
+That 0.915 says: of the calls that could plausibly have gone to something in this codebase,
+it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
 keeps builtins out keeps those out. What remains in it are the calls that genuinely might have
@@ -184,17 +184,25 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.484** |
-| ansible | 0.379 | **0.630** |
+| flask | 0.241 | **0.494** |
+| ansible | 0.379 | **0.641** |
 | pandas | 0.359 | **0.754** |
 
-Two rules did that, and neither of them is clever. A name a package **re-exports** —
+Four rules did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
 imports from, which is decidable from the tree. Before that second one, the first fired 38,162
 times on pandas and *not once* on flask; nothing about flask was harder, its ids just had a
 prefix on them.
+
+The other two carry a type across a boundary it was being dropped at. A module-level
+`display = Display()` types `display.warn()` in every function of that file, and a
+`from .globals import display` in the next file over keeps that type instead of starting over.
+Together those two are 336 more resolved calls on ansible and flask — about a point each. I
+had estimated twenty points, by counting the calls that *mention* such a name rather than the
+ones a class could actually be found for. The estimate was the thing that was wrong; the rule
+does what it says, at a twentieth of the size.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -514,10 +522,11 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,172 mutations.** The last full pass killed every one of the 987 the file
-admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer and an incompleteness warning,
-which are 185 of those mutations
-and has not had a pass of its own yet. The number is a fact about the file; the result is a
+**The file admits 1,183 mutations.** The last full pass killed every one of the 987 the file
+admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
+and two rules that carry an instance's type across an import,
+which are 196 of those mutations
+and have not had a pass of their own yet. The number is a fact about the file; the result is a
 fact about an older one. The pass is
 re-run whenever it changes, because a result about an older version of a file is not a result
 about this one, and a count that happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
@@ -563,7 +572,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 745 more. Grouped, because a list of every one of them stopped being
+The test suite adds 750 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

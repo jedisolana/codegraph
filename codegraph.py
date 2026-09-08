@@ -948,8 +948,9 @@ def _defs_and_calls(path, mod):
                 edges.append(edge)
             self.generic_visit(node)                            # recurse into args/keywords (which may hold more calls)
 
+    walker = V()
     try:
-        V().visit(tree)
+        walker.visit(tree)
     except RecursionError as ex:
         # Machine-generated Python nests deeper than the interpreter's own stack: a 30,000-term
         # constant, a giant literal table, a generated parser. ast.parse survives files like
@@ -994,9 +995,14 @@ def _defs_and_calls(path, mod):
     for e in seen.values():
         e["lines"] = sorted(set(e["lines"]))
         e["line"] = e["lines"][0]                    # the first, for anything reading one line
+    # MODULE-LEVEL INSTANCES, by name. `display = Display()` at the top of a file is a type
+    # that other modules import - `from ansible.cli import display` - and it was lost the
+    # moment it crossed a file. Carried out of the parse so resolution can use it, the same way
+    # aliases and from-imports already are.
+    singletons = {k: v for k, v in walker.vtypes[0].items() if v}
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules,
-            sorted(refs))
+            sorted(refs), singletons)
 
 
 # Two call edges are the same relationship only when they would resolve to the same place.
@@ -1312,6 +1318,7 @@ def build(dirs=None, write=True):
     mentioned = set()            # every name the tree names without calling; see `unused`
     stamps = {}                                                  # path -> [size, digest], the graph's own record of what it read
     mod_alias, mod_from, mod_root, mod_sub, mod_alt = {}, {}, {}, {}, {}
+    mod_single = {}                                            # module -> {name: class name} for `x = Foo()` at top level
     mod_orig = {}                                                # local alias -> the name the module actually defines
     newcache = {}
     for path, d, root in pairs:
@@ -1358,9 +1365,11 @@ def build(dirs=None, write=True):
                                 c["imports"], c["aliases"], c["fromimp"])
             sub = c.get("submodules", {}); alt = c.get("fromalt", {})
             orig = c.get("fromorig", {}); mentions = c.get("refs", [])
+            singles = c.get("singletons", {})
         else:
             try:
-                d, e, im, al, fi, alt, orig, sub, mentions = _defs_and_calls(path, mid)
+                d, e, im, al, fi, alt, orig, sub, mentions, singles = \
+                    _defs_and_calls(path, mid)
             except Unparseable as ex:
                 unreadable.append(str(ex))
                 nodes.pop()                                      # not a module we can describe
@@ -1368,10 +1377,11 @@ def build(dirs=None, write=True):
         if not multiroot and stamp is not None:
             newcache[path] = {"stamp": stamp, "defs": d, "calls": [dict(x) for x in e], "imports": im,
                               "aliases": al, "fromimp": fi, "fromalt": alt,
-                              "fromorig": orig, "submodules": sub, "refs": mentions}
+                              "fromorig": orig, "submodules": sub, "refs": mentions,
+                              "singletons": singles}
         nodes += d; calls += e; imports += im; mentioned.update(mentions)
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
-        mod_alt[mid] = alt; mod_orig[mid] = orig
+        mod_alt[mid] = alt; mod_orig[mid] = orig; mod_single[mid] = singles
     # The cache read off disk has done its job: every file has either been reused from it or
     # reparsed, and the answers are in `newcache` now. Holding it through resolution and two
     # JSON writes is a second copy of the whole tree's parse for nothing - on a large one that
@@ -1672,6 +1682,27 @@ def build(dirs=None, write=True):
                 if came_from:
                     dst = by_modname.get((came_from, callee))
                     conf = "RE-EXPORT" if dst else conf
+        if (not dst and method and recv and not e.get("recv_local")
+                and recv in mod_from.get(srcmod, {})):
+            # AN IMPORTED SINGLETON. `from .globals import display` then `display.warn()`.
+            # The type was known - one module up, where `display = Display()` is written out
+            # in full - and thrown away at the import. Local inference already typed the same
+            # variable in the module that built it; every OTHER file using it got nothing.
+            # In a clone of flask that is 422 calls, a fifth of everything it calls.
+            #
+            # The name has to be one the home module really binds to an instance, and the
+            # class is looked up in THAT module's scope, not the caller's - `display` means
+            # whatever Display meant where the object was made.
+            home = mod_from[srcmod][recv]
+            cname = mod_single.get(home, {}).get(mod_orig.get(srcmod, {}).get(recv, recv))
+            if cname:
+                hits = []
+                for c in _classes_named(cname, home):
+                    for b in _mro(c, bases_of, mro_cache):
+                        if (b + "." + callee) in def_ids:
+                            hits.append(b + "." + callee); break
+                if len(hits) == 1: dst = hits[0]; conf = "TYPED"
+                elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(set(hits))
         if (not dst and method and not e.get("recv_local")
                 and e.get("recv_path") in allmods
                 and e.get("recv_root") in imported_in.get(srcmod, ())):

@@ -4,6 +4,24 @@
 
 First release.
 
+### An imported singleton keeps its type
+
+`from .globals import display`, then `display.warn()`. The type was known one module up, where
+`display = Display()` is written out in full, and dropped at the import: local inference typed
+that variable in the file that built it, and every other file using it got nothing.
+
+The module's instance bindings are now carried with its imports and re-exports, so a
+from-imported name is looked up in the module that made it, with the class resolved in *that*
+module's scope — `display` means whatever `Display` meant where the object was made, not
+whatever the caller happens to import. Aliases (`import display as d`) follow the original
+name. A local of the same name still shadows it, a name bound to something that is not an
+instance is still untyped, and an instance of a class outside the tree is not invented.
+
+315 more resolved calls on a clone of ansible, 21 on flask — about a point on each. I had
+estimated twenty points on flask, by counting the calls that *mention* such a name instead of
+the ones a class can actually be found for. The rule is real and the estimate was not; the
+measurement is what the README states.
+
 ### One answer for what a receiver is
 
 `self.conn.__len__()` resolved and `len(self.conn)` did not — the same object, the same line of
@@ -212,7 +230,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,172 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,183 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

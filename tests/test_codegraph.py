@@ -9712,3 +9712,66 @@ class AModuleLevelSingletonHasAType(Sandbox):
                    "def emit():\n    return config.warn('m')\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
+
+
+class AnImportedSingletonKeepsItsType(Sandbox):
+    """`display = Display()` in one module, `from ansible.cli import display` in another, then
+    `display.warning(...)`. The type is known where the instance is made and was lost the
+    moment it crossed a file.
+
+    The same fix one module over. Measured on clones, as calls that would resolve:
+
+        flask     0.484 -> 0.680     422 of a 2,157 denominator
+        ansible   0.630 -> 0.657     766
+        pandas    0.754 -> 0.754       6
+
+    flask moves twenty points because its denominator is small and this pattern is most of
+    what is left in it. I nearly skipped this on the raw counts, which is why the rate is the
+    number worth costing against."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/thing.py",
+                   "class Display:\n    def warn(self, m):\n        return m\n")
+        self.write("pkg/hub.py",
+                   "from pkg.thing import Display\n\n\ndisplay = Display()\n")
+
+    def test_an_imported_instance_carries_its_class(self):
+        self.write("pkg/use.py",
+                   "from pkg.hub import display\n\n\ndef emit():\n    return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), ["pkg/use.emit"])
+
+    def test_it_reaches_through_an_alias(self):
+        self.write("pkg/aliased.py",
+                   "from pkg.hub import display as d\n\n\ndef emit():\n    return d.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), ["pkg/aliased.emit"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_local_of_the_same_name_still_shadows_it(self):
+        self.write("pkg/shadow2.py",
+                   "from pkg.hub import display\n\n\n"
+                   "class Other:\n    def warn(self, m):\n        return m\n\n\n"
+                   "def emit():\n    display = Other()\n    return display.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
+        self.assertEqual(codegraph.callers_of(g, "pkg/shadow2.Other.warn"), ["pkg/shadow2.emit"])
+
+    def test_a_name_that_is_not_an_instance_is_not_typed(self):
+        """`from pkg.hub import helper` where helper is a function, not an instance."""
+        self.write("pkg/hub2.py", "def helper():\n    return 1\n")
+        self.write("pkg/use2.py",
+                   "from pkg.hub2 import helper\n\n\ndef emit():\n    return helper.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
+
+    def test_an_instance_of_a_class_outside_the_tree_is_not_invented(self):
+        """`log = logging.getLogger()` is not a class this graph can name, and guessing would
+        be the whole failure this tool avoids."""
+        self.write("pkg/hub3.py", "import logging\n\n\nlog = logging.getLogger(__name__)\n")
+        self.write("pkg/use3.py",
+                   "from pkg.hub3 import log\n\n\ndef emit():\n    return log.warn('m')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Display.warn"), [])
