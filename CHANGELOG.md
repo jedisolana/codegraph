@@ -4,6 +4,28 @@
 
 First release.
 
+### A list is as plainly stated as a class
+
+`cmd = []` then `cmd.append('-u')`. The tool reads `c = Client()` and types `c`; a list display
+says the type just as plainly and was read as nothing at all, so the call came back UNTYPED -
+which claims the target might be somewhere in this repository.
+
+It is the biggest single source of that claim. In a clone of ansible the unresolved calls are
+led by `append` (845), `get` (840), `join` (531), `items` (421) and `update` (337), and the
+name-wide test that would call them external never fires, because a repository that size has
+its own class with a `get` on it somewhere.
+
+Nothing is resolved by this - a builtin's method is not in your tree, which is what BUILTIN has
+always meant. Three things keep it honest. The interpreter is asked whether the method really
+belongs to that type, so `config = 'text'` then `config.dumps(1)` - broken code - is not called
+a builtin. A module that can see its own `dict` or `list`, defined there or imported into it,
+takes the name back. And that check is scoped to the module rather than the tree: a first
+version asked whether the whole repository defined anything of that name and cost 811 correct
+answers on ansible, because one file has a function called `set`.
+
+1,093 calls on ansible, 699 on pandas and 7 on flask stop being "cannot tell" and are named for
+what they are. Nothing gained, nothing lost, and the rates move because the denominator does.
+
 ### An imported class is still a class receiver
 
 `Helper.tag(1)`, where `Helper` came from an import. A class DEFINED in the file resolved -
@@ -464,7 +486,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,310 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,335 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

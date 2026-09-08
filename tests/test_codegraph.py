@@ -9666,6 +9666,107 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class AListIsAsPlainlyStatedAsAClass(Sandbox):
+    """`cmd = []` then `cmd.append('-u')`. The tool reads `c = Client()` and types `c`; a list
+    display says the type just as plainly, and was read as nothing at all - so `.append()` came
+    back UNTYPED, which claims the target might be somewhere in this repository.
+
+    It is the biggest single source of that claim. In a clone of ansible the unresolved calls
+    are led by `append` (845), `get` (840), `join` (531), `items` (421) and `update` (337), and
+    the name-wide test that would call them external does not fire, because a repository that
+    size has its own class with a `get` on it somewhere.
+
+    Nothing is resolved by this - a builtin's method is not in your tree, which is what BUILTIN
+    has always meant. What changes is that the tool stops saying it cannot tell."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("app.py", "class Thing:\n    def get(self, k):\n        return k\n")
+
+    def edge(self, callee, src):
+        hits = [e for e in self.graph()["calls"]
+                if e["src"] == src and e["callee"] == callee]
+        self.assertEqual(len(hits), 1, hits)
+        return hits[0]
+
+    def test_a_list_display(self):
+        self.write("b.py", "def go():\n    cmd = []\n    cmd.append('-u')\n")
+        e = self.edge("append", "b.go")
+        self.assertIsNone(e.get("dst"))
+        self.assertEqual(e["confidence"], "BUILTIN")
+
+    def test_a_dict_display(self):
+        self.write("c.py", "def go(k):\n    env = {}\n    return env.get(k)\n")
+        e = self.edge("get", "c.go")
+        self.assertEqual(e["confidence"], "BUILTIN")
+
+    def test_a_string_constant(self):
+        self.write("d.py", "def go():\n    s = ''\n    return s.strip()\n")
+        self.assertEqual(self.edge("strip", "d.go")["confidence"], "BUILTIN")
+
+    def test_a_builtin_constructor(self):
+        self.write("e.py", "def go(x):\n    seen = set()\n    seen.add(x)\n")
+        self.assertEqual(self.edge("add", "e.go")["confidence"], "BUILTIN")
+
+    def test_a_comprehension(self):
+        self.write("f.py", "def go(rows):\n    out = [r for r in rows]\n    out.append(1)\n")
+        self.assertEqual(self.edge("append", "f.go")["confidence"], "BUILTIN")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_method_the_builtin_does_not_have_is_not_a_builtin_call(self):
+        """`config = 'text'` then `config.dumps(1)` has a receiver that is plainly a str and a
+        method str does not have. That is broken code, and answering BUILTIN would say the
+        interpreter provides something it does not. The interpreter is asked, not assumed."""
+        self.write("k.py", "def go():\n    config = 'text'\n    return config.dumps(1)\n")
+        self.assertNotEqual(self.edge("dumps", "k.go")["confidence"], "BUILTIN")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_name_rebound_to_something_else_is_not_a_builtin(self):
+        """The same rule every other type follows: two answers in one scope is no answer."""
+        self.write("g.py", "from app import Thing\n\n\n"
+                           "def go(k):\n    env = {}\n    env = Thing()\n    return env.get(k)\n")
+        e = self.edge("get", "g.go")
+        self.assertNotEqual(e["confidence"], "BUILTIN")
+
+    def test_a_receiver_with_no_literal_is_still_untyped(self):
+        self.write("h.py", "def go(env, k):\n    return env.get(k)\n")
+        self.assertEqual(self.edge("get", "h.go")["confidence"], "UNTYPED")
+
+    def test_a_class_of_that_name_the_module_can_see_wins(self):
+        """If the calling module defines its own `dict`, a name holding one is not certainly the
+        interpreter's, and saying so would be a claim the tool cannot support."""
+        self.write("i.py", "class dict:\n    def get(self, k):\n        return k\n\n\n"
+                           "def go(k):\n    env = {}\n    return env.get(k)\n")
+        e = self.edge("get", "i.go")
+        self.assertNotEqual(e["confidence"], "BUILTIN")
+
+    def test_the_same_name_in_an_unrelated_module_does_not_win(self):
+        """Scoped to the module, not the tree. One file defining a class called `dict` does not
+        make every `{}` in the repository doubtful - a tree-wide test of this cost 811 correct
+        answers on a clone of ansible."""
+        self.write("mine.py", "class dict:\n    def get(self, k):\n        return k\n")
+        self.write("i2.py", "def go(k):\n    env = {}\n    return env.get(k)\n")
+        e = self.edge("get", "i2.go")
+        self.assertEqual(e["confidence"], "BUILTIN")
+
+    def test_a_function_of_that_name_in_the_tree_wins_too(self):
+        """`def list(...)` somewhere in the repository, then `x = list()`. The value is that
+        function's result, not the interpreter's list, and a class check alone walks past it."""
+        # It must return something this tree cannot name, or the value gets a type by another
+        # route entirely and the test passes without ever reaching the guard.
+        self.write("mine2.py", "import json\n\n\ndef list():\n    return json.loads('[]')\n")
+        self.write("l.py", "from mine2 import list\n\n\n"
+                           "def go():\n    x = list()\n    x.append(1)\n")
+        e = self.edge("append", "l.go")
+        self.assertNotEqual(e["confidence"], "BUILTIN")
+
+    def test_a_module_level_literal_reaches_into_functions(self):
+        """The same reach a module-level instance has."""
+        self.write("j.py", "CACHE = {}\n\n\n"
+                           "def go(k):\n    return CACHE.get(k)\n")
+        self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
+
+
 class AnImportedClassIsStillAClassReceiver(Sandbox):
     """`Helper.tag(1)` where `Helper` came from an import. A class DEFINED in the file resolved
     - that is the `CLASS` label - and the identical statement on an imported one did not, which

@@ -89,7 +89,7 @@ not work out are listed as exactly that, rather than quietly guessed:
 | `CONSTRUCTOR` | `Client()` — the second, equally real edge, to the `__new__` and `__init__` it runs | yes |
 | `FIXTURE` | a test's parameter, filled by the pytest fixture that name resolves to — the module's own, then `conftest.py` in its directory, then each directory above | yes |
 | `AMBIGUOUS` | several definitions match; the candidates are listed and none is picked | no |
-| `BUILTIN` | `len()`, `open()`, `sorted()` — certainly not yours | no |
+| `BUILTIN` | `len()`, `open()`, `sorted()` — and `cmd.append()` where the source wrote `cmd = []`, checked against the interpreter's own list of that type's methods | no |
 | `EXTERNAL` | a library, the stdlib, or a method whose name nothing in your tree defines | no |
 | `UNTYPED` | the receiver could not be typed, and the target might be yours | no |
 
@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6264,
-  "call_sites": 8206,
-  "edge_confidence": {"EXTERNAL": 3263, "INHERITED": 970, "BUILTIN": 641, "SELF-METHOD": 574,
-                      "QUALIFIED": 418, "LOCAL": 217, "UNTYPED": 173, "TYPED": 5,
+  "call_edges": 6330,
+  "call_sites": 8281,
+  "edge_confidence": {"EXTERNAL": 3201, "INHERITED": 985, "BUILTIN": 740, "SELF-METHOD": 586,
+                      "QUALIFIED": 418, "LOCAL": 219, "UNTYPED": 173, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2187,
-  "could_have_been_resolved": 2360,
-  "resolution_rate": 0.927
+  "resolved_to_one_def": 2216,
+  "could_have_been_resolved": 2389,
+  "resolution_rate": 0.928
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.927 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.928 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -185,9 +185,9 @@ On other people's code, measured on a clone of each and built from its own root:
 
 | repo | before | after |
 |---|---|---|
-| flask | 0.241 | **0.751** |
-| ansible | 0.379 | **0.692** |
-| pandas | 0.359 | **0.805** |
+| flask | 0.241 | **0.754** |
+| ansible | 0.379 | **0.721** |
+| pandas | 0.359 | **0.810** |
 
 Ten rules and four bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
@@ -295,6 +295,17 @@ on flask, 220 on ansible and 1,564 on pandas out of a denominator of winnable ca
 never winnable in, and out of the "unsure" list `impact` prints — which is this tool sending an
 agent to look for something it has already proved is not there. Resolved counts, unchanged by
 it: flask 1,471, ansible 20,120, pandas 102,318.
+
+The same is true of one more reading, and for the same reason. `cmd = []` states a type as
+plainly as `c = Client()` does, and was read as nothing at all — so `cmd.append('-u')` came back
+"could not tell", which is the biggest single source of that answer: in ansible the unresolved
+calls are led by `append` (845), `get` (840), `join` (531), `items` (421) and `update` (337),
+and the name-wide test that would call them external does not fire, because a repository that
+size has its own class with a `get` on it somewhere. A list's `append` is not in anybody's tree.
+The interpreter is asked whether the method really is that type's, so `config = 'text'` followed
+by `config.dumps(1)` — broken code — is not called a builtin either; and a module that can see
+its own `dict` or `list` takes the name back for that module only, because one file defining a
+function called `set` should not make every `set()` in the repository doubtful.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -614,14 +625,14 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,310 mutations.** The last full pass killed every one of the 987 the file
-admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
-and six rules that carry a type across an import, a return, a chained call, a test's
-arguments and a second call, which are 280 of those mutations
-and have not had a pass of their own yet. The number is a fact about the file; the result is a
-fact about an older one. The pass is
-re-run whenever it changes, because a result about an older version of a file is not a result
-about this one, and a count that happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
+**The file admits 1,335 mutations.** A full pass killed every one of the 987 the file admitted
+then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
+an incompleteness warning, and the rules and fixes above. A sample of 150 drawn from the file as
+it stood a few changes short of this one killed 150, one of them by hanging rather than failing.
+Neither result is about the file as it is now: the number is a fact about this version, the
+results are facts about older ones. The pass is re-run whenever the file changes, because a
+result about an older version of a file is not a result about this one, and a count that
+happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
 rather than on every push, and the count is checked by a test — it was published as 710 here
 and 208 in the changelog while the file admitted 839, because a number written twice and
 checked nowhere drifts in two directions. Two of them did not make the suite fail but made
@@ -664,7 +675,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 831 more. Grouped, because a list of every one of them stopped being
+The test suite adds 843 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

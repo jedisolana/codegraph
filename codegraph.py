@@ -330,6 +330,9 @@ def _defs_and_calls(path, mod):
             # guesses is tried first and this is used when that names no class in the tree -
             # `make` may DECLARE what it returns, and a declared type is the source saying so.
             self.ctypes = [{}]
+            # And the builtin type a name plainly holds: `cmd = []`, `env = {}`, `s = ''`. Same
+            # scope rules, same "two answers is no answer" rule.
+            self.ltypes = [{}]
             # The MODULE is a scope too, and it was the only one with no pre-scan: every
             # function got one and the file's own top level got an empty set. So
             # `for config in rows:` or `with open(p) as config:` at top level left config
@@ -587,6 +590,9 @@ def _defs_and_calls(path, mod):
             outer = {k: v for k, v in self.vtypes[0].items()
                      if k not in binds and k not in seeded} if self.vtypes else {}
             self.ctypes.append({})
+            louter = {k: v for k, v in self.ltypes[0].items()
+                      if k not in binds and k not in seeded} if self.ltypes else {}
+            self.ltypes.append(louter)
             self.vtypes.append({**outer, **seeded})             # calls inside this body belong to qid; its own var-type scope
             self.bound.append(shadowed)
             self.rets.append([])
@@ -677,7 +683,8 @@ def _defs_and_calls(path, mod):
                     # `app` has a class of its own.
                     c = _handoff_call(node)
                     if c: d["fixture_call"] = c
-            self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
+            self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.ltypes.pop()
+            self.owner.pop(); self.scope.pop()
 
         def visit_Return(self, node):
             if self.rets: self.rets[-1].append(self._returned_class(node.value))
@@ -749,7 +756,7 @@ def _defs_and_calls(path, mod):
         def visit_FunctionDef(self, node): self._func(node)
         def visit_AsyncFunctionDef(self, node): self._func(node)
 
-        def _retype(self, name, cls, call=None):
+        def _retype(self, name, cls, call=None, lit=None):
             """cls is a class name, or None for "rebound to something I cannot name"."""
             # The same two-answers rule, applied to the fallback as well: a variable assigned
             # from two different functions has no declared type either.
@@ -757,6 +764,10 @@ def _defs_and_calls(path, mod):
                 self.ctypes[-1][name] = None
             else:
                 self.ctypes[-1][name] = call
+            if name in self.ltypes[-1] and self.ltypes[-1][name] != lit:
+                self.ltypes[-1][name] = None
+            else:
+                self.ltypes[-1][name] = lit
             if name in self.vtypes[-1] and self.vtypes[-1][name] != cls:
                 # `if c: x = Alpha() else: x = Beta()` then x.go() used to pick whichever
                 # branch was walked last and label it TYPED - right half the time, and
@@ -792,8 +803,9 @@ def _defs_and_calls(path, mod):
                 # constructor here, so the class reading is tried first and this answers when it
                 # names nothing.
                 call = _returning_call(node.value)
+                lit = _literal_type(node.value)
                 for tgt in node.targets:
-                    if isinstance(tgt, ast.Name): self._retype(tgt.id, cls, call)
+                    if isinstance(tgt, ast.Name): self._retype(tgt.id, cls, call, lit)
                     elif isinstance(tgt, (ast.Tuple, ast.List)):  # a, b = f() - two unknowns
                         for el in tgt.elts:
                             if isinstance(el, ast.Name): self._retype(el.id, None, None)
@@ -1088,6 +1100,10 @@ def _defs_and_calls(path, mod):
                     # object-oriented Python is written and was the one shape named in this
                     # tool's own description of its blind spot.
                     edge["recv_type"] = self.atypes[-1][fn.value.attr]
+                if recv and recv not in ("self", "cls") and self.ltypes[-1].get(recv):
+                    # The receiver plainly holds a builtin. Carried, not resolved: whether this
+                    # tree defines its own class of that name is not knowable from one file.
+                    edge["builtin_recv"] = self.ltypes[-1][recv]
                 if recv and self.pyparams and recv in self.pyparams[-1]:
                     # Carried, not resolved: WHICH fixture this name means depends on where the
                     # file sits, which is not knowable until every module has been read.
@@ -1176,6 +1192,7 @@ ATTR_IDENTITY = ("src", "callee", "recv", "encl_class", "recv_type")
 ATTR_IDENTITY_MARK = "\0attr"        # so a short key can never collide with a long one
 
 EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", "recv_path",
+                 "builtin_recv",
                  "recv_local", "recv_root_local", "callee_local", "encl_class", "recv_type",
                  "recv_call", "invoke_type", "super_of", "super_from", "alt", "syntax",
                  "attr_read")
@@ -1408,6 +1425,55 @@ def _yields(node):
         if isinstance(c, (ast.Yield, ast.YieldFrom)) or _yields(c):
             return True
     return False
+
+
+_LITERAL_NODE = {ast.List: "list", ast.Dict: "dict", ast.Set: "set", ast.Tuple: "tuple",
+                 ast.ListComp: "list", ast.DictComp: "dict", ast.SetComp: "set",
+                 ast.JoinedStr: "str"}
+_BUILTIN_CTOR = frozenset({"list", "dict", "set", "tuple", "str", "int", "float", "bool",
+                           "bytes", "frozenset"})
+
+
+def _is_builtin_method(recv_type, callee, shadowed):
+    """Is `callee` really a method of that builtin type.
+
+    The interpreter is asked, not assumed: `config = 'an attribute'` then `config.dumps(1)` has
+    a receiver that is plainly a str and a method str does not have - broken code, and answering
+    BUILTIN would say the interpreter provides something it does not.
+
+    And not at all if the calling module can SEE something of that name - a class called `dict`
+    defined there, a function called `list` imported into it - because `x = list()` is then that
+    thing's result and the tool has no business being certain about it. Scoped to the module,
+    not the tree: one file defining a function called `set` does not make every `set()` in the
+    repository doubtful, and a tree-wide test cost 811 correct answers on ansible for that.
+
+    Only reached for a method call: `builtin_recv` is set in one place, and only when the
+    receiver is a single name, which a bare call never has."""
+    if not recv_type or recv_type in shadowed:
+        return False
+    return hasattr(getattr(builtins, recv_type, None), callee)
+
+
+def _literal_type(value):
+    """The builtin type a right-hand side plainly is. `cmd = []` says list as plainly as
+    `c = Client()` says Client, and was read as nothing at all - so `cmd.append(...)` came back
+    UNTYPED, which claims the target might be in your tree. In a clone of ansible the unresolved
+    calls are led by append, get, join, items and update.
+
+    Only what the source writes out: a display, a constant, a comprehension, or a call to a
+    builtin that can only return its own type. Nothing inferred from a name."""
+    if value is None:
+        return None
+    t = _LITERAL_NODE.get(value.__class__)
+    if t:
+        return t
+    if isinstance(value, ast.Constant):
+        n = type(value.value).__name__
+        return n if n in ("str", "int", "float", "bool", "bytes") else None
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in _BUILTIN_CTOR):
+        return value.func.id
+    return None
 
 
 def _called_class(value):
@@ -1844,6 +1910,12 @@ def build(dirs=None, write=True):
     imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
                    for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
     mro_cache = {}                                                # linearisation is reused across edges
+    # Anything a module can SEE under a builtin's name - defined there, or imported into it -
+    # takes that name back for that module, and the tool stops being certain there.
+    defined_here = defaultdict(set)
+    for n in nodes:
+        if n["kind"] in ("class", "func"):
+            defined_here[n["module"]].add(n["id"].rsplit(".", 1)[-1])
     for e in calls:                                               # resolve each call to a SPECIFIC definition, import-aware (highest confidence first)
         srcmod = e.get("mod") or e["src"].split(".")[0]; recv = e.get("recv"); callee = e["callee"]; method = e.get("method"); dst = None; conf = None
         # DID ANYTHING PUT A CLASS TO THE RECEIVER? Not the same question as whether a target
@@ -2088,7 +2160,14 @@ def build(dirs=None, write=True):
                 # This is the tool's real blind spot, and it is NOT the same as external - the
                 # target might well be in your tree. Naming it separately is what makes the
                 # resolution rate mean something: it is the denominator of what was winnable.
-                conf = "UNTYPED"
+                #
+                # Unless the receiver plainly holds a builtin. `cmd = []` then `cmd.append(...)`
+                # runs list.append, which is not in anybody's tree - the one exception being a
+                # repository that defines its own class of that name, where the tool has no
+                # business being certain.
+                conf = "BUILTIN" if _is_builtin_method(
+                    e.get("builtin_recv"), callee,
+                    defined_here[srcmod] | imported_in.get(srcmod, set())) else "UNTYPED"
         e["dst"] = dst; e["confidence"] = conf
         # Only for a METHOD call, where the name written IS the target's name - the same limit
         # the name-wide rule keeps. `p = Plain(); p()` is a bare call on a typed local whose
