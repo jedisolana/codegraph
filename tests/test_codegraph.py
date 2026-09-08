@@ -8513,7 +8513,10 @@ class EveryToolOnSomethingThatExists(Sandbox):
             ("codegraph_find", {"name": "load"}),
             ("codegraph_shape", {"name": "pkg/core"}),
             ("codegraph_path", {"name": "run", "to": "load"}),
-            ("codegraph_repo_map", {}))
+            ("codegraph_repo_map", {}),
+            ("codegraph_changed",
+             {"diff": "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1,2 +1,2 @@\n"
+                      " def load():\n-    return 0\n+    return 1\n"}))
 
     def test_every_tool_answers_a_question_it_has_an_answer_to(self):
         msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
@@ -8686,3 +8689,79 @@ class WhereItStartsIsNotANestedTestHelper(Sandbox):
         self.assertIn("pkg/cli.main", text)
         if "tests/test_main.main" in text:
             self.assertLess(text.index("pkg/cli.main"), text.index("tests/test_main.main"), text)
+
+
+class WhatDidIJustBreak(Sandbox):
+    """The question an agent asks most and the one the door did not have.
+
+    `codegraph changed` reads a diff and says what those edits would reach - the whole point
+    being that it finds the names, so nobody has to know what to ask about first. It existed as
+    a command and was not an MCP tool, so an agent had to know a function name before it could
+    ask anything, which is the opposite of what it needs right after editing.
+
+    The two answers that are not `touched` are the important ones: a changed line at module
+    level runs on import and can reach anything in the file, and a changed file the graph never
+    read has no answer at all. Folding either into "nothing depends on this" is the one reply
+    that must never be given quietly - and over MCP, quietly is the only way it could be
+    given."""
+
+    DIFF = ("--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1,2 +1,2 @@\n"
+            " def load():\n-    return 1\n+    return 2\n")
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 2\n")
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n")
+        self.graph()
+
+    def call(self, **args):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_changed", "arguments": args}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1], r
+
+    def test_it_names_what_the_edit_touched(self):
+        reply, r = self.call(diff=self.DIFF)
+        self.assertNotIn("error", reply, r.stderr[-300:])
+        self.assertIn("pkg/core.load", reply["result"]["content"][0]["text"])
+
+    def test_and_who_would_feel_it(self):
+        reply, _ = self.call(diff=self.DIFF)
+        self.assertIn("pkg/app.run", reply["result"]["content"][0]["text"])
+
+    def test_a_module_level_edit_is_not_silence(self):
+        """It runs on import and can reach anything in the file. Reporting `nothing touched`
+        for it would be the most dangerous answer this tool can give."""
+        # The file ON DISK is the new side of the diff, so the fixture has to put a
+        # module-level line where the diff says one was added. The first version pointed at
+        # line 1 of a file whose line 1 was `def load():`, and got the right answer to a
+        # different question.
+        self.write("pkg/core.py", "CONSTANT = 3\n\n\ndef load():\n    return 2\n")
+        self.graph()
+        diff = ("--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -0,0 +1,1 @@\n+CONSTANT = 3\n")
+        reply, _ = self.call(diff=diff)
+        text = reply["result"]["content"][0]["text"].lower()
+        self.assertRegex(text, r"module level|on import")
+
+    def test_a_file_the_graph_never_read_is_said_out_loud(self):
+        diff = ("--- a/other/thing.py\n+++ b/other/thing.py\n@@ -1,1 +1,1 @@\n"
+                "-x = 1\n+x = 2\n")
+        reply, _ = self.call(diff=diff)
+        text = reply["result"]["content"][0]["text"].lower()
+        self.assertRegex(text, r"never read|no answer")
+
+    def test_an_empty_diff_is_an_answer_not_a_crash(self):
+        _, r = self.call(diff="")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_rubbish_is_an_answer_not_a_crash(self):
+        reply, r = self.call(diff="this is not a diff at all\n")
+        self.assertEqual(r.returncode, 0, r.stderr[-200:])
+        self.assertTrue(reply["result"]["content"][0]["text"].strip())

@@ -32,6 +32,9 @@ same-named functions would be worse than no blast radius at all.
                                here, instead of reading 4 file(s) whole (2,140 lines)`.
                                Opt-in, because scripts parse the current output; always on
                                over MCP, where an agent is deciding whether to open them.
+  codegraph mcp ... changed    the same `changed` question, asked by the agent: hand it a
+                               diff and it says what those edits reach. It finds the names,
+                               so nothing has to be named first.
   codegraph map                what this codebase IS: the modules everything leans on,
                                ranked by how many others import them, and where execution
                                starts. The first question in a repository you have not seen.
@@ -3233,6 +3236,10 @@ MCP_TOOLS = {
                            "how many others import them, and where execution starts. Ask this "
                            "FIRST in a repository you have not seen",
                            None, None),
+    "codegraph_changed": ("give it a unified diff and it says what those edits would break - "
+                          "it finds the names, so you do not have to know what to ask about. "
+                          "Ask this straight after editing, BEFORE saying the work is done",
+                          "diff", None),
 }
 
 
@@ -3358,6 +3365,33 @@ def _mcp_call(tool, args):
         return _mcp_result(str(e) or "no graph yet - run: codegraph build <path>")
     if tool == "codegraph_repo_map":
         return _mcp_result("\n".join(repo_map(g)) + _unread_warning(g))
+    if tool == "codegraph_changed":
+        diff = args.get("diff") or ""
+        if not diff.strip():
+            return _mcp_result("this tool needs a `diff` - the output of `git diff`, or "
+                               "`git diff --cached` for staged work")
+        got = changed(g, diff)
+        out = []
+        for t in got["touched"]:
+            who = ", ".join(t["callers"][:6]) or "(none)"
+            more = f", +{len(t['callers']) - 6} more" if len(t["callers"]) > 6 else ""
+            out.append(f"{t['id']}  (line{'s' if len(t['lines']) > 1 else ''} "
+                       f"{_ranges(t['lines'])})")
+            out.append(f"  callers: {who}{more}")
+            out.append(f"  blast:   {len(t['blast'])} function(s) downstream")
+        if not got["touched"]:
+            out.append("no changed line is inside a function this graph knows")
+        # The two that are NOT `touched` are the point, and over MCP silence is the only way
+        # they could be lost - the command line prints them on stderr, which nothing here has.
+        if got["module_level"]:
+            out.append(f"\n{len(got['module_level'])} changed line(s) at MODULE LEVEL, which "
+                       "run on import and can reach anything in the file: "
+                       + ", ".join(got["module_level"][:6]))
+        if got["unknown_files"]:
+            out.append(f"\n{len(got['unknown_files'])} changed file(s) this graph NEVER READ, "
+                       "so there is no answer for them at all: "
+                       + ", ".join(got["unknown_files"][:6]))
+        return _mcp_result("\n".join(out) + _unread_warning(g))
     raw = (args.get("name") or args.get("query") or "").strip()
     if not raw:
         return _mcp_result("this tool needs a `name`")
@@ -3434,6 +3468,8 @@ def _mcp_serve(stream_in=None, stream_out=None):
             return ({"name": {"type": "string"}, "to": {"type": "string"}}, ["name", "to"])
         if n == "codegraph_repo_map":
             return ({}, [])                          # it asks about the whole tree, not a name
+        if n == "codegraph_changed":
+            return ({"diff": {"type": "string"}}, ["diff"])
         return ({"name": {"type": "string"}}, ["name"])
 
     tools = []
