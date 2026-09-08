@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6143,
-  "call_sites": 8037,
-  "edge_confidence": {"EXTERNAL": 3216, "INHERITED": 919, "BUILTIN": 634, "SELF-METHOD": 570,
-                      "QUALIFIED": 401, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 6159,
+  "call_sites": 8059,
+  "edge_confidence": {"EXTERNAL": 3220, "INHERITED": 927, "BUILTIN": 635, "SELF-METHOD": 570,
+                      "QUALIFIED": 404, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2115,
-  "could_have_been_resolved": 2293,
-  "resolution_rate": 0.922
+  "resolved_to_one_def": 2126,
+  "could_have_been_resolved": 2304,
+  "resolution_rate": 0.923
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.922 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.923 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -251,11 +251,16 @@ The second bug came out of building that. A parameter called `pkg`, in a file th
 there is, on a name that means whatever the caller passed. The guard against exactly this
 existed and only ever looked at a ONE-NAME receiver, so every dotted one walked past it.
 
-Every one of these was checked edge by edge against the build before it: 4,564 calls gained
-across the three repositories, and 7 lost. Five were answers the old reading order reached by
-using the NEW type on the OLD name — right by luck, and labelled `TYPED` either way. The other
-two are a function that calls `.append()` on two different classes: resolving one of them made
-the pair ambiguous, and two answers is not an answer.
+Those last two were an accident worth keeping: a function calling `.append()` on two different
+classes made the pair ambiguous the moment one of them resolved, and the chains written on both
+stopped resolving. A chain does not need the scope-wide answer — the call it is written on is
+right there, on the same line, already resolved on its own. Reading it from the line recovers
+both and answers three more. Where one line genuinely holds two, the scope-wide rule is still
+the right one.
+
+Every one of these was checked edge by edge against the build before it: 4,569 calls gained
+across the three repositories, and 5 lost — all five answers the old reading order reached by
+using the NEW type on the OLD name, right by luck and labelled `TYPED` either way.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -575,7 +580,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,281 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,286 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
 and six rules that carry a type across an import, a return, a chained call, a test's
 arguments and a second call, which are 280 of those mutations
@@ -625,7 +630,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 809 more. Grouped, because a list of every one of them stopped being
+The test suite adds 812 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

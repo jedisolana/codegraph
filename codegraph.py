@@ -2212,11 +2212,22 @@ def build(dirs=None, write=True):
         # Which definition a name reached from a given scope. Two different ones is not an
         # answer, the same way a bare call with two candidates is not.
         resolved_in = {}
+        # And the same thing per LINE. A chain does not need the scope-wide answer: the call it
+        # is written on is right there, on the same line, and has been resolved on its own.
+        # Without this, `mi.append(mi).get_loc(...)` and `index.append(index).get_loc(...)` two
+        # lines apart cancelled each other - the tool got more right about `append` and answered
+        # LESS about the chains. Where one line holds two of them, the scope-wide rule is the
+        # right one and still applies.
+        resolved_at = {}
         for e in calls:
             if e.get("dst"):
                 k = (e["src"], e["callee"])
                 resolved_in[k] = None if k in resolved_in and resolved_in[k] != e["dst"] \
                     else e["dst"]
+                for ln in e.get("lines") or [e.get("line")]:
+                    a = (e["src"], e["callee"], ln)
+                    resolved_at[a] = None if a in resolved_at and resolved_at[a] != e["dst"] \
+                        else e["dst"]
 
         # A return class that is another call's return class. `def open_client(): return
         # connect().session()` states it two functions away.
@@ -2250,7 +2261,9 @@ def build(dirs=None, write=True):
         for e in calls:
             if e.get("dst") or not e.get("recv_call"):
                 continue
-            target = resolved_in.get((e["src"], e["recv_call"]))
+            here = (e["src"], e["recv_call"], e.get("line"))
+            target = resolved_at[here] if here in resolved_at \
+                else resolved_in.get((e["src"], e["recv_call"]))
             if not target or target not in returns_of:
                 continue
             cand = _method_on(returns_of[target], mod_of_def.get(target, ""), target, e["callee"])

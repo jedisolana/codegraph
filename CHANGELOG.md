@@ -4,6 +4,21 @@
 
 First release.
 
+### Two chains in one function are two questions
+
+`x.clone().go()` and `y.clone().go()`, on two different classes. What `clone` returned was
+looked up by NAME within the function, so two calls to `clone` reaching two definitions
+cancelled each other and neither chain resolved.
+
+The rule they cancelled under is right everywhere else: a name reaching two definitions from
+one scope is not an answer. But a chain does not need the scope-wide answer. The call it is
+written on is on the same line, and has already been resolved on its own.
+
+Found from a real diff rather than from reasoning: resolving `mi.append(mi)` in a pandas test
+made a pair with `index.append(index)` two lines down, and the `.get_loc()` on both stopped
+resolving. The tool got more right and answered less. Both are back, and three more with them.
+Where one line genuinely holds two of them, the scope-wide rule applies and still refuses.
+
 ### A class reached through a module
 
 `pd.MultiIndex.from_product(...)`. The receiver is a class named in full: a module this file
@@ -370,7 +385,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,281 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,286 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

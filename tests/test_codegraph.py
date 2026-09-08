@@ -9662,6 +9662,59 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class TwoChainsInOneFunctionAreTwoQuestions(Sandbox):
+    """`x.clone().go()` and `y.clone().go()` in one function, on two different classes. What
+    `clone` returns was looked up by NAME within the function - so two calls to `clone` reaching
+    two definitions cancelled each other, and neither chain resolved.
+
+    The rule they cancelled under is a good one everywhere else: a name reaching two definitions
+    from one scope is not an answer. But a chain does not need the scope-wide answer. The call
+    it is written on is right there, on the same line, and that call has already been resolved
+    on its own.
+
+    Found from a real diff: resolving `mi.append(mi)` in a pandas test made a pair with
+    `index.append(index)` two lines down, and the `.get_loc()` on both stopped resolving. The
+    tool got MORE right and answered LESS."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("a.py",
+                   "class A:\n"
+                   "    def clone(self):\n        return A()\n"
+                   "    def go(self):\n        return 1\n\n"
+                   "class B:\n"
+                   "    def clone(self):\n        return B()\n"
+                   "    def go(self):\n        return 2\n")
+
+    def test_each_chain_takes_the_call_it_is_written_on(self):
+        self.write("b.py", "from a import A, B\n\n\n"
+                           "def use(x: A, y: B):\n"
+                           "    x.clone().go()\n"
+                           "    y.clone().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.A.go"), ["b.use"])
+        self.assertEqual(codegraph.callers_of(g, "a.B.go"), ["b.use"])
+
+    def test_the_two_line_form_still_uses_the_scope(self):
+        """`c = make()` and `c.go()` are on different lines, so there is no call on this line to
+        read - the scope-wide answer is the only one there is, and still applies."""
+        self.write("c.py", "from a import A\n\n\n"
+                           "def make():\n    return A()\n\n\n"
+                           "def use():\n    c = make()\n    return c.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.A.go"), ["c.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_two_different_targets_on_one_line_answer_nothing(self):
+        """Where the line cannot tell them apart either, the old rule is the right one."""
+        self.write("d.py", "from a import A, B\n\n\n"
+                           "def use(x: A, y: B):\n"
+                           "    return [x.clone().go(), y.clone().go()]\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.A.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "a.B.go"), [])
+
+
 class AClassReachedThroughAModule(Sandbox):
     """`pd.MultiIndex.from_product(...)`. The receiver is a class, named in full: a module this
     file imported, then a class that module holds or re-exports. `Parent.method()` resolved and
@@ -10273,9 +10326,11 @@ class AMethodCalledOnWhatAFunctionReturned(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "svc.Other.go"), ["app5.use"])
         self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), [])
 
-    def test_two_functions_of_one_name_in_one_scope_answer_nothing(self):
-        """Reached from the same scope and resolving to different definitions is not an
-        answer - the same rule the two-line form already follows."""
+    def test_two_functions_of_one_name_take_their_own_line(self):
+        """This used to assert that neither resolved: `make` reached two definitions from one
+        scope, and two answers is not an answer. That rule is right for `c = make()` and
+        `c.go()` on separate lines, where nothing on the second line says which `make` it was.
+        A chain says so outright - the call is on the same line - so each takes its own."""
         self.write("other.py", "class Thing:\n    def go(self):\n        return 1\n\n"
                                "def make():\n    return Thing()\n")
         self.write("app6.py", "import svc\nimport other\n\n\n"
@@ -10283,8 +10338,8 @@ class AMethodCalledOnWhatAFunctionReturned(Sandbox):
                               "    svc.make().go()\n"
                               "    return other.make().go()\n")
         g = self.graph()
-        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), [])
-        self.assertEqual(codegraph.callers_of(g, "other.Thing.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), ["app6.use"])
+        self.assertEqual(codegraph.callers_of(g, "other.Thing.go"), ["app6.use"])
 
 
 class AFunctionThatSaysWhatItReturnsWithoutAnnotating(Sandbox):
