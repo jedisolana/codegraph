@@ -149,14 +149,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 5614,
-  "call_sites": 7373,
-  "edge_confidence": {"EXTERNAL": 3021, "INHERITED": 739, "BUILTIN": 595, "SELF-METHOD": 556,
-                      "QUALIFIED": 325, "LOCAL": 198, "UNTYPED": 172, "TYPED": 5,
+  "call_edges": 5634,
+  "call_sites": 7395,
+  "edge_confidence": {"EXTERNAL": 3035, "INHERITED": 739, "BUILTIN": 598, "SELF-METHOD": 557,
+                      "QUALIFIED": 325, "LOCAL": 198, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 1826,
-  "could_have_been_resolved": 1998,
-  "resolution_rate": 0.914
+  "resolved_to_one_def": 1827,
+  "could_have_been_resolved": 2001,
+  "resolution_rate": 0.913
 }
 ```
 
@@ -167,7 +167,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.914 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.913 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 91%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -272,6 +272,10 @@ codegraph deps <module>      a module's in-tree imports and importers, `import_m
 codegraph cycles             import cycles of any length, including a module importing itself
 codegraph symbols            every function and class defined here
 codegraph changed            read a diff on stdin; what those edits would break
+codegraph map                what this codebase IS: the modules everything leans on, and
+                             where execution starts. The first question in a new repository
+codegraph shape <file>       every signature in a file and its line number, no bodies
+codegraph mcp                serve all of it to a coding agent over MCP (stdin/stdout)
 codegraph unused             definitions nothing calls AND nothing names
 codegraph unused --all       ...plus the ones reached some other way, each with why
 codegraph stats              counts, resolution rate, definitions nothing reaches
@@ -318,6 +322,35 @@ codegraph.impact(g, "spend_cap")   # {"callers": [...], "sites": [...], "blast":
 `impact` before an edit is the difference between "I changed a function" and "I changed a
 function that five others depend on, here are their line numbers." The output is small, exact,
 and cheap — no model call, no network.
+
+### The MCP door an agent knocks on
+
+That is the library. `codegraph mcp` is the same answers over **MCP** — line-delimited
+JSON-RPC on stdin and stdout, so the agent asks rather than you. No dependency, no network, no
+daemon.
+
+| tool | when |
+|---|---|
+| `codegraph_repo_map` | first, in a repository you have not seen |
+| `codegraph_shape` | instead of reading a file you only need the shape of |
+| `codegraph_where`, `codegraph_find` | where is this, what is it called |
+| `codegraph_callers`, `codegraph_calls` | who calls this, what does it call |
+| `codegraph_blast` | before changing a shared function — transitive callers, not just direct |
+| `codegraph_sites` | every call site, as file:line |
+| `codegraph_path` | how does A reach B |
+| `codegraph_changed` | after editing and **before saying the work is done** — hand it your `git diff` and it finds the names itself |
+
+The handshake carries that same guidance, so a client shows it to the model once rather than
+leaving each tool to be rediscovered mid-task.
+
+**The answer to read carefully.** `nothing calls X` is not `X is unreachable`, and the reply
+says which — a function reached through a dispatch table or a decorator has no callers this
+graph can name, and deleting it still breaks the code.
+
+**Large answers are capped and say so.** `blast` on a widely-used helper in pandas returned
+11,200 lines — about 199,000 tokens, which does not fill an agent's context, it ends the
+conversation. It comes back as 120 rows, the real count, the files they are in, and a `filter`
+glob to narrow. An answer cut off without a word is one an agent reads as complete.
 
 From a shell, add `--json` and every verb answers in data rather than prose — **including the
 refusals**, so a misspelling and a function with nothing calling it stay distinguishable
@@ -501,7 +534,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 718 more. Grouped, because a list of every one of them stopped being
+The test suite adds 722 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

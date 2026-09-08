@@ -9359,3 +9359,47 @@ class TellingTheAgentWhenToAsk(Sandbox):
         than the tools save."""
         result, _ = self.handshake()
         self.assertLess(len(result["instructions"]), 1200, len(result["instructions"]))
+
+
+class TheReadmeDescribesTheToolThatExists(unittest.TestCase):
+    """The README's only mention of MCP was inside a paragraph about mutation counts, and its
+    command list named none of `map`, `shape` or `mcp`.
+
+    A whole mode was added - a server, ten tools, a file-shape reader, a repository map - and
+    the only thing kept current was the numbers, because the numbers had tests and the prose
+    did not.
+
+    So the prose gets one. Every verb the tool accepts has to appear in the README, and the
+    check is the same one the help text already has, pointed at the other document."""
+
+    def setUp(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            self.readme = f.read()
+
+    def verbs(self):
+        """Whatever `_main` dispatches on, read from the help rather than from a list here -
+        a list here would be the third place to forget."""
+        return {line.split()[1] for line in codegraph.__doc__.splitlines()
+                if line.strip().startswith("codegraph ")
+                and len(line.split()) > 1
+                and line.split()[1].isalpha()}
+
+    def test_every_verb_is_in_the_readme(self):
+        missing = sorted(v for v in self.verbs() if v not in self.readme)
+        self.assertEqual(missing, [], f"the README does not mention: {missing}")
+
+    def test_the_mcp_door_has_a_section_of_its_own(self):
+        """One line in a command list is not documentation for a mode. Somebody deciding
+        whether to point their agent at this needs to find it by looking."""
+        self.assertRegex(self.readme, r"(?i)#+ .*\bMCP\b")
+
+    def test_the_tools_it_advertises_are_named_there(self):
+        """A reader comparing the README to the server should not find them different."""
+        for tool in codegraph.MCP_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, self.readme)
+
+    def test_it_says_the_one_thing_that_gets_misread(self):
+        """`nothing calls this` is in the instructions the server hands the model. A person
+        reading the README deserves the same warning."""
+        self.assertRegex(self.readme.lower(), r"nothing calls|dispatch")
