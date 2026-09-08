@@ -6,6 +6,36 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### A dotted module that re-exports, and two caps that were arbitrary
+
+`import pkg.mod` then `pkg.mod.func()`, where `mod` re-exports `func` rather than defining it.
+The single-name spelling of the same sentence - `from pkg import mod` then `mod.func()` - has
+followed re-exports for a long time; the dotted one looked for a direct definition and stopped.
+They are the same import, and `import pandas.core.api` then `pandas.core.api.DataFrame(...)` is
+how a large codebase reaches into a package.
+
+Found by asking how DEEP a re-export chain the tool could follow, and getting "not even one" for
+a spelling that was not the point of the question. The answer to the original question was worse
+than a limit: chains up to eight hops resolved, and past that it depended on the order the files
+happened to be read, because resolving one module's chain shortens every chain that runs through
+it. A ten-deep chain failed while an eleven-deep one resolved. A tool whose answer depends on a
+filename is worse than one that says no. The hop limit is insurance against a cycle, the cycle
+has its own test, and it is 32 now.
+
+The same question of the resolution rounds gave the same shape of answer: a fluent chain was cut
+off at six links because the round cap was six. Both caps are now generous, both are pinned by a
+test at a depth the old value failed, and neither costs anything - the loops stop when they stop
+making progress, which on every repository measured is long before either bound.
+
+13 more resolved calls, none lost.
+
+A third change went in with these and came back out. Reading a whole dotted path as a class name
+resolves `pkg.mid.Thing()`, and also reads `self.df._consolidate()` as one - so
+`self.df = DataFrame(...)` followed by `self.df = self.df._consolidate()` looked like two
+different classes for one attribute, and the rule that refuses two answers threw both away. It
+bought 22 calls on pandas and cost 68. Deciding it properly needs the receiver's scope, which
+the reading of a right-hand side does not have, and the limit is written down as a test.
+
 ### A method that returns Self
 
 `def filter(self, x) -> Self:` - PEP 673, and how every fluent interface is annotated now.
@@ -593,7 +623,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,383 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,390 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

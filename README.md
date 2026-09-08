@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6495,
-  "call_sites": 8512,
-  "edge_confidence": {"EXTERNAL": 3263, "INHERITED": 1036, "BUILTIN": 751, "SELF-METHOD": 595,
-                      "QUALIFIED": 440, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6527,
+  "call_sites": 8562,
+  "edge_confidence": {"EXTERNAL": 3272, "INHERITED": 1050, "BUILTIN": 754, "SELF-METHOD": 595,
+                      "QUALIFIED": 446, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2307,
-  "could_have_been_resolved": 2481,
+  "resolved_to_one_def": 2327,
+  "could_have_been_resolved": 2501,
   "resolution_rate": 0.93
 }
 ```
@@ -733,7 +733,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,383 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,390 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. Three samples have been drawn from it as it changed: 150, then 300, then 300 again, and every
 one of the 750 was killed — one of them by hanging rather than failing, which is counted apart
@@ -784,7 +784,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 874 more. Grouped, because a list of every one of them stopped being
+The test suite adds 880 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

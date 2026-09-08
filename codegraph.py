@@ -1555,6 +1555,12 @@ def _called_class(value):
     if isinstance(fn, ast.Name):
         return fn.id
     if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+        # ONE level, deliberately. Reading the whole dotted path resolves `pkg.mid.Thing()`,
+        # and also reads `self.df._consolidate()` as a class name - so `self.df = DataFrame(...)`
+        # followed by `self.df = self.df._consolidate()` looked like two different classes for
+        # one attribute, and the rule that refuses two answers threw both away. It cost 68
+        # resolved calls on pandas to buy 22. The deeper path needs the receiver's SCOPE to be
+        # read, which this helper does not have.
         return f"{fn.value.id}.{fn.attr}"
     return None
 
@@ -1829,6 +1835,11 @@ def build(dirs=None, write=True):
     # pointed at a module that does not have it. It happened to resolve anyway whenever the
     # name was unique in the tree - which is luck, and stops being luck the moment two modules
     # define it. Follow the chain to where the name actually lives, with a hop limit because a
+    # circular re-export is expressible. The limit was EIGHT, and past it the answer depended on
+    # the order the files happened to be read - resolving one module's chain shortens every
+    # chain that runs through it, so a ten-deep chain failed while an eleven-deep one resolved.
+    # A tool whose answer depends on a filename is worse than one that says no. The cycle has
+    # its own test; the limit is only insurance, so there is no reason for it to be tight.
     # circular re-export is expressible even if it would not import.
     defined_in = {(n["module"], n["name"]) for n in nodes if n["kind"] in ("func", "class")}
     # Follow it under the name the OTHER module knows it by, not the one written here.
@@ -1841,7 +1852,7 @@ def build(dirs=None, write=True):
         for name, target in list(mod_from[mid].items()):
             real = mod_orig.get(mid, {}).get(name, name)
             hops, seen_hops = 0, set()
-            while (target, real) not in defined_in and target in mod_from and hops < 8:
+            while (target, real) not in defined_in and target in mod_from and hops < 32:      # insurance against a cycle, not a schedule - see below
                 nxt = mod_from[target].get(real)
                 if not nxt or nxt in seen_hops: break
                 # each module along the chain may have renamed it again on the way through
@@ -2187,6 +2198,21 @@ def build(dirs=None, write=True):
             # config.py it never imported, labelled QUALIFIED. In Python a name you did not
             # import is not that module - it is whatever the name holds, or a NameError.
             dst = by_modname.get((e["recv_path"], callee)); conf = "QUALIFIED" if dst else conf
+            if not dst:
+                # ...and the name it RE-EXPORTS rather than defines, which the single-name
+                # spelling of this same sentence has followed for a long time. `from pkg import
+                # mod` then `mod.func()` resolved; `import pkg.mod` then `pkg.mod.func()` looked
+                # for a direct definition and stopped. They are the same import, and
+                # `import pandas.core.api` then `pandas.core.api.DataFrame(...)` is how a large
+                # codebase reaches into a package.
+                came = mod_from.get(e["recv_path"], {}).get(callee)
+                if came:
+                    dst = by_modname.get((came, mod_orig.get(e["recv_path"], {}).get(callee, callee)))
+                    conf = "RE-EXPORT" if dst else conf
+                elif "*" in mod_from.get(e["recv_path"], {}):
+                    hits = [by_modname[(m, callee)] for m in _star_sources(e["recv_path"])
+                            if (m, callee) in by_modname and _star_carries(m, callee)]
+                    if len(hits) == 1: dst = hits[0]; conf = "RE-EXPORT"
         if not dst and not method and e.get("callee_local"):
             conf = "UNTYPED"                                   # a local name holding something
         if not dst and not method and not conf:

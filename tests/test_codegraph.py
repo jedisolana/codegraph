@@ -9885,6 +9885,88 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class ADottedModuleThatReExports(Sandbox):
+    """`import pkg.mod` then `pkg.mod.func()`, where `mod` re-exports `func` rather than
+    defining it. The single-name form of the same sentence - `from pkg import mod` then
+    `mod.func()` - has followed re-exports for a long time. The dotted one looked only for a
+    direct definition and stopped.
+
+    Both spellings are the same import, and `import pandas.core.api` then
+    `pandas.core.api.DataFrame(...)` is how large codebases reach into a package.
+
+    Found by asking how DEEP a re-export chain the tool could follow, and getting "not even one"
+    for a spelling that was never the point of the question."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py",
+                   "def target():\n    return 1\n\n\n"
+                   "class Thing:\n    def go(self):\n        return 2\n\n\n"
+                   "def _hidden():\n    return 3\n")
+        self.write("pkg/mid.py", "from pkg.core import target, Thing\n")
+
+    def test_a_dotted_receiver_follows_the_re_export(self):
+        self.write("a.py", "import pkg.mid\n\n\n"
+                           "def use():\n    return pkg.mid.target()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.target"), ["a.use"])
+
+    def test_the_single_name_form_still_does(self):
+        """The positive control: this is the spelling that already worked."""
+        self.write("b.py", "from pkg import mid\n\n\n"
+                           "def use():\n    return mid.target()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.target"), ["b.use"])
+
+    def test_a_class_constructed_the_dotted_way_is_a_known_limit(self):
+        """`pkg.mid.Thing().go()` - the FUNCTION form above resolves and this one does not.
+
+        Reading the whole dotted path as a class name fixes it and costs more than it buys:
+        `self.df._consolidate()` is also a dotted path, so `self.df = DataFrame(...)` followed
+        by `self.df = self.df._consolidate()` looks like two different classes for one
+        attribute and the rule that refuses two answers throws both away. Measured on pandas:
+        22 calls gained, 68 lost. Deciding it properly needs the receiver's scope, which the
+        reading of a right-hand side does not have."""
+        self.write("c.py", "import pkg.mid\n\n\n"
+                           "def use():\n    return pkg.mid.Thing().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.Thing.go"), [])
+
+    def test_a_re_export_chain_of_any_depth(self):
+        """The chain is followed with a hop limit so a circular re-export cannot spin, and the
+        limit was eight. Past it the answer depended on the order the files happened to be read,
+        because resolving one module's chain shortens the chains that run through it - so a
+        ten-deep chain failed while an eleven-deep one resolved. A tool whose answer depends on
+        a filename is worse than one that says no.
+
+        The limit is insurance against a cycle, and a cycle is caught by its own test, so there
+        is no reason for it to be tight."""
+        self.write("deep/__init__.py", "")
+        self.write("deep/m0.py", "def target():\n    return 1\n")
+        for i in range(1, 13):
+            self.write(f"deep/m{i}.py", f"from deep.m{i - 1} import target\n")
+        body = "from deep import " + ", ".join(f"m{i}" for i in range(1, 13)) + "\n\n\n"
+        body += "".join(f"def use{i}():\n    return m{i}.target()\n\n\n" for i in range(1, 13))
+        self.write("deep/app.py", body)
+        g = self.graph()
+        callers = set(codegraph.callers_of(g, "deep/m0.target"))
+        missing = [i for i in range(1, 13) if f"deep/app.use{i}" not in callers]
+        self.assertEqual(missing, [], f"chains this deep did not resolve: {missing}")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_name_the_module_neither_defines_nor_re_exports(self):
+        self.write("d.py", "import pkg.mid\n\n\n"
+                           "def use():\n    return pkg.mid.missing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.target"), [])
+
+    def test_a_chain_this_file_never_imported_is_still_refused(self):
+        self.write("e.py", "def use(pkg):\n    return pkg.mid.target()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.target"), [])
+
+
 class AMethodThatReturnsSelf(Sandbox):
     """`def filter(self, x) -> Self:` - PEP 673, and how every fluent interface is annotated
     now. `Self` names no class, so the tool read the annotation and found nothing, and a chain
