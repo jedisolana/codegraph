@@ -9662,6 +9662,82 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
 
 
+class TheRightSideIsEvaluatedFirst(Sandbox):
+    """`df = df.where(df > 0)`. The receiver on the right is the OLD `df`, which was typed one
+    line up - and it was read as the new one, which has no type yet, so the call on its own line
+    went unresolved and every call after it too.
+
+    The visitor retyped the target and then walked the value. Python evaluates the right side
+    first, and a name means what it meant a line earlier until the assignment completes. Reading
+    them in the wrong order made a variable rebound from its own method a blind spot, which is
+    how a great deal of dataframe, query-builder and string-handling code is written.
+
+    1,015 unresolved calls on `df` alone in a clone of pandas."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("a.py",
+                   "class Frame:\n"
+                   "    def where(self):\n        return Frame()\n"
+                   "    def go(self):\n        return 1\n")
+
+    def test_a_name_rebound_from_its_own_method(self):
+        self.write("b.py", "from a import Frame\n\n\n"
+                           "def use():\n"
+                           "    df = Frame()\n"
+                           "    df = df.where()\n"
+                           "    return df.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.Frame.where"), ["b.use"])
+
+    def test_two_classes_for_one_name_are_still_neither(self):
+        """The rule this must not disturb. A name is answered for a whole scope at once, so a
+        variable that holds an Frame on one line and an Other on the next has no type - it used
+        to take whichever branch was walked last and call it TYPED, right half the time and
+        certain both times."""
+        self.write("c.py", "from a import Frame\n\n\n"
+                           "class Other:\n    def go(self):\n        return 2\n\n\n"
+                           "def use():\n"
+                           "    df = Frame()\n"
+                           "    df = Other()\n"
+                           "    return df.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "c.Other.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "a.Frame.go"), [])
+
+    def test_a_rebinding_it_cannot_name_still_clears_the_type(self):
+        """The risk in reading the value first: the old type must not survive the line."""
+        self.write("f.py", "from a import Frame\n"
+                           "import json\n\n\n"
+                           "def use():\n"
+                           "    df = Frame()\n"
+                           "    df = json.loads('{}')\n"
+                           "    return df.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.Frame.go"), [])
+
+    def test_an_annotated_rebinding_reads_the_old_name_too(self):
+        self.write("d.py", "from a import Frame\n\n\n"
+                           "def use():\n"
+                           "    df = Frame()\n"
+                           "    df2: Frame = df.where()\n"
+                           "    return df2.go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "a.Frame.where"), ["d.use"])
+        self.assertEqual(codegraph.callers_of(g, "a.Frame.go"), ["d.use"])
+
+    def test_a_name_assigned_to_itself_through_a_call_is_still_counted_once(self):
+        """The call must be recorded exactly once, not once per walk."""
+        self.write("e.py", "from a import Frame\n\n\n"
+                           "def use():\n"
+                           "    df = Frame()\n"
+                           "    df = df.where()\n")
+        hits = [e for e in self.graph(write=False)["calls"]
+                if e["src"] == "e.use" and e["callee"] == "where"]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertEqual(hits[0]["lines"], [6])
+
+
 class AnImportedNameThatIsNotAClass(Sandbox):
     """The worst class of bug this tool can have, found while building something else. Asking
     which class a name means, for a name the module imported, answered with whatever definition

@@ -4,6 +4,26 @@
 
 First release.
 
+### The right side is evaluated first
+
+`df = df.where(df > 0)`. The receiver on the right is the OLD `df`, typed a line earlier. The
+visitor retyped the target and then walked the value, so that call read a name with no type yet
+and went unresolved - and so did every call after it. Python evaluates the right side first,
+and a name means what it meant a line earlier until the assignment completes.
+
+A variable rebound from its own method is how a great deal of dataframe, query-builder and
+string-handling code is written. In a clone of pandas, `df` alone was 1,015 unresolved calls;
+696 of them now resolve, plus 7 on ansible.
+
+Five edges stopped resolving, and all five were the old order reading the NEW type on the OLD
+name - `left = pd.Series(JSONArray(left.values...))`, where the `left.values` inside the call is
+the argument that was passed in, not the Series being built. Right by luck, and labelled
+`TYPED` either way.
+
+The rule this does not disturb: a name holding two different classes in one scope still has
+neither. The tool answers for a whole scope at once, and taking whichever branch was walked
+last is right half the time and certain both times.
+
 ### A return class that is another call's return class
 
 `def client(app): return app.test_client()` — flask's own fixture, and 204 unresolved calls in
@@ -320,7 +340,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,267 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,270 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

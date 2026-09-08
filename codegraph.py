@@ -762,28 +762,38 @@ def _defs_and_calls(path, mod):
             # one value that says nothing is None - a name cannot be called through it, so the
             # code has to rebind before using it, and `x = None` above an `x = Foo()` is how
             # half of Python initialises an optional.
-            if isinstance(node.value, ast.Constant) and node.value.value is None:
-                return self.generic_visit(node)
-            cls = _called_class(node.value)
-            # Carried ALONGSIDE, not instead: `x = make()` is indistinguishable from a
-            # constructor here, so the class reading is tried first and this answers when it
-            # names nothing.
-            call = _returning_call(node.value)
+            # THE RIGHT SIDE FIRST, which is the order Python evaluates in. `df = df.where(...)`
+            # names the OLD df on the right - typed a line earlier - and the target was retyped
+            # before the value was ever walked, so that call read a name with no type yet and
+            # went unresolved, taking every call after it with it. A variable rebound from its
+            # own method is how a great deal of dataframe, query-builder and string code is
+            # written: 1,015 unresolved calls on `df` alone in a clone of pandas.
+            self.visit(node.value)
+            if not (isinstance(node.value, ast.Constant) and node.value.value is None):
+                cls = _called_class(node.value)
+                # Carried ALONGSIDE, not instead: `x = make()` is indistinguishable from a
+                # constructor here, so the class reading is tried first and this answers when it
+                # names nothing.
+                call = _returning_call(node.value)
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name): self._retype(tgt.id, cls, call)
+                    elif isinstance(tgt, (ast.Tuple, ast.List)):  # a, b = f() - two unknowns
+                        for el in tgt.elts:
+                            if isinstance(el, ast.Name): self._retype(el.id, None, None)
             for tgt in node.targets:
-                if isinstance(tgt, ast.Name): self._retype(tgt.id, cls, call)
-                elif isinstance(tgt, (ast.Tuple, ast.List)):     # a, b = f() - two unknowns
-                    for el in tgt.elts:
-                        if isinstance(el, ast.Name): self._retype(el.id, None, None)
-            self.generic_visit(node)
+                self.visit(tgt)
 
         def visit_AnnAssign(self, node):
             """`c: Client = make()` - the annotation names the class the inference could not
             reach through the call."""
+            if node.value is not None:
+                self.visit(node.value)                           # the right side first, as above
             if isinstance(node.target, ast.Name):
                 cls = _annotated_class(node.annotation)
                 if cls is None: cls = _called_class(node.value)
                 if cls or node.value is not None: self._retype(node.target.id, cls)
-            self.generic_visit(node)
+            self.visit(node.target)
+            if node.annotation is not None: self.visit(node.annotation)
 
         def _receiver_type(self, node):
             """What class a receiver expression has, when this file can say so.

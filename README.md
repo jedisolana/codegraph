@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6061,
-  "call_sites": 7931,
-  "edge_confidence": {"EXTERNAL": 3194, "INHERITED": 879, "BUILTIN": 631, "SELF-METHOD": 570,
-                      "QUALIFIED": 384, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
+  "call_edges": 6087,
+  "call_sites": 7965,
+  "edge_confidence": {"EXTERNAL": 3202, "INHERITED": 891, "BUILTIN": 633, "SELF-METHOD": 570,
+                      "QUALIFIED": 388, "LOCAL": 217, "UNTYPED": 178, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2058,
-  "could_have_been_resolved": 2236,
-  "resolution_rate": 0.92
+  "resolved_to_one_def": 2074,
+  "could_have_been_resolved": 2252,
+  "resolution_rate": 0.921
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.92 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.921 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 92%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -187,9 +187,9 @@ On other people's code, measured on a clone of each and built from its own root:
 |---|---|---|
 | flask | 0.241 | **0.644** |
 | ansible | 0.379 | **0.646** |
-| pandas | 0.359 | **0.769** |
+| pandas | 0.359 | **0.773** |
 
-Eight rules did that, and none of them is clever. A name a package **re-exports** —
+Eight rules and one bug did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -233,8 +233,16 @@ functions away, and reading one hop stopped short of it. These facts depend on e
 they are settled in rounds until a round changes nothing, rather than in one pass in a fixed
 order.
 
-Every one of these was checked edge by edge against the build before it: 1,708 calls gained
-across the three repositories, **none lost**.
+The bug was reading order. `df = df.where(df > 0)` names the OLD `df` on the right, typed a
+line earlier — and the target was retyped before the value was ever walked, so that call read a
+name with no type yet and went unresolved, taking every call after it along. Python evaluates
+the right side first. A variable rebound from its own method is how a great deal of dataframe,
+query-builder and string-handling code is written: 1,015 unresolved calls on `df` alone in a
+clone of pandas, 696 of them now answered.
+
+Every one of these was checked edge by edge against the build before it: 2,411 calls gained
+across the three repositories, and 5 lost — all five answers the old order reached by reading
+the NEW type on the OLD name, which was right by luck and labelled `TYPED` either way.
 
 There used to be one more label. `RESOLVED` meant "a bare call, and exactly one definition of
 that name exists somewhere in the tree" — which is a coincidence, not a resolution. By the time
@@ -554,7 +562,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,267 mutations.** The last full pass killed every one of the 987 the file
+**The file admits 1,270 mutations.** The last full pass killed every one of the 987 the file
 admitted then, and the file has grown since — an MCP server, a shape reader, a saving footer, an incompleteness warning
 and six rules that carry a type across an import, a return, a chained call, a test's
 arguments and a second call, which are 280 of those mutations
@@ -604,7 +612,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 791 more. Grouped, because a list of every one of them stopped being
+The test suite adds 796 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
