@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6677,
-  "call_sites": 8741,
-  "edge_confidence": {"EXTERNAL": 3364, "INHERITED": 1079, "BUILTIN": 770, "SELF-METHOD": 606,
-                      "QUALIFIED": 448, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6711,
+  "call_sites": 8785,
+  "edge_confidence": {"EXTERNAL": 3373, "INHERITED": 1094, "BUILTIN": 773, "SELF-METHOD": 606,
+                      "QUALIFIED": 455, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2369,
-  "could_have_been_resolved": 2543,
+  "resolved_to_one_def": 2391,
+  "could_have_been_resolved": 2565,
   "resolution_rate": 0.932
 }
 ```
@@ -725,10 +725,14 @@ it usable:
   program keeps a logger, a client or a registry. A local assignment or a parameter of the same
   name shadows it, because a function that rebinds the name is talking about something else.
 - **Type inference reads what the source states, and nothing else.** `x = Foo()` and
-  `x: Foo`; an attribute the class body assigns; a function's return class, whether annotated
-  or plainly returned; a call made on the result of another call; a module-level instance; and
-  a test's parameters, from the pytest fixture that name resolves to. A container annotation is
-  not its contents, so `Dict[str, Client]` stays a dict. A name rebound to anything the tool
+  `x: Foo`; an attribute the class body assigns, read through `self` or through any name this
+  file gave a class to — `self.db.query()` and `c.db.query()` both resolve; a function's return
+  class, whether annotated
+  or plainly returned; `-> Self`, which is the receiver's own class and how every fluent
+  interface is annotated; a call made on the result of another call, however long the chain; a
+  module-level instance; a name the source plainly gives a builtin — `cmd = []`, `rows: list` —
+  and a test's parameters, from the pytest fixture that name resolves to. A container
+  annotation is not its contents, so `Dict[str, Client]` stays a dict. A name rebound to anything the tool
   cannot name loses its type rather than keeping the old one. And `with Foo() as c` is not
   assumed to give you a Foo, because `__enter__` may return anything at all.
 - **An unannotated parameter is the blind spot that is left.** `def get_facts(module)` gets its
@@ -787,7 +791,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,390 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,398 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. Three samples have been drawn from it as it changed: 150, then 300, then 300 again, and every
 one of the 750 was killed — one of them by hanging rather than failing, which is counted apart
@@ -838,7 +842,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 893 more. Grouped, because a list of every one of them stopped being
+The test suite adds 900 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

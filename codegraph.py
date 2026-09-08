@@ -489,12 +489,15 @@ def _defs_and_calls(path, mod):
                               "recv": None, "method": True, "kind": "CALL", "syntax": True,
                               "super_of": self._qual(node.name),
                               "line": getattr(node, "lineno", 0)})
-            defs.append({"id": qid, "kind": "class", "name": node.name, "module": mod,
-                         "line": node.lineno, "bases": bases})
+            cdef = {"id": qid, "kind": "class", "name": node.name, "module": mod,
+                    "line": node.lineno, "bases": bases}
+            defs.append(cdef)
             self.scope.append(node.name); self.classes.append(qid)   # methods walk under this class scope
             # Scanned from the whole class body up front: a method that uses an attribute is
             # often written above the __init__ that assigns it.
-            self.atypes.append(_self_attr_types(node))
+            at = _self_attr_types(node)
+            if at: cdef["attrs"] = at
+            self.atypes.append(at)
             # A class body is a scope: `class A: config = 1` then config.dumps() in that body
             # is the attribute, not the imported module, and it used to resolve into the module.
             # A METHOD does not see class attributes, so the frame comes back off around every
@@ -1126,6 +1129,19 @@ def _defs_and_calls(path, mod):
                     # object-oriented Python is written and was the one shape named in this
                     # tool's own description of its blind spot.
                     edge["recv_type"] = self.atypes[-1][fn.value.attr]
+                elif (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Attribute)
+                      and isinstance(fn.value.value, ast.Name)
+                      and self.vtypes[-1].get(fn.value.value.id)):
+                    # `c.db.query()` where this file gave `c` a class. The same fact as
+                    # `self.db.query()` one step further out, and it sat unreadable because the
+                    # attribute tables are built per class while a file is read and only the
+                    # ENCLOSING class's was in hand. Each class now carries its own, so the
+                    # receiver's class and what its attribute holds can be read together.
+                    #
+                    # `self` is handled by the branch above and cannot reach this one, which is
+                    # why there is no test for it here: the order does that job.
+                    edge["recv_attr_of"] = self.vtypes[-1][fn.value.value.id]
+                    edge["recv_attr"] = fn.value.attr
                 if recv and recv not in ("self", "cls") and self.ltypes[-1].get(recv):
                     # The receiver plainly holds a builtin. Carried, not resolved: whether this
                     # tree defines its own class of that name is not knowable from one file.
@@ -1235,6 +1251,7 @@ EDGE_IDENTITY = ("src", "mod", "callee", "recv", "method", "kind", "recv_root", 
                  "builtin_recv",
                  "recv_local", "recv_root_local", "callee_local", "encl_class", "recv_type",
                  "recv_call", "invoke_type", "super_of", "super_from", "alt", "syntax",
+                 "recv_attr", "recv_attr_of",
                  "attr_read")
 
 # Python runs these from SYNTAX. Nothing at the call site writes the name, so a call graph
@@ -2006,6 +2023,8 @@ def build(dirs=None, write=True):
             bases_of[n["id"]] = resolved
     imported_in = {m: set(mod_alias.get(m, ())) | set(mod_from.get(m, ())) | set(mod_sub.get(m, ()))
                    for m in set(mod_alias) | set(mod_from) | set(mod_sub)}   # names each module actually imported
+    attrs_of = {n["id"]: n["attrs"] for n in nodes if n.get("attrs")}
+    mod_of_class = {n["id"]: n["module"] for n in nodes if n["kind"] == "class"}
     mro_cache = {}                                                # linearisation is reused across edges
     # Anything a module can SEE under a builtin's name - defined there, or imported into it -
     # takes that name back for that module, and the tool stops being certain there.
@@ -2105,6 +2124,20 @@ def build(dirs=None, write=True):
                         hits.append(b + ".__call__"); break      # __init__ does
             if len(hits) == 1: dst = hits[0]; conf = "TYPED"
             elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
+        if not dst and method and e.get("recv_attr"):
+            owner, attr = e["recv_attr_of"], e["recv_attr"]
+            for c in _classes_named(owner, srcmod, e["src"]):
+                held = None
+                for b in _mro(c, bases_of, mro_cache):
+                    held = attrs_of.get(b, {}).get(attr)
+                    if held: break
+                if not held: continue
+                for k in _classes_named(held, mod_of_class.get(c, srcmod), c):
+                    for b in _mro(k, bases_of, mro_cache):
+                        if (b + "." + callee) in def_ids:
+                            dst = b + "." + callee; conf = "TYPED"; break
+                    if dst: break
+                if dst: break
         rt = e.get("recv_type")
         if not dst and rt:                                       # x.method() where `x = Foo()` (local type inference) -> Foo.method
             # WHICH class called Foo? The one this module can see - defined here, or imported

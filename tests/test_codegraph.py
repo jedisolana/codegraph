@@ -9886,6 +9886,69 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class AnAttributeOnSomethingOtherThanSelf(Sandbox):
+    """`self.db.query()` has resolved for a long time - an attribute the class body assigns, read
+    through `self`. `c.db.query()` on a typed `c` did not, though the tool knows what class `c`
+    is and knows what `db` holds on that class. The two facts sat in different places: the
+    attribute tables are built per class while a file is read, and only the ENCLOSING class's
+    was in hand.
+
+    Carrying each class's attribute types onto its node makes both readable at once. In a clone
+    of pandas that is 128 calls, and 96 in scrapy."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("m.py",
+                   "class Held:\n    def run(self):\n        return 1\n\n\n"
+                   "class Other:\n    def run(self):\n        return 2\n\n\n"
+                   "class Owner:\n"
+                   "    def __init__(self):\n        self.db = Held()\n\n"
+                   "    def via_self(self):\n        return self.db.run()\n\n\n"
+                   "class Child(Owner):\n    pass\n")
+
+    def test_a_typed_local(self):
+        self.write("a.py", "from m import Owner\n\n\n"
+                           "def use():\n    o = Owner()\n    return o.db.run()\n")
+        g = self.graph()
+        self.assertIn("a.use", codegraph.callers_of(g, "m.Held.run"))
+
+    def test_an_annotated_parameter(self):
+        self.write("b.py", "from m import Owner\n\n\n"
+                           "def use(o: Owner):\n    return o.db.run()\n")
+        g = self.graph()
+        self.assertIn("b.use", codegraph.callers_of(g, "m.Held.run"))
+
+    def test_an_attribute_inherited_from_a_base(self):
+        self.write("c.py", "from m import Child\n\n\n"
+                           "def use(c: Child):\n    return c.db.run()\n")
+        g = self.graph()
+        self.assertIn("c.use", codegraph.callers_of(g, "m.Held.run"))
+
+    def test_self_still_works(self):
+        g = self.graph()
+        self.assertIn("m.Owner.via_self", codegraph.callers_of(g, "m.Held.run"))
+
+    # ------------------------------------------------------------------------- the controls
+    def test_an_untyped_receiver_answers_nothing(self):
+        self.write("d.py", "def use(o):\n    return o.db.run()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Held.run"), ["m.Owner.via_self"])
+
+    def test_an_attribute_the_class_never_assigns(self):
+        self.write("e.py", "from m import Owner\n\n\n"
+                           "def use(o: Owner):\n    return o.missing.run()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Held.run"), ["m.Owner.via_self"])
+
+    def test_a_module_receiver_is_not_an_attribute_read(self):
+        """`os.path.join()` is a module and its attribute, not an object and its field. The
+        receiver has to be a name this file gave a CLASS to."""
+        self.write("f.py", "import os\n\n\n"
+                           "def use():\n    return os.path.join('a', 'b')\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "m.Held.run"), ["m.Owner.via_self"])
+
+
 class TheInterpreterIsAskedWhatAConstructorAndAPropertyRun(Sandbox):
     """Two more places the tool models the interpreter rather than the source.
 

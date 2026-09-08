@@ -6,6 +6,24 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### An attribute on something other than self
+
+`self.db.query()` has resolved for a long time - an attribute the class body assigns, read
+through `self`. `c.db.query()` on a typed `c` did not, though the tool knew what class `c` was
+and knew what `db` holds on that class. The two facts sat in different places: attribute tables
+are built per class while a file is read, and only the ENCLOSING class's was ever in hand.
+
+Each class now carries its own onto its node, so the receiver's class and what its attribute
+holds can be read together, through the bases as well - a field assigned in a parent's
+`__init__` is found from a child.
+
+287 more resolved calls across six repositories, none lost: 128 on pandas, 96 on scrapy, 28 on
+the standard library, and the rest on sqlalchemy, ansible and rich.
+
+The `self` case is protected by ORDER rather than by a test for it: the branch that handles
+`self.x` comes first, so the new one cannot reach it. A condition excluding `self` was written
+first and no mutant could kill it, which is the sign of a guard that is really a comment.
+
 ### Asking the interpreter instead of asserting what it does
 
 Four things this tool models are rules of the language, and for each one Python itself can be
@@ -660,7 +678,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,390 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,398 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
