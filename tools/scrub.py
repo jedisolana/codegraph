@@ -12,11 +12,14 @@ tracks - that being exactly the surface a `git push` publishes - plus every comm
 because a message is published as loudly as a file and cannot be edited afterwards without
 rewriting history.
 
-WHY THE DENY LIST IS HASHED. A list of private words is itself the leak: writing the name of
-an internal host or a private project into a file in the repository publishes the very names
-the file exists to keep out. `deny.txt` therefore holds only sha256 of each lowercased word, and
-`--add WORD` appends a hash without ever writing the word down. The check hashes every token
-in the tree and looks for a match, so the list can live in the open safely.
+WHERE THE DENY LIST LIVES. Not in the repository - in ~/.config/codegraph/deny.txt, or
+wherever CODEGRAPH_DENY points. A list of private words is itself the leak, and it was in
+tools/ for a while on the reasoning that hashing each word was enough. It is not: these are
+short dictionary words with no salt, so they are recovered by guessing and checking rather
+than by reversing, and twelve of them fell to a sixteen-word list in under a second. It still holds only sha256 of each lowercased word, and `--add WORD` appends a hash without
+writing the word down - so an accidentally shared list is not instantly readable and a hit can
+be reported without printing the word into a CI log. That is obfuscation. The protection is
+that the file is not published.
 
     python3 tools/scrub.py              scan the tracked tree; exit 1 on any hit
     python3 tools/scrub.py --history    ...every commit message AND every version of
@@ -35,7 +38,19 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DENY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deny.txt")
+
+# OUTSIDE the repository, and that is the whole point. The list used to live in tools/ with
+# each word stored as a sha256, on the reasoning that a hash is not a word. It is not much
+# else either: these are short dictionary words with no salt, so recovering them is guessing
+# and checking, not reversing. Twelve entries fell to a sixteen-word list in under a second.
+#
+# Hashing still earns its place - an accidentally shared list is not instantly readable, and a
+# hit can be reported without printing the word into a CI log - but it is obfuscation, not
+# protection, and the protection is that the file is not published. Override with
+# CODEGRAPH_DENY for a shared team list somewhere private.
+DENY = os.environ.get("CODEGRAPH_DENY") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "codegraph", "deny.txt")
 
 # The assistant names are NOT written here. An older test in this suite forbids any shipped
 # file from naming one, and the first version of this scanner failed it by spelling them out
@@ -220,6 +235,7 @@ def main(argv):
         if not words:
             sys.exit("--add needs at least one word")
         have = _denied_hashes()
+        os.makedirs(os.path.dirname(DENY) or ".", exist_ok=True)
         with open(DENY, "a", encoding="utf-8") as fh:
             for w in words:
                 h = _hash(w)

@@ -6844,6 +6844,35 @@ class NothingPrivateGetsPublished(unittest.TestCase):
         self.assertIn("scrub.py --history", wf,
                       "the publish workflow must run the history scrub")
 
+    def test_the_deny_list_is_not_in_the_repository(self):
+        """It was, with each word stored as a sha256, on the reasoning that a hash is not a
+        word. It is not much else either: short dictionary words, no salt, so they come back by
+        guessing and checking rather than by reversing - twelve of them fell to a sixteen-word
+        list in under a second, in a file whose own comment said it existed to stop exactly
+        that. Hashing is worth keeping and it is obfuscation; the protection is that the file
+        is not published."""
+        tracked = subprocess.run(["git", "-C", HERE, "ls-files"],
+                                 capture_output=True, text=True, check=True).stdout.split()
+        self.assertNotIn("tools/deny.txt", tracked,
+                         "the deny list is back in the repository")
+        self.assertFalse([p for p in tracked if p.endswith("deny.txt")],
+                         "a deny list is tracked under some other name")
+
+    def test_the_default_location_is_outside_any_checkout(self):
+        self.assertNotIn(os.path.realpath(HERE), os.path.realpath(scrub.DENY),
+                         "the default deny list sits inside the repository")
+
+    def test_a_missing_deny_list_is_not_an_error(self):
+        """A fresh clone has no list, and the pattern rules still have to run."""
+        real = scrub.DENY
+        scrub.DENY = os.path.join(self.dir, "nope", "deny.txt")
+        try:
+            self.assertEqual(scrub._denied_hashes(), set())
+            self.commit("notes.md", "it lives in /home/someone\n")  # scrub: fixture
+            self.assertIn("home path", {lab for _w, _l, lab, _f in scrub.scan(self.dir)})
+        finally:
+            scrub.DENY = real
+
     def test_it_reads_deleted_files_out_of_the_history(self):
         """The hole this nearly shipped with. Deleting a file from the tree does not remove it
         from the history - `git log -p` still prints it and anyone can check out the commit
