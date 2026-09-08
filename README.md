@@ -579,13 +579,22 @@ it usable:
   file types `display.warning(...)` inside every function in it, which is how almost every
   program keeps a logger, a client or a registry. A local assignment or a parameter of the same
   name shadows it, because a function that rebinds the name is talking about something else.
-- **Type inference is one line deep** — `x = Foo()` then `x.method()`, plus annotations, which
-  say it outright: a parameter's, a variable's, and a function's **declared return type**, so
-  `def make() -> Client` types what `c = make()` holds. A container annotation is not its contents,
-  so `Dict[str, Client]` stays a dict. A name rebound to anything the tool cannot name loses its
-  type rather than keeping the old one. Nothing beyond that: no return types, no attributes,
-  and `with Foo() as c` is not assumed to give you a Foo, because `__enter__` may return
-  anything at all.
+- **Type inference reads what the source states, and nothing else.** `x = Foo()` and
+  `x: Foo`; an attribute the class body assigns; a function's return class, whether annotated
+  or plainly returned; a call made on the result of another call; a module-level instance; and
+  a test's parameters, from the pytest fixture that name resolves to. A container annotation is
+  not its contents, so `Dict[str, Client]` stays a dict. A name rebound to anything the tool
+  cannot name loses its type rather than keeping the old one. And `with Foo() as c` is not
+  assumed to give you a Foo, because `__enter__` may return anything at all.
+- **An unannotated parameter is the blind spot that is left.** `def get_facts(module)` gets its
+  value from whoever calls it, and this reads one function at a time. Typing it from what every
+  call site passes was measured rather than assumed: on a clone of ansible, the arguments
+  written out plainly enough to start that induction type 32 parameters and answer **two**
+  calls, so it is not built. The honest answer stays `UNTYPED`, which is what that label is for.
+- **A fixture is read only where pytest would fill one in** — a test function in a `test_*.py`,
+  a `Test*` class's method, or another fixture. The lookup is pytest's own: the module, then
+  `conftest.py` in its directory, then each directory above. A fixture supplied by a plugin is
+  not in the tree and cannot be seen, and a parameter the body rebinds is not answered.
 
 Everything it cannot resolve is labelled rather than guessed, so the limits are visible in the
 output instead of hidden in it.
