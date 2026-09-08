@@ -28,10 +28,13 @@ same-named functions would be worse than no blast radius at all.
   codegraph unused             definitions nothing calls AND nothing names
   codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
-  codegraph ... --saved        add a line saying what the answer replaced: `12 line(s)
-                               here, instead of reading 4 file(s) whole (2,140 lines)`.
+  codegraph shape ... --saved  add a line saying what the answer replaced: `12 line(s)
+                               here, instead of reading 1 file(s) whole (2,140 lines)`.
                                Opt-in, because scripts parse the current output; always on
                                over MCP, where an agent is deciding whether to open them.
+  codegraph callers ... --saved  says instead where the answers are - the files and how
+                               many. A caller list replaces a SEARCH, and measuring it
+                               against whole files nobody would have read flatters the tool.
   codegraph mcp ... changed    the same `changed` question, asked by the agent: hand it a
                                diff and it says what those edits reach. It finds the names,
                                so nothing has to be named first.
@@ -3824,7 +3827,7 @@ def shape(path):
             walk(node.body, depth + 1)
 
     walk(tree.body, 0)
-    return src.count("\n") + 1, lines
+    return _count_lines(src), lines
 
 
 def _demote_test(node_id):
@@ -3996,6 +3999,17 @@ def _shape_target(g, raw):
     return None
 
 
+def _count_lines(text):
+    """How many lines a file has. Counting the newlines and adding one is right for a file whose
+    last line has no newline after it, and wrong for every file an editor saved - which is
+    nearly all of them, so nearly every line count this tool published was one too many. `shape`
+    called a two-line file three lines, and the saving footer took its baseline from the same
+    number, which turned a one-line answer into a saving."""
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
 def _lines_of(paths):
     """(files sized, total lines). A file that cannot be read is left OUT rather than guessed.
 
@@ -4006,7 +4020,7 @@ def _lines_of(paths):
     for p in dict.fromkeys(paths):
         try:
             with open(p, "rb") as fh:
-                total += fh.read().count(b"\n") + 1
+                total += _count_lines(fh.read().decode("utf-8", "replace"))
             n += 1
         except OSError:
             continue
@@ -4565,6 +4579,13 @@ def _main(argv=None):
         else:
             print(f"{a[1]}  -  {len(out)} definition(s) of {total} lines")
             print("\n".join(out) if out else "(no definitions)")
+            # The one query the saving footer was built for, and the one place on the command
+            # line it did not appear: `shape` replaces opening a file you were going to open,
+            # which is the only baseline honest enough to state. It has always been on over
+            # MCP; `--help` described it here and nothing printed it.
+            if saved:
+                note = _saving(len(out) + 1, [target])
+                if note: print(note.strip())
         return 0
     if a[0] == "build":
         try:

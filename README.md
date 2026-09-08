@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6347,
-  "call_sites": 8311,
-  "edge_confidence": {"EXTERNAL": 3207, "INHERITED": 989, "BUILTIN": 742, "SELF-METHOD": 590,
-                      "QUALIFIED": 418, "LOCAL": 220, "UNTYPED": 173, "TYPED": 5,
+  "call_edges": 6394,
+  "call_sites": 8364,
+  "edge_confidence": {"EXTERNAL": 3229, "INHERITED": 998, "BUILTIN": 744, "SELF-METHOD": 595,
+                      "QUALIFIED": 423, "LOCAL": 223, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2225,
-  "could_have_been_resolved": 2398,
+  "resolved_to_one_def": 2247,
+  "could_have_been_resolved": 2421,
   "resolution_rate": 0.928
 }
 ```
@@ -597,6 +597,10 @@ it usable:
   with the right name elsewhere in the tree. It works under a src-layout too: a directory that
   holds packages and is not one itself is where Python imports from, and that is decidable from
   the tree. Two roots offering the same name resolve to neither.
+- **The saving footer only speaks where the baseline is real.** `shape --saved` replaces
+  opening a file you were going to open and says so; `callers --saved` names the files the
+  answers are in instead, because a caller list replaces a *search* and measuring it against
+  whole files nobody would have read flatters the tool.
 - **A module-level instance types the whole module.** `display = Display()` at the top of a
   file types `display.warning(...)` inside every function in it, which is how almost every
   program keeps a logger, a client or a registry. A local assignment or a parameter of the same
@@ -664,7 +668,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,342 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,345 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. A sample of 300 drawn from the file as it
 stood one behavioural change short of this one killed 300, one of them by hanging rather than
@@ -715,7 +719,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 847 more. Grouped, because a list of every one of them stopped being
+The test suite adds 857 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

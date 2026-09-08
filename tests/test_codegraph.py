@@ -8034,6 +8034,91 @@ class TheShapeOfAFileWithoutItsBody(Sandbox):
         self.assertEqual(rc, 0, text)
 
 
+class AFileEndingInANewlineIsNotOneLineLonger(Sandbox):
+    """`shape` reported a two-line file as three, and the saving footer took its baseline from
+    the same count. Nearly every file ends in a newline, so nearly every line count this tool
+    published was one too many.
+
+    Counting the newlines and adding one is right for a file whose last line has no newline
+    after it, and wrong for every file written by an editor that adds one. It is a small error
+    in a number the tool offers as a fact, and the saving footer turns it into a claim: a
+    two-line file read as three makes a one-line answer look like a saving."""
+
+    def test_shape_counts_the_lines_that_are_there(self):
+        self.write("a.py", "def a():\n    return 1\n")
+        self.assertEqual(codegraph.shape(os.path.join(self.dir, "a.py"))[0], 2)
+
+    def test_a_file_without_a_trailing_newline_counts_the_same(self):
+        self.write("b.py", "def a():\n    return 1")
+        self.assertEqual(codegraph.shape(os.path.join(self.dir, "b.py"))[0], 2)
+
+    def test_an_empty_file_is_zero_lines(self):
+        self.write("c.py", "")
+        self.assertEqual(codegraph.shape(os.path.join(self.dir, "c.py"))[0], 0)
+
+    def test_the_saving_baseline_counts_the_same_way(self):
+        self.write("d.py", "x = 1\ny = 2\nz = 3\n")
+        self.assertEqual(codegraph._lines_of([os.path.join(self.dir, "d.py")]), (1, 3))
+
+    def test_a_missing_file_is_left_out_rather_than_guessed(self):
+        self.assertEqual(codegraph._lines_of([os.path.join(self.dir, "gone.py")]), (0, 0))
+
+
+class TheSavingFooterOnTheCommandLine(Sandbox):
+    """The footer exists and is asked for by `--saved`, and on the command line the one query it
+    was designed for did not print it. `shape` replaces opening a file you were going to open -
+    that is the case where the baseline is real - and `codegraph shape big.py --saved` said
+    nothing at all, while `--help` described the sentence it would print.
+
+    The other half of the same mismatch: `--help` promised that sentence for every query, and
+    `callers --saved` deliberately prints something more modest, because a list of callers
+    replaces a SEARCH and measuring it against whole files nobody would have read is a claim
+    that flatters the tool. The behaviour was right and the help was not."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py",
+                   "def load():\n    return 1\n\n\ndef other():\n    return 2\n"
+                   + "# padding\n" * 300)
+        self.write("pkg/app.py",
+                   "from pkg.core import load\n\n\ndef run():\n    return load()\n"
+                   + "# padding\n" * 200)
+        self.graph()
+
+    def run_cli(self, *args):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), *args],
+                           cwd=self.dir, capture_output=True, text=True, timeout=180)
+        return r.stdout
+
+    def test_shape_says_what_it_replaced(self):
+        out = self.run_cli("shape", "pkg/core.py", "--saved")
+        self.assertIn("instead of reading", out)
+        self.assertIn("1 file(s) whole", out)
+
+    def test_shape_without_the_flag_stays_quiet(self):
+        """Opt-in, because scripts parse the current output."""
+        self.assertNotIn("instead of reading", self.run_cli("shape", "pkg/core.py"))
+
+    def test_a_file_smaller_than_the_answer_claims_nothing(self):
+        self.write("pkg/tiny.py", "def a():\n    return 1\n")
+        self.graph()
+        self.assertNotIn("instead of reading", self.run_cli("shape", "pkg/tiny.py", "--saved"))
+
+    def test_callers_states_where_they_live_instead(self):
+        """Not a saving. A list of callers replaces a search, and the baseline for the saving
+        sentence would be files nobody was going to read whole."""
+        out = self.run_cli("callers", "pkg/core.load", "--saved")
+        self.assertIn("result(s), in", out)
+        self.assertNotIn("instead of reading", out)
+
+    def test_the_help_describes_both_of_them(self):
+        out = self.run_cli("--help")
+        self.assertIn("instead of reading", out)
+        self.assertIn("where the answers are", out,
+                      "the help promised a saving line for every query")
+
+
 class WhatTheAnswerSavedYou(Sandbox):
     """codegraph reports its resolution rate - a number about itself. It never reports the
     number a user actually cares about: how much reading this answer replaced.
@@ -8065,10 +8150,14 @@ class WhatTheAnswerSavedYou(Sandbox):
         return replies[-1]["result"]["content"][0]["text"], r
 
     def test_the_shape_of_a_file_says_what_it_replaced(self):
-        with open(os.path.join(self.dir, "pkg/core.py"), "rb") as fh:
-            real = fh.read().count(b"\n") + 1        # counted, not assumed: the first version
-        text, _ = self.call("codegraph_shape", name="pkg/core")   # of this hardcoded 302 and
-        self.assertIn(str(real), text, text[:300])   # the file was 303
+        # Counted independently of the tool, and NOT the way the tool used to count. The first
+        # version of this test hardcoded 302, which was right; it was then "fixed" to compute
+        # `count(b"\n") + 1`, which is 303 for a file ending in a newline - so the test was
+        # made to agree with the bug, and the bug lived until something else tripped over it.
+        with open(os.path.join(self.dir, "pkg/core.py"), encoding="utf-8") as fh:
+            real = len(fh.read().splitlines())
+        text, _ = self.call("codegraph_shape", name="pkg/core")
+        self.assertIn(str(real), text, text[:300])
         self.assertRegex(text.lower(), r"instead of|rather than|whole")
 
     def test_a_list_of_callers_says_which_files_the_answers_are_in(self):

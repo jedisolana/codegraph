@@ -6,6 +6,32 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### The saving footer, on the command line
+
+`--saved` asks for a line saying what the answer replaced, `--help` described the sentence it
+would print, and on the command line the one query it was built for printed nothing. `shape`
+replaces opening a file you were going to open - the only baseline honest enough to state - and
+it had the footer over MCP and not here.
+
+The other half of the mismatch was the help itself. It promised that sentence for every query,
+and `callers --saved` deliberately prints something more modest: which files the answers are
+in. A caller list replaces a SEARCH, and measuring it against whole files nobody would have
+read is a claim that flatters the tool. The behaviour was right and the help was not, so the
+help now describes both.
+
+### A file ending in a newline is not one line longer
+
+`shape` reported a two-line file as three. Counting the newlines and adding one is right for a
+file whose last line has no newline after it, and wrong for every file an editor saved - which
+is nearly all of them, so nearly every line count this tool published was one too many. The
+saving footer took its baseline from the same count, which turned a one-line answer on a
+two-line file into a saving worth stating.
+
+The test that covered it computed the expected number with the same formula. Its own comment
+records that an earlier version hardcoded 302 - the right answer - and was then "fixed" to
+compute 303. The test was made to agree with the bug, and the bug outlived it. It counts
+independently now.
+
 ### A list is as plainly stated as a class
 
 `cmd = []` then `cmd.append('-u')`. The tool reads `c = Client()` and types `c`; a list display
@@ -504,7 +530,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,342 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,345 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 
