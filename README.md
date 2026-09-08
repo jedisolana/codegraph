@@ -296,8 +296,11 @@ app` in the file beside it — was recorded as living in a module that does not 
 was lost, every `@app.route(...)` next to it went unresolved, and a phantom module went into
 the import graph where `deps` could name it. Underneath that, a sub-*package* imported the same
 way bound nothing at all, because a package's id ends in `/__init__` and the test for "does
-that module exist" never matched one: ansible writes that 869 times, and every class inheriting
-through it had lost its base. 1,097 more resolved calls, none lost.
+that module exist" never matched one, so every class inheriting through it had lost its base.
+The two together are 1,097 more resolved calls — 869 on ansible, 226 on pandas, 2 on flask —
+and none lost. They are not split further than that here, because they interact: fixing the
+first is what let the second show through, and 16 answers that looked like losses from the
+first turned out to be the second one waiting underneath.
 
 **The last column also moved because the denominator did, and that is worth being plain
 about.** `UNTYPED` is a claim — the receiver could not be typed, so the target might be yours —

@@ -9770,8 +9770,9 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
 
     def test_the_same_name_in_an_unrelated_module_does_not_win(self):
         """Scoped to the module, not the tree. One file defining a class called `dict` does not
-        make every `{}` in the repository doubtful - a tree-wide test of this cost 811 correct
-        answers on a clone of ansible."""
+        make every `{}` in the repository doubtful. A tree-wide test of this is measurably
+        worse - 35 fewer correct BUILTIN labels on a clone of ansible - but the reason to scope
+        it is that the tree-wide answer is wrong, not that the gap is large."""
         self.write("mine.py", "class dict:\n    def get(self, k):\n        return k\n")
         self.write("i2.py", "def go(k):\n    env = {}\n    return env.get(k)\n")
         e = self.edge("get", "i2.go")
@@ -9896,7 +9897,7 @@ class FromDotImportIsNotAlwaysASubmodule(Sandbox):
         that module exist" never matched one. `from .. import _profiles`, where `_profiles` is a
         package, bound nothing at all, and every class inheriting through it lost its base.
 
-        Ansible writes this 869 times."""
+        Fixing it is 869 more resolved calls on a clone of ansible."""
         self.write("pkg/sub/__init__.py",
                    "class Encoder:\n    def encode(self):\n        return 1\n")
         # A decoy of the same name elsewhere, so a tree-wide "only one class answers to that

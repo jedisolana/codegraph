@@ -19,9 +19,12 @@ Nothing is resolved by this - a builtin's method is not in your tree, which is w
 always meant. Three things keep it honest. The interpreter is asked whether the method really
 belongs to that type, so `config = 'text'` then `config.dumps(1)` - broken code - is not called
 a builtin. A module that can see its own `dict` or `list`, defined there or imported into it,
-takes the name back. And that check is scoped to the module rather than the tree: a first
-version asked whether the whole repository defined anything of that name and cost 811 correct
-answers on ansible, because one file has a function called `set`.
+takes the name back. And that check is scoped to the module rather than the
+tree, because one file defining a function called `set` should not make every `set()` in the
+repository doubtful. A first version asked the whole repository and is measurably worse: 35
+fewer correct BUILTIN labels on ansible as the file stands. It was a much larger difference when
+first measured, before annotations were read as well — the reason to scope it is that a
+tree-wide answer is wrong, not that the gap is big.
 
 An annotation says the same thing and was read as neither: `rows: list`, `rows: list[str]`,
 `t.List[str]`, or a `-> dict` on a function one call away. A subscript IS that container here,
@@ -63,10 +66,12 @@ candidate, kept if a module of that id really exists. Both branches do now.
 Underneath it, a second one. A sub-*package* imported that way bound nothing at all: a package's
 id ends in `/__init__`, and the test for "does that module exist" compared against the bare
 path, which never matches one. `from .. import _profiles` bound no module, so every class
-inheriting through it lost its base - ansible writes that shape 869 times, and 16 answers that
-looked like losses from the first fix were this second one showing through.
+inheriting through it lost its base, and 16 answers that looked like losses from the first fix
+turned out to be this second one waiting underneath.
 
-1,097 more resolved calls across the three test repositories, none lost.
+1,097 more resolved calls across the three test repositories - 869 on ansible, 226 on pandas,
+2 on flask - and none lost. The two halves are not split further than that, because fixing the
+first is what let the second show through.
 
 A third edit went in with these and came back out. It looked right - the same normalisation
 applied to the other table that carries submodule candidates - and changed nothing on any of
