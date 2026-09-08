@@ -8360,21 +8360,47 @@ class TheServerReReadTheGraphEveryTime(Sandbox):
         return [m["result"]["content"][0]["text"] for m in out if m.get("id", 0) > 1], r
 
     def test_the_graph_is_parsed_once_for_many_questions(self):
-        reads = []
-        real = codegraph.load
+        """19MB of JSON, parsed again for every question. A command pays that once and exits,
+        which is why it was never worth noticing; a server is the whole point of the door."""
+        parses = []
+        real_load = codegraph.load
 
         def counted(*a, **k):
-            reads.append(1)
-            return real(*a, **k)
+            parses.append(1)
+            return real_load(*a, **k)
 
+        codegraph._SERVED = None
         codegraph.load = counted
         try:
             codegraph._mcp_call("codegraph_callers", {"name": "load"})
             codegraph._mcp_call("codegraph_callers", {"name": "run"})
             codegraph._mcp_call("codegraph_where", {"name": "load"})
         finally:
-            codegraph.load = real
-        self.assertEqual(len(reads), 3, "load is still called per question")
+            codegraph.load = real_load
+            codegraph._SERVED = None
+        self.assertEqual(len(parses), 1, f"the graph was read {len(parses)} times for 3 questions")
+
+    def test_but_the_freshness_check_still_runs_every_time(self):
+        """What must NOT be cached. The code changes under the agent constantly - that is the
+        entire reason it is asking - so the parse is skipped only while what it parsed is still
+        current, and deciding that is done again on every question."""
+        checks = []
+        real_stale = codegraph._is_stale
+
+        def counted(g):
+            checks.append(1)
+            return real_stale(g)
+
+        codegraph._SERVED = None
+        codegraph._is_stale = counted
+        try:
+            codegraph._mcp_call("codegraph_callers", {"name": "load"})
+            codegraph._mcp_call("codegraph_callers", {"name": "run"})
+            codegraph._mcp_call("codegraph_where", {"name": "load"})
+        finally:
+            codegraph._is_stale = real_stale
+            codegraph._SERVED = None
+        self.assertGreaterEqual(len(checks), 3, "freshness was decided once and reused")
 
     def test_an_edit_between_questions_is_seen(self):
         """The one that decides whether any of this is allowed. The code changes under the

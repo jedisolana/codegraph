@@ -3243,6 +3243,27 @@ def _mcp_result(text):
     return {"content": [{"type": "text", "text": text}]}
 
 
+_SERVED = None                   # the graph this server process has already read
+
+
+def _served():
+    """The graph, parsed once for the life of the server rather than once per question.
+
+    19MB of JSON on a clone of ansible, 86ms to read, against an answer that costs 2.7ms. A
+    command pays that once and exits, which is why it was never worth noticing; a server is the
+    whole point of the door, and an agent asking twenty questions paid it twenty times.
+
+    What is NOT cached is whether it is still true. The code changes under the agent constantly
+    - that is the entire reason it is asking - so freshness is decided again on every question,
+    and the parse is skipped only while what it parsed is still current. When it is not,
+    `load` rebuilds and the new graph is what gets kept.
+    """
+    global _SERVED
+    if _SERVED is None or _is_stale(_SERVED):
+        _SERVED = load()
+    return _SERVED
+
+
 def _mcp_call(tool, args):
     """Run one tool and return its MCP result.
 
@@ -3253,7 +3274,7 @@ def _mcp_call(tool, args):
     if tool not in MCP_TOOLS:
         return None
     try:
-        g = load()
+        g = _served()
     except SystemExit as e:
         # `load` exits the process when there is no graph. That is right for a command and
         # fatal for a server, and the message it exits with is the one the agent needs.
