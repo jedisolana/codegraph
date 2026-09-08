@@ -35,6 +35,9 @@ same-named functions would be worse than no blast radius at all.
   codegraph shape <file>       every signature in a file and its line number, no bodies -
                                3,600 lines of source as 110 lines of what it offers
   codegraph mcp                serve the graph to a coding agent over MCP (stdin/stdout).
+                               Every answer carries a WARNING when a file in the tree could
+                               not be parsed, because an incomplete answer that looks
+                               complete is the failure this tool exists to prevent.
                                The same answers, asked by the agent instead of by you:
                                callers, calls, blast, sites, where, find, path.
   codegraph --selftest         32 ground-truth checks, several of them red-first
@@ -3161,6 +3164,27 @@ def _files_for(g, ids):
     return out
 
 
+def _unread_warning(g):
+    """What this answer could not see.
+
+    The graph is never STALE - every query rebuilds it if the tree moved. The gap is next door
+    and worse: a file that will not parse is skipped, the build records it, the command line
+    prints `skipped ...` to stderr, and over MCP it vanished entirely. So an agent halfway
+    through an edit asks who calls a function, gets a complete-looking list, and never learns
+    that one file was not read - which is exactly where the caller it is about to break would be.
+
+    It matters MOST when the answer is empty: "no callers" and "no callers, and one file was
+    not read" are different facts, and somebody acts on the first by deleting something.
+    """
+    bad = list(g.get("unreadable") or [])
+    if not bad:
+        return ""                                    # on every answer it would be wallpaper
+    shown = [str(b).split(":")[0] for b in bad[:3]]
+    more = f", and {len(bad) - 3} more" if len(bad) > 3 else ""
+    return (f"\n\nWARNING: {len(bad)} file(s) in this tree could not be parsed and were not "
+            f"read, so this answer may be incomplete: {', '.join(shown)}{more}")
+
+
 def _saving(answer_lines, paths):
     """One line saying what this replaced, with its baseline written down.
 
@@ -3216,7 +3240,7 @@ def _mcp_call(tool, args):
             return _mcp_result(f"cannot read {raw}: {e}")
         head = f"{raw}  -  {len(out)} definition(s) of {total} lines"
         body = "\n".join([head] + out) if out else head + "\n(no definitions)"
-        return _mcp_result(body + _saving(len(out) + 1, [found]))
+        return _mcp_result(body + _saving(len(out) + 1, [found]) + _unread_warning(g))
     if tool == "codegraph_find":
         found = find(g, raw)
         return _mcp_result("\n".join(found) or f"nothing matching {raw!r}")
@@ -3228,7 +3252,8 @@ def _mcp_call(tool, args):
     if kind == "unknown":
         near = find(g, raw)[:5]
         hint = ("  Did you mean: " + ", ".join(near)) if near else ""
-        return _mcp_result(f"no symbol named {raw!r} in this graph.{hint}")
+        return _mcp_result(f"no symbol named {raw!r} in this graph.{hint}"
+                           + _unread_warning(g))
     if kind == "called":
         return _mcp_result(f"{raw!r} is called here but defined outside this tree "
                            "(the standard library, or a package you installed), so this graph "
@@ -3243,10 +3268,11 @@ def _mcp_call(tool, args):
     target = hits[0]
     out = MCP_TOOLS[tool][2](g, target, raw)
     if not out:
-        return _mcp_result(f"(nothing for {target})")
+        return _mcp_result(f"(nothing for {target})" + _unread_warning(g))
     # The ids in the answer name the files somebody would otherwise have opened to learn the
     # same thing. That is the baseline, and it is the honest one to compare against.
-    return _mcp_result("\n".join(out) + _saving(len(out), _files_for(g, out)))
+    return _mcp_result("\n".join(out) + _saving(len(out), _files_for(g, out))
+                       + _unread_warning(g))
 
 
 def _mcp_serve(stream_in=None, stream_out=None):

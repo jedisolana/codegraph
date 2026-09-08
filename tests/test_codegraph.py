@@ -8034,7 +8034,7 @@ class WhatTheAnswerSavedYou(Sandbox):
     def test_the_shape_of_a_file_says_what_it_replaced(self):
         with open(os.path.join(self.dir, "pkg/core.py"), "rb") as fh:
             real = fh.read().count(b"\n") + 1        # counted, not assumed: the first version
-        text, r = self.call("codegraph_shape", name="pkg/core")   # of this hardcoded 302 and
+        text, _ = self.call("codegraph_shape", name="pkg/core")   # of this hardcoded 302 and
         self.assertIn(str(real), text, text[:300])   # the file was 303
         self.assertRegex(text.lower(), r"instead of|rather than|whole")
 
@@ -8064,7 +8064,7 @@ class WhatTheAnswerSavedYou(Sandbox):
         """A graph can outlive the files it names. An estimate built on a file that is gone is
         a wrong number, and a smaller baseline is the honest answer."""
         os.remove(os.path.join(self.dir, "pkg/core.py"))
-        text, r = self.call("codegraph_where", name="run")
+        _, r = self.call("codegraph_where", name="run")
         self.assertNotIn("Traceback", r.stderr, r.stderr[-300:])
 
     # ------------------------------------------------------------------------- the control
@@ -8081,3 +8081,76 @@ class WhatTheAnswerSavedYou(Sandbox):
         with contextlib.redirect_stdout(out):
             codegraph._main(["callers", "load", "--saved"])
         self.assertRegex(out.getvalue().lower(), r"instead of|whole")
+
+
+class AnAnswerThatCouldNotSeeEverything(Sandbox):
+    """The graph is never stale - every query rebuilds it if the tree moved, so `is this
+    current?` already has an answer and a command to ask it would be decoration.
+
+    The real gap is next door, and it is worse: a file that will not PARSE is skipped. The
+    build records it, the command line prints `skipped ...` to stderr, and over MCP it vanishes
+    entirely. So an agent halfway through an edit asks who calls a function, gets a complete
+    looking list, and never learns that one file in the tree was not read - which is exactly
+    where the caller it is about to break would be.
+
+    An incomplete answer that looks complete is the failure this tool exists to prevent."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n")
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n")
+        self.graph()
+
+    def call(self, tool="codegraph_callers", **args):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": args or {"name": "load"}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def break_one(self, rel="pkg/broken.py"):
+        self.write(rel, "def half_edited(:\n    return load()\n")
+
+    def test_the_agent_is_told_a_file_could_not_be_read(self):
+        self.break_one()
+        text, _ = self.call()
+        self.assertIn("broken.py", text, text[:300])
+
+    def test_and_told_what_that_means_for_the_answer(self):
+        """A filename on its own is a curiosity. What matters is that the list it just read
+        may be missing something."""
+        self.break_one()
+        text, _ = self.call()
+        self.assertRegex(text.lower(), r"incomplete|may be missing|not read")
+
+    def test_it_matters_most_when_the_answer_is_empty(self):
+        """`no callers` and `no callers, and one file was not read` are different facts, and
+        an agent acts on the first by deleting something."""
+        self.break_one()
+        text, _ = self.call(name="run")
+        self.assertIn("broken.py", text, text[:300])
+
+    def test_the_answer_is_still_the_first_thing(self):
+        self.break_one()
+        text, _ = self.call()
+        self.assertTrue(text.splitlines()[0].startswith("pkg/app.run"), text[:200])
+
+    def test_many_unreadable_files_do_not_swamp_the_answer(self):
+        """Twenty names above a one-line answer is a different kind of unusable."""
+        for i in range(20):
+            self.break_one(f"pkg/broken{i}.py")
+        text, _ = self.call()
+        self.assertLess(len(text.splitlines()), 12, text)
+        self.assertIn("20", text)
+
+    # ------------------------------------------------------------------------- the control
+    def test_a_tree_it_read_completely_says_nothing(self):
+        """If it appears on every answer it is wallpaper, and the one that matters gets
+        skipped with the rest."""
+        text, _ = self.call()
+        self.assertNotRegex(text.lower(), r"could not|incomplete|not read")
