@@ -3388,7 +3388,7 @@ def _mcp_serve(stream_in=None, stream_out=None):
             params = msg.get("params") or {}
             try:
                 got = _mcp_call(params.get("name"), params.get("arguments") or {})
-            except Exception as e:                   # noqa: BLE001 - a server outlives its bugs
+            except Exception as e:                   # a server outlives its own bugs
                 # One bad answer must cost ONE answer. An exception used to escape this loop
                 # and end the process mid-session, so the next question got no reply at all -
                 # and an agent cannot tell a dead server from a slow one. It found out the
