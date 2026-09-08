@@ -3538,6 +3538,13 @@ class NothingShippedNamesItsAuthor(unittest.TestCase):
                 # reported a count between 1900 and 2099. `"EXTERNAL": 1967` was the next one.
                 if fenced:
                     continue
+                if "MCP_PROTOCOL" in line:
+                    # The one exception, and deliberately the narrowest one that works: the MCP
+                    # spec identifies its versions with strings shaped like dates. That is a
+                    # fact about the protocol, not about when this was written, and it is
+                    # allowed only on the line that defines the constant - so smuggling a real
+                    # date past this rule means naming it MCP_PROTOCOL, in public, on purpose.
+                    continue
                 self.assertIsNone(year.search(line),
                                   f"{os.path.relpath(full, HERE)}:{n} carries a year: {line.strip()[:70]}")
 
@@ -7692,3 +7699,167 @@ class ADeclaredReturnTypeIsTheSourceSayingSo(Sandbox):
                       "the history scrub must run on every push, not only on a release")
         self.assertIn("fetch-depth: 0", wf,
                       "it reads every commit, so a shallow checkout would make it pass blind")
+
+
+class ADoorAnAgentCanKnockOn(Sandbox):
+    """Everything this tool knows, an agent has to shell out for and then parse prose.
+
+    That is the difference between a tool a person runs a few times a day and one an agent
+    leans on constantly: the agent needs a door, and the door is MCP - line-delimited JSON-RPC
+    over stdin and stdout. No new dependency, no network, no daemon; the same graph, asked a
+    different way.
+
+    Written before the server existed, so every one of these was red first."""
+
+    def rpc(self, *messages, cwd=None):
+        """Speak to the server the way a client does: one JSON object per line, replies the
+        same. Returns the parsed replies, in order."""
+        payload = "".join(json.dumps(m) + "\n" for m in messages)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=cwd or self.dir, timeout=120)
+        out = []
+        for line in r.stdout.splitlines():
+            if line.strip():
+                out.append(json.loads(line))
+        return out, r
+
+    def build_a_tree(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py", "def load():\n    return 1\n\n\ndef save(x):\n    return x\n")
+        self.write("pkg/app.py", "from pkg.core import load\n\n\ndef run():\n    return load()\n")
+        # `build` writes the graph itself; the server is a separate process reading it from
+        # disk, which is exactly how a real client will meet it.
+        return self.graph()
+
+    # Taken from the module rather than written out again, so the protocol version lives in
+    # exactly one place and the no-dates rule has one line to make an exception for.
+    HELLO = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": codegraph.MCP_PROTOCOL, "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"}}}
+
+    # ------------------------------------------------------------------ it speaks the protocol
+    def test_it_answers_initialize(self):
+        self.build_a_tree()
+        replies, r = self.rpc(self.HELLO)
+        self.assertTrue(replies, r.stderr[-400:])
+        self.assertEqual(replies[0]["id"], 1)
+        self.assertIn("serverInfo", replies[0]["result"])
+        self.assertIn("protocolVersion", replies[0]["result"])
+
+    def test_it_lists_its_tools(self):
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        names = [t["name"] for t in replies[-1]["result"]["tools"]]
+        self.assertIn("codegraph_callers", names)
+        self.assertIn("codegraph_blast", names)
+
+    def test_every_tool_says_what_it_takes(self):
+        """A tool with no schema is a tool an agent guesses at, and a guessed argument is a
+        failed call the model then tries to reason its way out of."""
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        for t in replies[-1]["result"]["tools"]:
+            with self.subTest(tool=t["name"]):
+                self.assertTrue(t.get("description"), t["name"])
+                self.assertEqual(t["inputSchema"]["type"], "object")
+
+    # ------------------------------------------------------------------------ it answers
+    def test_it_answers_who_calls_this(self):
+        self.build_a_tree()
+        replies, r = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                               "params": {"name": "codegraph_callers",
+                                          "arguments": {"name": "load"}}})
+        body = json.dumps(replies[-1])
+        self.assertIn("pkg/app.run", body, r.stderr[-400:])
+
+    def test_it_answers_what_would_break(self):
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                               "params": {"name": "codegraph_blast",
+                                          "arguments": {"name": "load"}}})
+        self.assertIn("pkg/app.run", json.dumps(replies[-1]))
+
+    def test_an_answer_is_text_an_agent_can_read(self):
+        """MCP hands content back as typed parts. A raw Python repr in there is a thing the
+        model has to decode before it can use it."""
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                               "params": {"name": "codegraph_where",
+                                          "arguments": {"name": "save"}}})
+        content = replies[-1]["result"]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertIn("core.py", content[0]["text"])
+
+    # ------------------------------------------------------------- it fails like a server
+    def test_an_unknown_method_is_an_error_not_a_crash(self):
+        self.build_a_tree()
+        replies, r = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 6, "method": "does/not/exist"})
+        self.assertIn("error", replies[-1])
+        self.assertEqual(r.returncode, 0, "a bad request must not take the server down")
+
+    def test_an_unknown_tool_is_an_error_not_a_crash(self):
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                               "params": {"name": "codegraph_nonsense", "arguments": {}}})
+        self.assertIn("error", replies[-1])
+
+    def test_a_broken_line_does_not_stop_the_next_one(self):
+        """A client that writes half a line, or a stray newline, must not end the session.
+        The agent has no way to tell a crashed server from a slow one."""
+        payload = "not json at all\n" + json.dumps(self.HELLO) + "\n"
+        self.build_a_tree()
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        self.assertTrue(any(m.get("id") == 1 for m in replies), r.stdout[-300:])
+
+    def test_a_notification_gets_no_reply(self):
+        """A JSON-RPC message with no id is a notification. Answering one is a protocol error
+        and some clients hang waiting for a response they will never match."""
+        self.build_a_tree()
+        replies, _ = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.assertEqual([m.get("id") for m in replies], [1])
+
+    def test_a_missing_graph_is_an_answer_not_a_traceback(self):
+        """The commonest first run: an agent asks before anything has been built."""
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        replies, r = self.rpc(self.HELLO,
+                              {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                               "params": {"name": "codegraph_callers",
+                                          "arguments": {"name": "load"}}}, cwd=empty)
+        self.assertEqual(r.returncode, 0)
+        said = json.dumps(replies[-1]).lower()
+        self.assertIn("build", said, said[:300])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_it_writes_nothing(self):
+        """It reports and changes nothing - the same promise the CLI makes."""
+        self.build_a_tree()
+        before = {p: os.stat(os.path.join(dp, p)).st_mtime
+                  for dp, _, fs in os.walk(self.dir) for p in fs}
+        self.rpc(self.HELLO, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                              "params": {"name": "codegraph_blast",
+                                         "arguments": {"name": "load"}}})
+        after = {p: os.stat(os.path.join(dp, p)).st_mtime
+                 for dp, _, fs in os.walk(self.dir) for p in fs}
+        self.assertEqual(before, after)
+
+    def test_nothing_but_json_goes_to_stdout(self):
+        """stdout IS the protocol. One stray print and the client cannot parse the stream."""
+        self.build_a_tree()
+        _, r = self.rpc(self.HELLO,
+                        {"jsonrpc": "2.0", "id": 10, "method": "tools/list"})
+        for line in r.stdout.splitlines():
+            if line.strip():
+                json.loads(line)                     # raises if anything else was printed

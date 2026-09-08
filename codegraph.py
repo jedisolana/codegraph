@@ -28,6 +28,9 @@ same-named functions would be worse than no blast radius at all.
   codegraph unused             definitions nothing calls AND nothing names
   codegraph unused --all       ...plus the ones reached some other way, each with why
   codegraph stats              counts, resolution rate, never-called definitions
+  codegraph mcp                serve the graph to a coding agent over MCP (stdin/stdout).
+                               The same answers, asked by the agent instead of by you:
+                               callers, calls, blast, sites, where, find, path.
   codegraph --selftest         32 ground-truth checks, several of them red-first
   codegraph --help             this text
   --json                       any query, answered as JSON instead of prose - including
@@ -2994,6 +2997,160 @@ def _emit(obj):
     print(json.dumps(obj, indent=2))
 
 
+# ------------------------------------------------------------------ a door an agent can knock on
+#
+# Everything above this line is a thing a PERSON runs. An agent has to shell out for it and then
+# parse prose, which is the difference between a tool used a few times a day and one leaned on
+# constantly.
+#
+# MCP is the door: line-delimited JSON-RPC over stdin and stdout. No dependency, no network, no
+# daemon - the same graph, asked a different way. stdout IS the protocol, so nothing here may
+# print anything that is not a reply.
+
+# The MCP handshake carries a protocol version, and the spec's identifiers are shaped like
+# dates. This one is not a date about this repository - nothing here was written on it, and it
+# changes when the protocol does, not when somebody sits down at a keyboard. It lives in one
+# named constant so the no-dates rule can make a single narrow exception it can see, rather
+# than a general one it cannot.
+MCP_PROTOCOL = "2024-11-05"  # scrub: fixture -- a protocol identifier, not a date
+
+MCP_TOOLS = {
+    "codegraph_callers": ("who calls this function or class, by exact id",
+                          "name", lambda g, t, _: callers_of(g, t)),
+    "codegraph_calls": ("what this function calls",
+                        "name", lambda g, t, _: calls_from(g, t)),
+    "codegraph_blast": ("everything that could break if you change this - transitive callers, "
+                        "not just direct ones. Ask this BEFORE editing a shared function",
+                        "name", lambda g, t, _: blast_radius(g, t)),
+    "codegraph_sites": ("every call site as file:line - all of them, not a sample",
+                        "name", lambda g, t, _: [f"{loc}  {via}" for loc, via in sites(g, t)]),
+    "codegraph_where": ("where a symbol is defined, as file:line",
+                        "name", lambda g, t, _: [f"{i}  {loc}" for i, loc in where(g, t)]),
+    "codegraph_find": ("fuzzy search for a symbol when you only know part of the name",
+                       "name", lambda g, _t, raw: find(g, raw)),
+    "codegraph_path": ("a call path connecting two functions, if one exists",
+                       "name", None),
+}
+
+
+def _mcp_result(text):
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def _mcp_call(tool, args):
+    """Run one tool and return its MCP result.
+
+    Every failure comes back as TEXT rather than a protocol error, because a protocol error is
+    something the agent reports to the user and stops on, and "no graph yet, run build" is
+    something it can act on by itself.
+    """
+    if tool not in MCP_TOOLS:
+        return None
+    try:
+        g = load()
+    except SystemExit as e:
+        # `load` exits the process when there is no graph. That is right for a command and
+        # fatal for a server, and the message it exits with is the one the agent needs.
+        return _mcp_result(str(e) or "no graph yet - run: codegraph build <path>")
+    raw = (args.get("name") or args.get("query") or "").strip()
+    if not raw:
+        return _mcp_result("this tool needs a `name`")
+    if tool == "codegraph_path":
+        to = (args.get("to") or "").strip()
+        if not to:
+            return _mcp_result("codegraph_path needs `name` and `to`")
+        got = path(g, raw, to)
+        return _mcp_result(" -> ".join(got) if got else f"no call path from {raw} to {to}")
+    if tool == "codegraph_find":
+        found = find(g, raw)
+        return _mcp_result("\n".join(found) or f"nothing matching {raw!r}")
+    # `_describe` is the CLI's own answer to "how does this graph know that name", and the
+    # three ways it can fail are three different things to tell an agent. Never "(none)": an
+    # agent that reads an empty answer for a misspelled name concludes nothing depends on it,
+    # which is the exact wrong conclusion and the one this tool exists to prevent.
+    kind, hits = _describe(g, raw)
+    if kind == "unknown":
+        near = find(g, raw)[:5]
+        hint = ("  Did you mean: " + ", ".join(near)) if near else ""
+        return _mcp_result(f"no symbol named {raw!r} in this graph.{hint}")
+    if kind == "called":
+        return _mcp_result(f"{raw!r} is called here but defined outside this tree "
+                           "(the standard library, or a package you installed), so this graph "
+                           "has nothing to say about its callers.")
+    if kind == "module":
+        return _mcp_result(f"{raw!r} is a module, not a function or a class. "
+                           "For a module ask about its imports instead.")
+    if len(hits) > 1:
+        return _mcp_result(f"{raw!r} is ambiguous - it names {len(hits)} definitions, and "
+                           "merging them would overstate the answer. Ask again with one of "
+                           "these exact ids:\n" + "\n".join(hits))
+    target = hits[0]
+    out = MCP_TOOLS[tool][2](g, target, raw)
+    return _mcp_result("\n".join(out) if out else f"(nothing for {target})")
+
+
+def _mcp_serve(stream_in=None, stream_out=None):
+    """Speak MCP until stdin closes.
+
+    A malformed line is skipped rather than fatal: a client that writes half a line must not
+    end the session, because the agent has no way to tell a crashed server from a slow one.
+    """
+    stream_in = stream_in or sys.stdin
+    stream_out = stream_out or sys.stdout
+
+    def send(msg):
+        stream_out.write(json.dumps(msg) + "\n")
+        stream_out.flush()
+
+    tools = [{"name": n,
+              "description": d,
+              "inputSchema": {"type": "object",
+                              "properties": ({"name": {"type": "string"},
+                                              "to": {"type": "string"}}
+                                             if n == "codegraph_path"
+                                             else {"name": {"type": "string"}}),
+                              "required": (["name", "to"] if n == "codegraph_path"
+                                           else ["name"])}}
+             for n, (d, _arg, _fn) in MCP_TOOLS.items()]
+
+    for line in stream_in:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except (ValueError, TypeError):
+            continue                                 # not our sentence; wait for the next one
+        if not isinstance(msg, dict):
+            continue
+        mid = msg.get("id")
+        method = msg.get("method") or ""
+        if mid is None:
+            continue                                 # a notification takes no reply, and
+                                                     # answering one hangs some clients
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": mid,
+                  "result": {"protocolVersion": MCP_PROTOCOL,
+                             "capabilities": {"tools": {}},
+                             "serverInfo": {"name": "codegraph",
+                                            "version": str(_VERSION)}}})
+        elif method == "tools/list":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            got = _mcp_call(params.get("name"), params.get("arguments") or {})
+            if got is None:
+                send({"jsonrpc": "2.0", "id": mid,
+                      "error": {"code": -32602,
+                                "message": f"no such tool: {params.get('name')!r}"}})
+            else:
+                send({"jsonrpc": "2.0", "id": mid, "result": got})
+        else:
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32601, "message": f"unknown method: {method!r}"}})
+    return 0
+
+
 def _one_target(g, name, as_json=False):
     """(target, exit code). The target is None once the problem has been explained.
 
@@ -3114,6 +3271,7 @@ def _main(argv=None):
         print(__doc__)
         return 0
     if a[0] == "--selftest": return _selftest()
+    if a[0] == "mcp": return _mcp_serve()
     if a[0] == "build":
         try:
             g = build(a[1:] or None)
