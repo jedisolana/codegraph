@@ -338,6 +338,7 @@ def _defs_and_calls(path, mod):
             # Only VALUES, never the module's own defs: a top-level `class Parent` is the
             # definition Parent.make() is looking for, not a shadow of it.
             self.bound = [(_bound_names(tree)[0], set())]       # per-scope (values, defs) bound locally, which SHADOW an imported module or class of the same name
+            self.rets = []                                      # per-function: the class each `return` hands back, so a function with no annotation still says what it returns
 
         def _qual(self, name):
             return ".".join(self.scope + [name])
@@ -569,8 +570,44 @@ def _defs_and_calls(path, mod):
             self.ctypes.append({})
             self.vtypes.append({**outer, **seeded})             # calls inside this body belong to qid; its own var-type scope
             self.bound.append(shadowed)
+            self.rets.append([])
             for c in node.body: self.visit(c)
+            got = self.rets.pop()
+            # WHAT THE BODY RETURNS, when there is no annotation to read. `def make(): return
+            # Client()` was unresolved and `def make() -> Client:` was not, on the same
+            # function - but the annotation was never the evidence, the body was, and this is
+            # the reading already trusted one scope down where `c = Client()` types `c`.
+            #
+            # Every return has to agree. Two classes is not an answer, and one readable return
+            # beside one this file cannot name is not either: the caller can get either, so
+            # answering with the readable one is wrong on the other path. `return None` is the
+            # exception, because a name cannot be called through None - the same reason
+            # `Optional[Client]` is read as a Client.
+            #
+            # Not for a generator: `def rows(): yield Row()` hands back a generator object, and
+            # typing the caller's variable as Row would put every loop's calls onto Row. Not
+            # for an `async def` either - without a matching read of `await`, its caller holds
+            # a coroutine.
+            if (not rt and got and not isinstance(node, ast.AsyncFunctionDef)
+                    and not _yields(node)):
+                seen = {c for c in got if c != _RET_NONE}
+                if len(seen) == 1 and None not in seen:
+                    d["returns"] = seen.pop()
             self.bound.pop(); self.vtypes.pop(); self.ctypes.pop(); self.owner.pop(); self.scope.pop()
+
+        def visit_Return(self, node):
+            if self.rets: self.rets[-1].append(self._returned_class(node.value))
+            self.generic_visit(node)
+
+        def _returned_class(self, v):
+            """The class name a returned expression has, `_RET_NONE` for a return that hands
+            back nothing, and None for one this file cannot read."""
+            if v is None or (isinstance(v, ast.Constant) and v.value is None):
+                return _RET_NONE
+            cls = _called_class(v)
+            if cls: return cls
+            if isinstance(v, ast.Name): return self.vtypes[-1].get(v.id)
+            return None
 
         def _comp(self, node):
             """A comprehension shadows INSIDE itself, and nowhere else. The first iterable is
@@ -932,6 +969,13 @@ def _defs_and_calls(path, mod):
                     # three lines called it. Found by running this tool over somebody else's
                     # codebase; the standard library writes the shape 944 times.
                     edge["recv_type"] = _called_class(fn.value)
+                    # ...and the same name carried as a FUNCTION, read only if that class
+                    # reading turns out to name nothing. `make().go()` and `x = make()` then
+                    # `x.go()` are one expression written two ways, and only the two-line form
+                    # was ever answered: the one-liner's receiver was read as a class name and
+                    # never as a function whose return class is already known. 13,321 calls in
+                    # a clone of pandas are written on a receiver that is a call.
+                    edge["recv_call"] = _returning_call(fn.value)
                 elif (isinstance(fn, ast.Attribute) and _is_self_attr(fn.value)
                       and self.atypes[-1].get(fn.value.attr)):
                     # self.db.query() - a collaborator held on the instance, which is how most
@@ -1193,6 +1237,21 @@ def _self_attr_types(cls_node):
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             walk(stmt)
     return out
+
+
+_RET_NONE = object()          # a return that hands back nothing: it disqualifies nothing
+
+
+def _yields(node):
+    """Does this function body contain a `yield` of its OWN - not one belonging to a function
+    written inside it. A generator returns a generator object, so its returns say nothing about
+    what the caller holds."""
+    for c in ast.iter_child_nodes(node):
+        if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(c, (ast.Yield, ast.YieldFrom)) or _yields(c):
+            return True
+    return False
 
 
 def _called_class(value):

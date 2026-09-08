@@ -4,6 +4,34 @@
 
 First release.
 
+### A function says what it returns without annotating it
+
+`def make(): return Client()` then `c = make(); c.get()` — unresolved, while the identical
+function with `-> Client` on it resolved. The annotation was never the evidence. The body is,
+and that is the reading already trusted one scope down, where `c = Client()` types `c`.
+
+A function's return class is now read from its returns when every one of them agrees, and
+otherwise not at all. Two classes is not an answer; one readable return beside one this file
+cannot name is not an answer either, because the caller can get either and the readable one
+would be wrong on the other path. `return None` is the exception — a name cannot be called
+through None, the same reason `Optional[Client]` is already read as a Client. Not for a
+generator, which hands back a generator object rather than what it yields, and not for an
+`async def`, whose caller holds a coroutine until `await` is read too.
+
+### A method called on what a function returned
+
+`make().go()`. The two-line form — `x = make()` then `x.go()` — resolved, and the one-liner
+never could: a receiver that is a call had its name read only as a CLASS, which is why
+`Leg(100).payoff()` worked and `make().go()` did not, on the identical expression shape. The
+same name is now carried as a function too, read only when the class reading names nothing,
+and answered by the code that already answers the two-line form. 13,321 calls in a clone of
+pandas are written on a receiver that is a call.
+
+Together the two are 681 more resolved calls on pandas, 101 on ansible and 4 on flask. Every
+call edge was compared against the previous build: none was lost. The first comparison said 80
+were, which was a dictionary keyed on `(file, callee, line)` over 22,443 call sites that share
+one — the tool was right and the measurement was not.
+
 ### An imported singleton keeps its type
 
 `from .globals import display`, then `display.warn()`. The type was known one module up, where
@@ -230,7 +258,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,183 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,199 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

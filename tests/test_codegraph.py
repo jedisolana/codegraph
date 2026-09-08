@@ -1567,10 +1567,11 @@ class ImpactSaysWhatItCouldNotResolve(Sandbox):
     labelled honestly; the ANSWER was false reassurance, which is the one thing a pre-edit view
     must never give.
 
-    The fixture used to be `Engine().start()`, which is now resolved outright - the class is
-    written at the call site and reading it is no longer optional. What stands in its place is
-    the shape still genuinely out of reach: a receiver that came back from a function whose
-    return type nobody wrote down. The feature this class covers is what `impact` says when it
+    The fixture has been rewritten twice, both times because the tool learned to answer it.
+    First `Engine().start()`, whose class is written at the call site. Then `make().start()`,
+    whose class the returning function's body states. What stands in their place is the shape
+    that is genuinely undecidable from this file: a parameter nobody annotated, holding
+    whatever the caller passed. The feature this class covers is what `impact` says when it
     cannot tell, so the fixture has to be something it actually cannot tell.
     """
 
@@ -1581,7 +1582,7 @@ class ImpactSaysWhatItCouldNotResolve(Sandbox):
                                  "def helper():\n    return 1\n")
         self.write("main.py", "from pkg.lib import Engine\n"
                               "def make():\n    return Engine()\n"
-                              "def go():\n    return make().start()\n")
+                              "def go(engine):\n    return engine.start()\n")
         self.g = self.graph()                            # written, so the CLI tests can read it
 
     def test_unresolved_uses_of_the_name_are_reported(self):
@@ -1706,8 +1707,13 @@ class ALocalNameIsNotAnImportedModule(Sandbox):
         self.assertEqual(e["confidence"], "UNTYPED")
 
     def test_a_call_result_shadowing_a_module_is_not_that_module(self):
+        """`make()` returns a Thing, and that is now read from its body, so the local is typed -
+        as the class it really is. The thing this guards has not moved: it must never be the
+        MODULE's function."""
         e = self.edge("def f():\n    helpers = make()\n    return helpers.run()\n", "app.f")
-        self.assertIsNone(e.get("dst"))
+        self.assertNotEqual(e.get("dst"), "helpers.run",
+                            "resolved to the module it was shadowing")
+        self.assertEqual(e.get("dst"), "app.Thing.run")
 
     def test_a_loop_variable_shadowing_a_module_is_not_that_module(self):
         e = self.edge("def f():\n    for helpers in []:\n        return helpers.run()\n"
@@ -7643,13 +7649,24 @@ class ADeclaredReturnTypeIsTheSourceSayingSo(Sandbox):
 
     # --- the guards. Each is a way this could start inventing answers.
 
-    def test_no_annotation_means_no_type(self):
-        self.write("svc.py", "class Client:\n    def go(self):\n        return 1\n"
-                             "def make():\n    return Client()\n")
+    def test_a_body_that_states_nothing_means_no_type(self):
+        """This used to assert that no annotation means no type. The body states it just as
+        plainly - `return Client()` - and that is now read, so the guard is what it was always
+        protecting: a return this file cannot put a class to invents nothing."""
+        self.write("svc.py", "import json\n"
+                             "class Client:\n    def go(self):\n        return 1\n"
+                             "def make():\n    return json.loads('{}')\n")
         self.write("app.py", "import svc\n"
                              "def use():\n    c = svc.make()\n    return c.go()\n")
         self.assertIsNone(self.edge(self.graph()).get("dst"),
                           "it invented a type the source never stated")
+
+    def test_an_unannotated_body_that_does_state_it_is_read(self):
+        self.write("svc.py", "class Client:\n    def go(self):\n        return 1\n"
+                             "def make():\n    return Client()\n")
+        self.write("app.py", "import svc\n"
+                             "def use():\n    c = svc.make()\n    return c.go()\n")
+        self.assertEqual(self.edge(self.graph()).get("dst"), "svc.Client.go")
 
     def test_an_annotation_naming_nothing_here_means_no_type(self):
         self.write("svc.py", "def make() -> SomethingElse:\n    return 1\n")
@@ -9642,6 +9659,192 @@ class ASrcLayoutIsStillOneImportAway(Sandbox):
                    "import flat\n\n\ndef test_four():\n    return flat.flat_thing()\n")
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "flat.flat_thing"), ["tests/test_four.test_four"])
+
+
+class AMethodCalledOnWhatAFunctionReturned(Sandbox):
+    """`make().go()` - the chain. `x = make()` then `x.go()` resolved, and the same thing
+    written on one line did not, because a receiver that is a call only ever had its name read
+    as a CLASS. `Leg(100).payoff()` worked for exactly that reason and `make().go()` never
+    could, on the identical expression shape.
+
+    A function's return class is already looked up for the two-line form, after resolution,
+    from the definition the inner call was pointed at. The one-line form now carries the same
+    fallback and gets the same answer from the same code.
+
+    13,321 calls in a clone of pandas are written on a receiver that is a call."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("svc.py",
+                   "class Client:\n"
+                   "    def go(self):\n        return 1\n\n"
+                   "class Other:\n"
+                   "    def go(self):\n        return 2\n\n"
+                   "def make():\n    return Client()\n\n"
+                   "def declared() -> Client:\n    return Client()\n\n"
+                   "def opaque(x):\n    return x\n")
+
+    def test_a_chain_off_an_inferred_return(self):
+        self.write("app.py", "from svc import make\n\n\n"
+                             "def use():\n    return make().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), ["app.use"])
+
+    def test_a_chain_off_a_declared_return(self):
+        self.write("app2.py", "from svc import declared\n\n\n"
+                              "def use():\n    return declared().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), ["app2.use"])
+
+    def test_it_works_through_a_module_receiver(self):
+        """`svc.make().go()` - how package code writes it."""
+        self.write("app3.py", "import svc\n\n\n"
+                              "def use():\n    return svc.make().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), ["app3.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_return_it_cannot_name_answers_nothing(self):
+        self.write("app4.py", "from svc import opaque\n\n\n"
+                              "def use():\n    return opaque(1).go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "svc.Other.go"), [])
+
+    def test_a_constructor_at_the_call_site_still_wins(self):
+        """The class written outright is read as the class, not chased through a function of
+        that name."""
+        self.write("app5.py", "from svc import Other\n\n\n"
+                              "def use():\n    return Other().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Other.go"), ["app5.use"])
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), [])
+
+    def test_two_functions_of_one_name_in_one_scope_answer_nothing(self):
+        """Reached from the same scope and resolving to different definitions is not an
+        answer - the same rule the two-line form already follows."""
+        self.write("other.py", "class Thing:\n    def go(self):\n        return 1\n\n"
+                               "def make():\n    return Thing()\n")
+        self.write("app6.py", "import svc\nimport other\n\n\n"
+                              "def use():\n"
+                              "    svc.make().go()\n"
+                              "    return other.make().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "svc.Client.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "other.Thing.go"), [])
+
+
+class AFunctionThatSaysWhatItReturnsWithoutAnnotating(Sandbox):
+    """`def make(): return Client()` and then `c = make(); c.get()` - unresolved, while the same
+    function with `-> Client` on it resolved. The annotation was never the evidence; the body
+    was, and the tool already trusts exactly this reading one scope down, where `c = Client()`
+    types `c`.
+
+    So a function's return class is read from its returns when every one of them agrees, and
+    otherwise not at all. Two classes is not an answer. A branch returning something this file
+    cannot name is not an answer either - `if x: return Client()` beside `return load()` means
+    the caller can get either, and typing it as Client would be a confident wrong answer on
+    half the calls.
+
+    `return None` is the exception that stays: a name cannot be called through None, so the
+    caller has to check it, and `Optional[Client]` is already read as Client everywhere else.
+
+    A generator is not its yields. `def rows(): yield Row()` returns a generator object, and
+    typing the caller's variable as Row would put every `for` loop's method calls onto Row."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/thing.py",
+                   "class Client:\n"
+                   "    def get(self):\n        return 1\n\n"
+                   "class Other:\n"
+                   "    def get(self):\n        return 2\n")
+
+    def test_a_returned_constructor_types_the_callers_variable(self):
+        self.write("pkg/a.py",
+                   "from pkg.thing import Client\n\n\n"
+                   "def make():\n    return Client()\n\n\n"
+                   "def use():\n    c = make()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), ["pkg/a.use"])
+
+    def test_it_reads_a_returned_local_too(self):
+        """`c = Client(); return c` is the same statement written over two lines, and the type
+        of that local is already known at the point it is returned."""
+        self.write("pkg/b.py",
+                   "from pkg.thing import Client\n\n\n"
+                   "def make():\n    c = Client()\n    c.get()\n    return c\n\n\n"
+                   "def use():\n    x = make()\n    return x.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"),
+                         ["pkg/b.make", "pkg/b.use"])
+
+    def test_a_none_branch_does_not_disqualify_it(self):
+        """Half of Python returns None on the empty path. The caller cannot call through None,
+        so the class is still the only thing the name can be when it is used."""
+        self.write("pkg/c.py",
+                   "from pkg.thing import Client\n\n\n"
+                   "def make(f):\n    if not f:\n        return None\n    return Client()\n\n\n"
+                   "def use():\n    c = make(1)\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), ["pkg/c.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_two_different_classes_is_not_an_answer(self):
+        self.write("pkg/d.py",
+                   "from pkg.thing import Client, Other\n\n\n"
+                   "def make(f):\n    if f:\n        return Client()\n    return Other()\n\n\n"
+                   "def use():\n    c = make(1)\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), [])
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Other.get"), [])
+
+    def test_a_branch_it_cannot_name_is_not_an_answer(self):
+        """The dangerous one. One readable return beside one unreadable return means the caller
+        can get either, and answering with the readable one is wrong on the other path."""
+        self.write("pkg/e.py",
+                   "from pkg.thing import Client\n"
+                   "import json\n\n\n"
+                   "def make(f):\n    if f:\n        return Client()\n    return json.loads('{}')\n\n\n"
+                   "def use():\n    c = make(1)\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), [])
+
+    def test_a_generator_is_not_what_it_yields(self):
+        """A generator with a `return` in it too - which is the only shape where this guard can
+        be reached at all. Written as a plain `yield`-only function it has no returns to read,
+        so the test passed with the guard deleted: a test that cannot fail. `return Other()`
+        inside a generator sets StopIteration.value; the caller holds a generator either way."""
+        self.write("pkg/f.py",
+                   "from pkg.thing import Client, Other\n\n\n"
+                   "def rows(f):\n    yield Client()\n    return Other()\n\n\n"
+                   "def use():\n    c = rows(1)\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Other.get"), [])
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), [])
+
+    def test_an_async_function_hands_back_a_coroutine(self):
+        """`c = fetch()` on an `async def` holds a coroutine, not the thing it returns. Reading
+        it as the return class would type every un-awaited call wrongly, and `await` is not read
+        here yet."""
+        self.write("pkg/h.py",
+                   "from pkg.thing import Client\n\n\n"
+                   "async def fetch():\n    return Client()\n\n\n"
+                   "def use():\n    c = fetch()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), [])
+
+    def test_a_nested_functions_return_is_not_the_outer_ones(self):
+        """`def outer(): def inner(): return Client()` returns inner, not a Client."""
+        self.write("pkg/g.py",
+                   "from pkg.thing import Client\n\n\n"
+                   "def outer():\n"
+                   "    def inner():\n        return Client()\n"
+                   "    return inner\n\n\n"
+                   "def use():\n    c = outer()\n    return c.get()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/thing.Client.get"), [])
 
 
 class AModuleLevelSingletonHasAType(Sandbox):
