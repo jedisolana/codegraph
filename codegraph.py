@@ -2194,8 +2194,13 @@ def build(dirs=None, write=True):
             # spelled "*", which nothing ever calls, so the name fell through to the tree-wide
             # "one definition of that name" rule - which across the standard library answered
             # turtledemo's home() with a function in _pyrepl. The star names a module; ask it.
-            stars = mod_alt.get(srcmod, {}).get("*") or [mod_from[srcmod]["*"]]
-            hits = [by_modname[(m, callee)] for m in stars if (m, callee) in by_modname]
+            # ...and only the names the star actually carries: `__all__` when the source
+            # states one, otherwise the names that do not begin with an underscore. This path
+            # asked only "does that module define it", so a name `__all__` leaves out was
+            # answered with a function that is not in the importing module at all. One rule,
+            # both here and for the qualified form.
+            hits = [by_modname[(m, callee)] for m in _star_sources(srcmod)
+                    if (m, callee) in by_modname and _star_carries(m, callee)]
             if len(hits) == 1: dst = hits[0]; conf = "QUALIFIED"
             elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(hits)
         if not dst and not method and not conf and callee in mod_from.get(srcmod, {}):     # BARE recall() under `from memory import recall`

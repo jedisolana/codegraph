@@ -26,6 +26,13 @@ neither, on the function side and the class side alike.
 httpx 0.353 -> 0.801, 1,730 more resolved calls, and nothing lost on any of the five
 repositories now measured.
 
+The bare-call path that already read stars was asking only "does that module define it", so a
+name `__all__` leaves out was answered with a function that is not in the importing module at
+all. It obeys the same rule now. That change moves nothing on any repository measured - the
+shape does not occur in them - and it is kept because a test fails without it, which is the
+difference between behaviour nothing exercises and an edit that cannot be shown to do
+anything.
+
 The two new repositories were added for exactly this: running the tool over code nobody had
 aimed it at is what has found every real bug in it. `rich` came out at 0.869 first time and
 taught it nothing; `httpx` was worth the trip.

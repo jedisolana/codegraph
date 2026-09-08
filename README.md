@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6442,
-  "call_sites": 8441,
-  "edge_confidence": {"EXTERNAL": 3244, "INHERITED": 1016, "BUILTIN": 747, "SELF-METHOD": 595,
-                      "QUALIFIED": 431, "LOCAL": 227, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6446,
+  "call_sites": 8451,
+  "edge_confidence": {"EXTERNAL": 3245, "INHERITED": 1018, "BUILTIN": 747, "SELF-METHOD": 595,
+                      "QUALIFIED": 432, "LOCAL": 227, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2277,
-  "could_have_been_resolved": 2451,
+  "resolved_to_one_def": 2280,
+  "could_have_been_resolved": 2454,
   "resolution_rate": 0.929
 }
 ```
@@ -732,7 +732,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 865 more. Grouped, because a list of every one of them stopped being
+The test suite adds 866 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

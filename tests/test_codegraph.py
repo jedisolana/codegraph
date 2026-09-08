@@ -9927,6 +9927,29 @@ class APackageThatReExportsWithAStar(Sandbox):
         g = self.graph()
         self.assertEqual(codegraph.callers_of(g, "pkg2/core.shown"), ["app3.use"])
 
+    def test_a_bare_call_under_a_star_obeys_the_same_rule(self):
+        """The tool has read `from turtle import *` then `home()` for a long time, and that path
+        never asked what the star actually carries. A name `__all__` leaves out, or one starting
+        with an underscore, is not in the importing module at all - so answering with it is a
+        confident answer about a name that does not exist there. One rule, both places."""
+        self.write("star/__init__.py", "")
+        self.write("star/src.py",
+                   '__all__ = ["shown"]\n\n\n'
+                   "def shown():\n    return 1\n\n\n"
+                   "def hidden():\n    return 2\n\n\n"
+                   "def _private():\n    return 3\n")
+        self.write("star/use.py",
+                   "from star.src import *\n\n\n"
+                   "def a():\n    return shown()\n\n\n"
+                   "def b():\n    return hidden()\n\n\n"
+                   "def c():\n    return _private()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "star/src.shown"), ["star/use.a"])
+        self.assertEqual(codegraph.callers_of(g, "star/src.hidden"), [],
+                         "__all__ leaves it out, so the star does not bring it")
+        self.assertEqual(codegraph.callers_of(g, "star/src._private"), [],
+                         "a star never brings an underscore name")
+
     # ------------------------------------------------------------------------- the controls
     def test_a_name_all_leaves_out_is_not_exported(self):
         """`import *` does not bring it, so `pkg2.hidden()` is not that function."""
