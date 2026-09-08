@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6527,
-  "call_sites": 8562,
-  "edge_confidence": {"EXTERNAL": 3272, "INHERITED": 1050, "BUILTIN": 754, "SELF-METHOD": 595,
+  "call_edges": 6541,
+  "call_sites": 8578,
+  "edge_confidence": {"EXTERNAL": 3282, "INHERITED": 1052, "BUILTIN": 755, "SELF-METHOD": 596,
                       "QUALIFIED": 446, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2327,
-  "could_have_been_resolved": 2501,
-  "resolution_rate": 0.93
+  "resolved_to_one_def": 2330,
+  "could_have_been_resolved": 2504,
+  "resolution_rate": 0.931
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.93 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.931 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -234,6 +234,15 @@ MCP server keeps the parsed graph for the life of the session, so an agent pays 
 rather than per question. "After one file changed" is the loop you are actually in: edit, ask,
 edit — and nothing has to be rebuilt by hand, because a query notices the tree moved and
 rebuilds what moved.
+
+One more check does not measure the tool against a corpus but against the interpreter. The
+README says a diamond lands where Python lands; that is checkable by asking Python. A hierarchy
+with five leaves — `D(B, C)`, `E(C, B)`, an inherited one, an unrelated mixin, and the awkward
+case where the first base does NOT define the method — is imported, Python is asked which class
+actually owns the call, and codegraph is required to have said the same. A hand-written
+expectation encodes what the author believed C3 does; this cannot drift from what Python does.
+Replacing the linearisation with a depth-first walk — the bug that was there originally — turns
+it red on exactly the case that bug got wrong.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -784,7 +793,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 880 more. Grouped, because a list of every one of them stopped being
+The test suite adds 881 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a

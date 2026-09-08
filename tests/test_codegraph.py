@@ -9885,6 +9885,60 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class TheInterpreterIsAskedWhoWins(Sandbox):
+    """The README says a diamond lands where the interpreter lands. That is checkable against
+    the interpreter rather than against a hand-worked expectation, so this asks Python which
+    class actually owns the method and requires codegraph to have said the same.
+
+    A hand-written expectation encodes what the author believed C3 does. This cannot drift from
+    what Python does, because Python is the thing being consulted."""
+
+    HIERARCHY = (
+        "class A:\n    def who(self):\n        return 'A'\n\n\n"
+        "class B(A):\n    def who(self):\n        return 'B'\n\n\n"
+        "class C(A):\n    def who(self):\n        return 'C'\n\n\n"
+        "class M:\n    def who(self):\n        return 'M'\n\n\n"
+        "class D(B, C):\n    pass\n\n\n"
+        "class E(C, B):\n    pass\n\n\n"
+        "class F(D):\n    pass\n\n\n"
+        "class G(C, M):\n    pass\n\n\n"
+        "class H(A):\n    pass\n\n\n"
+        "class I(H, B):\n    pass\n\n\n"
+    )
+    LEAVES = ("D", "E", "F", "G", "I")
+
+    def python_says(self):
+        """Which class Python itself would run the method from, asked in a subprocess so the
+        suite's own interpreter is left alone."""
+        prog = (
+            "import sys, json, importlib\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "m = importlib.import_module('d')\n"
+            "out = {}\n"
+            f"for n in {self.LEAVES!r}:\n"
+            "    cls = getattr(m, n)\n"
+            "    out[n] = [c.__name__ for c in cls.__mro__ if 'who' in c.__dict__][0]\n"
+            "print(json.dumps(out))\n"
+        )
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_codegraph_agrees_with_python_about_every_diamond(self):
+        body = self.HIERARCHY + "".join(
+            f"def use_{n}():\n    return {n}().who()\n\n\n" for n in self.LEAVES)
+        self.write("d.py", body)
+        truth = self.python_says()
+        g = self.graph()
+        got = {e["src"].split("use_")[1]: e.get("dst")
+               for e in g["calls"] if e["callee"] == "who" and "use_" in e["src"]}
+        self.assertEqual(sorted(got), sorted(self.LEAVES), got)
+        for leaf, owner in sorted(truth.items()):
+            self.assertEqual(got[leaf], f"d.{owner}.who",
+                             f"{leaf}().who() runs {owner}.who in Python")
+
+
 class ADottedModuleThatReExports(Sandbox):
     """`import pkg.mod` then `pkg.mod.func()`, where `mod` re-exports `func` rather than
     defining it. The single-name form of the same sentence - `from pkg import mod` then
