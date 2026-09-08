@@ -666,9 +666,10 @@ interesting output: it names a behaviour nothing is checking.
 
 **The file admits 1,342 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
-an incompleteness warning, and the rules and fixes above. A sample of 150 drawn from the file as
-it stood a few changes short of this one killed 150, one of them by hanging rather than failing.
-Neither result is about the file as it is now: the number is a fact about this version, the
+an incompleteness warning, and the rules and fixes above. A sample of 300 drawn from the file as it
+stood one behavioural change short of this one killed 300, one of them by hanging rather than
+failing; a sample of 150 a few changes before that killed 150. Neither result is about the file
+as it is now: the number is a fact about this version, the
 results are facts about older ones. The pass is re-run whenever the file changes, because a
 result about an older version of a file is not a result about this one, and a count that
 happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
