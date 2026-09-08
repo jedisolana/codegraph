@@ -2316,15 +2316,44 @@ def _find_graph(start=None):
         # would answer from whatever graph happened to sit in a parent directory instead.
         # The walk is for the CLI case only: no graph here, so look where the repo root is.
         return OUT
-    d = os.path.abspath(start or os.getcwd())
+    here = os.path.abspath(start or os.getcwd())
+    d = here
     while True:
         cand = os.path.join(d, "codegraph.json")
-        if os.path.exists(cand):
+        if os.path.exists(cand) and _covers(cand, here):
             return cand
         parent = os.path.dirname(d)
         if parent == d:
             return OUT                                # reached the filesystem root; no graph
         d = parent
+
+
+def _covers(graph_path, here):
+    """Is this graph ABOUT the place we are standing?
+
+    Walking upward is right - build at the repository root, ask from a package inside it - and
+    nothing checked that what it found described where you were. Asked about pandas from a
+    directory with no graph, it answered `no symbol named isna` in no time at all, from a graph
+    two levels up describing a different tree entirely.
+
+    For a person that is unlikely. For an agent it is the worst kind of wrong answer: fast,
+    confident, and about somebody else's code.
+
+    A graph that cannot be read does not cover anything - a corrupt file one directory up must
+    not shadow a good one further up, and `load` has its own, better complaint for the case
+    where that was the only candidate.
+    """
+    try:
+        with open(graph_path, encoding="utf-8") as fh:
+            dirs = json.load(fh).get("dirs") or []
+    except (OSError, ValueError):
+        return False
+    for d in dirs:
+        root = os.path.realpath(d)
+        p = os.path.realpath(here)
+        if p == root or p.startswith(root + os.sep):
+            return True
+    return False
 
 
 def load(fresh=True):

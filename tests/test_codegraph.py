@@ -9124,3 +9124,79 @@ class TheOtherTwoDoorsThatWereStillOpen(Sandbox):
         self.graph()
         text, _ = self.ask("codegraph_shape", name="pkg/big")
         self.assertGreater(len(text.splitlines()), 200, text[:200])
+
+
+class AGraphAboveYouIsNotNecessarilyAboutYou(Sandbox):
+    """Asked about pandas, in a directory with no graph, and got back
+    `no symbol named 'isna' in this graph` - confidently, in no time at all.
+
+    The graph it answered from sat two directories up and described a completely different
+    tree: one module, none of them pandas. Walking upward is deliberate and right - build at
+    the repository root, query from a package inside it - but nothing checked that the graph it
+    found was ABOUT the place you were standing.
+
+    For a person that is unlikely. For an agent it is the worst kind of wrong answer: fast,
+    confident, and about somebody else's code. `no symbol named that` is the sentence this tool
+    exists to avoid giving carelessly."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        # A graph at the top, describing a sibling that has nothing to do with us.
+        self.other = os.path.join(self.root, "other")
+        os.makedirs(self.other)
+        with open(os.path.join(self.other, "far.py"), "w", encoding="utf-8") as f:
+            f.write("def far_away():\n    return 1\n")
+        codegraph.HOME = self.other
+        codegraph.OUT = os.path.join(self.root, "codegraph.json")
+        codegraph.CACHE = os.path.join(self.root, "codegraph.cache.json")
+        codegraph.build([self.other])
+        # ...and the tree we are actually asking about, with no graph of its own.
+        self.here = os.path.join(self.root, "mine")
+        os.makedirs(self.here)
+        with open(os.path.join(self.here, "app.py"), "w", encoding="utf-8") as f:
+            f.write("def mine():\n    return 1\n")
+
+    def ask_from_here(self, name="mine"):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_callers", "arguments": {"name": name}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.here, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_it_does_not_answer_from_a_graph_about_somewhere_else(self):
+        text, r = self.ask_from_here()
+        self.assertNotIn("no symbol named", text, r.stderr[-200:])
+
+    def test_it_says_there_is_no_graph_here(self):
+        text, _ = self.ask_from_here()
+        self.assertRegex(text.lower(), r"build|no graph")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_graph_that_does_cover_you_is_still_found_from_below(self):
+        """The reason the walk exists: build at the root, ask from a package inside it."""
+        sub = os.path.join(self.other, "deep")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "inner.py"), "w", encoding="utf-8") as f:
+            f.write("from far import far_away\n\n\ndef inner():\n    return far_away()\n")
+        codegraph.build([self.other])
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "codegraph_where", "arguments": {"name": "far_away"}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=sub, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        self.assertIn("far.py", replies[-1]["result"]["content"][0]["text"], r.stderr[-200:])
+
+    def test_an_explicitly_configured_graph_is_still_obeyed(self):
+        """The library contract: set OUT, call load(), get that graph - wherever you are."""
+        codegraph.OUT = os.path.join(self.root, "codegraph.json")
+        g = codegraph.load(fresh=False)
+        self.assertTrue(any(n["name"] == "far_away" for n in g["nodes"]))
