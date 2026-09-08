@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  # By hand, from the Actions tab. A suite that can only be started by a push cannot be
+  # re-run after a runner dies, and cannot be run at all to answer "is main still green?"
+  workflow_dispatch:
 
 env:
   PYTHONUTF8: "1"
