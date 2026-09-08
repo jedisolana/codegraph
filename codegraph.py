@@ -3323,6 +3323,27 @@ def _saving(answer_lines, paths):
             f"({total} lines).")
 
 
+def _why_not_called(g, target):
+    """The sentence that goes after `nothing calls this`.
+
+    `unused` already works this out for the whole tree and gives each row a reason: a dunder
+    Python calls, a name the tree mentions without calling, a method whose base class this tree
+    cannot see. Read here for one definition, because "nothing calls it" and "nothing reaches
+    it" are different facts and only one of them means it is safe to delete.
+    """
+    for node_id, _where, reason in unused(g):
+        if node_id == target:
+            if not reason:
+                return ("Nothing in this tree names it either, so as far as this graph can "
+                        "see it is unreached.")
+            return (f"It is still reached some other way: {reason}. Deleting it would break "
+                    "whatever does that.")
+    # Not in `unused` at all means something DOES reach it - a base class, a decorator - and
+    # the honest answer is that this graph cannot name the caller rather than that there is none.
+    return ("Something reaches it that is not a call this graph can name, so do not read this "
+            "as unreached.")
+
+
 def _mcp_result(text):
     return {"content": [{"type": "text", "text": text}]}
 
@@ -3443,7 +3464,16 @@ def _mcp_call(tool, args):
     target = hits[0]
     out = MCP_TOOLS[tool][2](g, target, raw)
     if not out:
-        return _mcp_result(f"(nothing for {target})" + _unread_warning(g))
+        # THE MOST DANGEROUS ANSWER THIS TOOL CAN GIVE. A function reached through a dispatch
+        # table and one that is genuinely dead both had nothing calling them, and both got
+        # `(nothing for ...)` - so an agent cleaning up dead code deletes the dispatched one
+        # and breaks the table that names it.
+        #
+        # The command line has always known the difference: `unused --all` prints the reason.
+        # The door threw it away, which is this tool's own founding failure arriving through
+        # its newest part.
+        return _mcp_result(f"nothing calls {target}. " + _why_not_called(g, target)
+                           + _unread_warning(g))
     # The ids in the answer name the files somebody would otherwise have opened to learn the
     # same thing. That is the baseline, and it is the honest one to compare against.
     return _mcp_result("\n".join(out) + _saving(len(out), _files_for(g, out))

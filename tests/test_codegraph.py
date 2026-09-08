@@ -8765,3 +8765,68 @@ class WhatDidIJustBreak(Sandbox):
         reply, r = self.call(diff="this is not a diff at all\n")
         self.assertEqual(r.returncode, 0, r.stderr[-200:])
         self.assertTrue(reply["result"]["content"][0]["text"].strip())
+
+
+class NothingCallsItIsNotTheSameAsNothingReachesIt(Sandbox):
+    """Over MCP, a function reached through a dispatch table and a function that is genuinely
+    dead got the SAME answer: `(nothing for ...)`.
+
+    The command line has always known the difference - `unused --all` prints
+    `(looks dispatched)` next to one and nothing next to the other - and the door threw it
+    away. An agent asked to clean up dead code would delete the dispatched one and break the
+    table that names it.
+
+    That is the exact failure this tool exists to prevent, arriving through the newest part of
+    it. `callers` returning nothing is the most dangerous answer it can give, and it was the
+    one answer being given without its reason."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/core.py",
+                   'HANDLERS = {"go": "handle_go"}\n\n\n'
+                   "def handle_go():\n    return 1\n\n\n"
+                   "def truly_dead():\n    return 2\n")
+        self.graph()
+
+    def ask(self, name, tool="codegraph_callers"):
+        payload = "".join(json.dumps(m) + "\n" for m in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": {"name": name}}}))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "codegraph.py"), "mcp"],
+                           input=payload, capture_output=True, text=True,
+                           cwd=self.dir, timeout=120)
+        replies = [json.loads(x) for x in r.stdout.splitlines() if x.strip()]
+        return replies[-1]["result"]["content"][0]["text"], r
+
+    def test_a_dispatched_function_says_it_is_reached_some_other_way(self):
+        text, r = self.ask("handle_go")
+        self.assertRegex(text.lower(), r"named|dispatch|not called", r.stderr[-200:])
+
+    def test_a_dead_one_says_nothing_reaches_it(self):
+        """The other half. `safe to delete` is a useful answer and it has to be a different
+        sentence from `reached some other way`, or neither means anything."""
+        text, _ = self.ask("truly_dead")
+        self.assertRegex(text.lower(), r"nothing (in this tree )?(calls|names|reaches)")
+        self.assertNotRegex(text.lower(), r"named, not called|dispatch")
+
+    def test_the_two_answers_are_not_the_same(self):
+        dispatched, _ = self.ask("handle_go")
+        dead, _ = self.ask("truly_dead")
+        self.assertNotEqual(dispatched, dead)
+
+    def test_it_applies_to_the_blast_radius_too(self):
+        """`what breaks if I change this` is the question asked before an edit, and an empty
+        answer there is read as `nothing`."""
+        text, _ = self.ask("handle_go", tool="codegraph_blast")
+        self.assertRegex(text.lower(), r"named|dispatch|not called")
+
+    # ------------------------------------------------------------------------- the control
+    def test_a_function_with_callers_answers_with_them(self):
+        """No reason-hunting where there is a real answer: the callers are the answer."""
+        self.write("pkg/app.py",
+                   "from pkg.core import handle_go\n\n\ndef run():\n    return handle_go()\n")
+        self.graph()
+        text, _ = self.ask("handle_go")
+        self.assertTrue(text.startswith("pkg/app.run"), text[:120])
