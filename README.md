@@ -181,15 +181,44 @@ impossible call. Two things moved it: resolution bugs fixed with tests, and then
 denominator being made to mean something. Both directions are in `CHANGELOG.md`, with the
 count of fabricated edges each one removed.
 
-On other people's code, measured on a clone of each and built from its own root:
+On other people's code, measured on a clone of each and built from its own root. These three
+have been tracked from the beginning, so the `before` is where each started:
 
 | repo | before | after |
 |---|---|---|
 | flask | 0.241 | **0.755** |
 | ansible | 0.379 | **0.726** |
 | pandas | 0.359 | **0.811** |
-| httpx | 0.353 | **0.801** |
-| rich | 0.869 | **0.869** |
+
+And the whole corpus it is measured against now — **fourteen codebases, 596,641 call edges,
+156,835 definitions**. They were not chosen for flattering numbers; they were chosen to be
+unalike, and the low two are here for the same reason as the high two:
+
+| repo | rate | | repo | rate |
+|---|---|---|---|---|
+| rich | 0.869 | | attrs | 0.771 |
+| click | 0.864 | | flask | 0.755 |
+| starlette | 0.837 | | pydantic | 0.727 |
+| black | 0.823 | | ansible | 0.726 |
+| scrapy | 0.816 | | sqlalchemy | 0.690 |
+| pandas | 0.811 | | celery | 0.596 |
+| httpx | 0.801 | | stdlib | 0.577 |
+
+Running it over code nobody aimed it at is what has found every real bug in it, and the number
+that matters is the one that looks wrong. `httpx` first measured **0.353** against a field that
+was otherwise above 0.72, and that gap was one line: `httpx/__init__.py` is twelve lines of
+`from ._api import *`. The two at the bottom were checked the same way and are not that. celery
+is a dynamic task registry and unannotated fixtures; the standard library is old, barely
+annotated, and spends its time on strings and dicts — which is the blind spot named further
+down, showing up as a number.
+
+Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
+target a real node, every id under its module, every label consistent with whether the edge
+resolved. And **every resolved call's target bears the name that was called**, with three
+kinds of exception that all turn out correct: a subclass constructor reaching an inherited
+`__init__`, an instance call landing on `__call__`, and `import ... as ...` aliases. No wrong
+answers were found, which is the number worth caring about — a confidently wrong answer is
+worse than a missing one, and the rate above cannot see them.
 
 A rate has a denominator, and two of the changes below move it, so here are the counts as well
 — how many calls are pinned to exactly one definition, and how many the tool answers "I cannot
@@ -206,7 +235,7 @@ round of it, so this table is that round on its own:
 | ansible | 17,553 → **20,120** | 11,309 → **7,584** |
 | pandas | 96,759 → **102,318** | 31,635 → **23,892** |
 
-Ten rules and four bugs did that, and none of them is clever. A name a package **re-exports** —
+Ten rules and five bugs did that, and none of them is clever. A name a package **re-exports** —
 `pandas/__init__.py` getting `DataFrame` from `core.api`, which gets it from `core.frame` — is
 followed to where the definition actually is. And `import flask` is connected to the module id
 `src/flask/__init__`, because a directory that holds packages and is not one is where Python
@@ -683,10 +712,10 @@ interesting output: it names a behaviour nothing is checking.
 
 **The file admits 1,372 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
-an incompleteness warning, and the rules and fixes above. A sample of 300 drawn from the file as it
-stood one behavioural change short of this one killed 300, one of them by hanging rather than
-failing; a sample of 150 a few changes before that killed 150. Neither result is about the file
-as it is now: the number is a fact about this version, the
+an incompleteness warning, and the rules and fixes above. Three samples have been drawn from it as it changed: 150, then 300, then 300 again, and every
+one of the 750 was killed — one of them by hanging rather than failing, which is counted apart
+because "hung" and "failed" are different facts. The most recent is two changes short of this
+file, so it is not a result about this one: the number is a fact about this version, the
 results are facts about older ones. The pass is re-run whenever the file changes, because a
 result about an older version of a file is not a result about this one, and a count that
 happens to match is not evidence that it is. A full pass is hours of work, so it is run deliberately
