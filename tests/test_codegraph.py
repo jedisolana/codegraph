@@ -8898,3 +8898,71 @@ class TheSavingHasToBeAThingSomebodyWouldHaveDone(Sandbox):
         with contextlib.redirect_stdout(out):
             codegraph._main(["callers", "load", "--saved"])
         self.assertNotRegex(out.getvalue().lower(), r"instead of reading")
+
+
+class TheTestSuiteIsNotWhatTheCodebaseIs(Sandbox):
+    """On a clone of pandas the map's top answer was `pandas/_testing/__init__`, imported by
+    844 modules. True, and useless: what imports it 844 times is the test suite.
+
+    An agent orienting in pandas is told the thing everything leans on is the testing helper.
+    Import count alone is a weak proxy for importance in any repository whose tests outnumber
+    its code, which is every well-tested one.
+
+    Counted from the PRODUCT instead: how many non-test modules import this. A test helper then
+    ranks by how much the code under test uses it, which is nearly never, and the modules that
+    hold the codebase up come back to the top. The header says which count it is showing,
+    because a ranking nobody can explain is a ranking nobody should trust."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/engine.py", "def go():\n    return 1\n")
+        self.write("pkg/api.py", "from pkg.engine import go\n\n\ndef run():\n    return go()\n")
+        self.write("pkg/_testing.py", "def helper():\n    return 1\n")
+        self.write("tests/__init__.py", "")
+        for i in range(6):
+            self.write(f"tests/test_{i}.py",
+                       f"from pkg._testing import helper\n\n\ndef test_{i}():\n    return helper()\n")
+        self.graph()
+
+    def ranked(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            codegraph._main(["map"])
+        text = out.getvalue()
+        return [l for l in text.splitlines() if "importer(s)" in l], text
+
+    def test_the_test_helper_is_not_the_top_of_the_map(self):
+        rows, text = self.ranked()
+        self.assertNotIn("_testing", rows[0], text)
+
+    def test_the_module_the_product_leans_on_is(self):
+        rows, text = self.ranked()
+        self.assertIn("pkg/engine", rows[0], text)
+
+    def test_the_header_says_which_count_it_is(self):
+        _, text = self.ranked()
+        self.assertRegex(text.lower(), r"non-test|outside the (test )?suite|product")
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_repository_that_is_all_tests_still_maps(self):
+        """Ranking by a count that is zero for everything must not produce an empty map."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, "tests"))
+        with open(os.path.join(d, "tests/helper.py"), "w", encoding="utf-8") as f:
+            f.write("def helper():\n    return 1\n")
+        with open(os.path.join(d, "tests/test_one.py"), "w", encoding="utf-8") as f:
+            f.write("from tests.helper import helper\n\n\ndef test_one():\n    return helper()\n")
+        codegraph.HOME = d
+        codegraph.OUT = os.path.join(d, "codegraph.json")
+        codegraph.CACHE = os.path.join(d, "codegraph.cache.json")
+        codegraph.build([d])
+        rows, text = self.ranked()
+        self.assertTrue(rows, text)
+
+    def test_a_test_module_is_still_in_the_map(self):
+        """Demoted, not hidden - it is part of the repository and somebody may be looking for
+        it. Only the ranking changes."""
+        _, text = self.ranked()
+        self.assertIn("_testing", text)

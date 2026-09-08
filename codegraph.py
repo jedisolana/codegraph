@@ -3129,11 +3129,21 @@ def shape(path):
 def _demote_test(node_id):
     """0 for the product, 1 for the suite. Orientation starts with what the code IS for.
 
-    Spelled with fnmatch rather than a regular expression because this file does not import
-    `re` - it parses Python with `ast`, which is the point of it.
+    `_testing` and `_test_decorators` count too: on a clone of pandas the most-imported module
+    in the whole tree was `pandas/_testing/__init__`, at 844 importers, and what imports it 844
+    times is the test suite. Matched on a component CONTAINING `test` rather than equalling it,
+    which is wide enough for those and narrow enough to leave `latest` and `contest` alone,
+    because those are checked as whole components rather than as substrings of the path.
+
+    Spelled without a regular expression because this file does not import `re` - it parses
+    Python with `ast`, which is the point of it.
     """
     parts = node_id.replace("\\", "/").split("/")
-    return 1 if any(p in ("test", "tests") or p.startswith("test_") for p in parts) else 0
+    for p in parts:
+        bare = p.strip("_")
+        if bare in ("test", "tests", "testing", "conftest") or bare.startswith(("test_", "tests_")):
+            return 1
+    return 0
 
 
 def repo_map(g, limit=12):
@@ -3149,21 +3159,27 @@ def repo_map(g, limit=12):
     explained is a list somebody has to reverse-engineer.
     """
     mods = [n for n in g["nodes"] if n["kind"] == "module"]
+    ids = {m["id"] for m in mods}
     importers = defaultdict(set)
     for e in g["imports"]:
-        if any(m["id"] == e["callee"] for m in mods):     # in-tree only; stdlib is not the map
+        # Counted from the PRODUCT. On a clone of pandas the most-imported module in the tree
+        # was its testing helper, at 844 importers, and what imports it 844 times is the test
+        # suite - true, and useless to somebody asking what the codebase IS. Import count alone
+        # is a weak proxy for importance in any repository whose tests outnumber its code,
+        # which is every well-tested one.
+        if e["callee"] in ids and not _demote_test(e["src"]):   # stdlib is not the map either
             importers[e["callee"]].add(e["src"])
     called = Counter(e["callee"] for e in g["calls"])
     by_mod = defaultdict(list)
     for n in g["nodes"]:
         if n["kind"] in ("func", "class"):
             by_mod[n["module"]].append(n)
-    out = ["ranked by how many modules in this tree import them:"]
+    out = ["ranked by how many NON-TEST modules in this tree import them:"]
     # A module that DEFINES nothing is not what anything leans on, whatever the import count
     # says. An empty `__init__.py` collects an import from every module in its package and so
     # ranked first - the top line of the map, pointing at a file with nothing in it.
     ranked = sorted((m for m in mods if by_mod.get(m["id"])),
-                    key=lambda m: (-len(importers[m["id"]]), m["id"]))
+                    key=lambda m: (_demote_test(m["id"]), -len(importers[m["id"]]), m["id"]))
     for m in ranked[:limit]:
         n_in = len(importers[m["id"]])
         defs = sorted(by_mod.get(m["id"], []), key=lambda d: -called.get(d["name"], 0))
