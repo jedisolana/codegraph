@@ -9885,6 +9885,63 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class WhereSuperGoesAndWhereItCannotBeKnown(Sandbox):
+    """`super()` is resolved against the class it is WRITTEN in, using that class's own order.
+    For the class at the bottom of a diamond that is exactly what runs. For a class in the
+    middle it is right for an instance of that class and wrong for one reached through the
+    diamond, and no reading of the file can tell which - the answer depends on the object.
+
+    This pins both halves, with Python's own answer beside the second so the limit is recorded
+    as a fact rather than an opinion. `D(B, C)` where all four define `run` and each calls
+    `super().run()`: Python's order is D, B, C, A, so `D().run()` produces "DBCA" - which means
+    the `super()` written inside `B.run` reached C, not A."""
+
+    SOURCE = (
+        "class A:\n    def run(self):\n        return 'A'\n\n\n"
+        "class B(A):\n    def run(self):\n        return 'B' + super().run()\n\n\n"
+        "class C(A):\n    def run(self):\n        return 'C' + super().run()\n\n\n"
+        "class D(B, C):\n    def run(self):\n        return 'D' + super().run()\n\n\n"
+        "def use():\n    return D().run()\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.write("s.py", self.SOURCE)
+
+    def python_says(self):
+        prog = ("import sys, json, importlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "m = importlib.import_module('s')\n"
+                "print(json.dumps({'result': m.D().run(),\n"
+                "                  'mro': [c.__name__ for c in m.D.__mro__]}))\n")
+        r = subprocess.run([sys.executable, "-c", prog, self.dir],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_super_at_the_bottom_of_a_diamond_is_what_runs(self):
+        """`D.run`'s `super()` goes to B, for every D instance there can be. The tool and the
+        interpreter agree, and here agreement is the whole answer."""
+        truth = self.python_says()
+        self.assertEqual(truth["mro"][:4], ["D", "B", "C", "A"])
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"] if e["callee"] == "run"}
+        self.assertEqual(got["s.D.run"], "s.B.run")
+
+    def test_super_in_the_middle_is_answered_for_the_class_it_is_written_in(self):
+        """And that is a real limit, not a bug. Python routes `B.run`'s `super()` to C when the
+        object is a D - the "DBCA" below is the proof - and to A when it is a B. Which one it
+        is depends on the object, so the file cannot say. The tool answers for the class the
+        call is written in and the README says so."""
+        truth = self.python_says()
+        self.assertEqual(truth["result"], "DBCA",
+                         "super() inside B.run reaches C for a D instance")
+        g = self.graph()
+        got = {e["src"]: e.get("dst") for e in g["calls"] if e["callee"] == "run"}
+        self.assertEqual(got["s.B.run"], "s.A.run")
+        self.assertEqual(got["s.C.run"], "s.A.run")
+
+
 class TheInterpreterIsAskedWhichDunderRuns(Sandbox):
     """Python runs these from SYNTAX: `x += y`, `with c`, `for r in rows`, `len(x)`. The tool
     records an edge for each, and which method actually runs is a fact about the class that

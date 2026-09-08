@@ -151,13 +151,13 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6589,
-  "call_sites": 8634,
-  "edge_confidence": {"EXTERNAL": 3313, "INHERITED": 1061, "BUILTIN": 760, "SELF-METHOD": 598,
+  "call_edges": 6608,
+  "call_sites": 8656,
+  "edge_confidence": {"EXTERNAL": 3325, "INHERITED": 1065, "BUILTIN": 761, "SELF-METHOD": 600,
                       "QUALIFIED": 447, "LOCAL": 228, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2342,
-  "could_have_been_resolved": 2516,
+  "resolved_to_one_def": 2348,
+  "could_have_been_resolved": 2522,
   "resolution_rate": 0.931
 }
 ```
@@ -259,6 +259,14 @@ one and falls back to `__add__` when it does not — never both, because only on
 and a subclass inherits that choice from wherever the method really lives. Removing the
 fallback, or looking for it only on the class itself rather than up its bases, each turn the
 comparison red.
+
+`super()` is checked both ways round, because half of it is a limit rather than an answer. For
+the class at the bottom of a diamond the tool and the interpreter agree and that is the whole
+answer. For a class in the MIDDLE the tool answers for the class the call is written in, which
+is right for an instance of that class and wrong for one reached through the diamond — and
+which of those it is depends on the object, not the file. The test records Python's own answer
+beside it, `D().run()` producing `"DBCA"`, so the limit is written down as a fact rather than
+an opinion about one.
 
 Two checks run over all fourteen. **Every graph invariant holds** — every edge's source and
 target a real node, every id under its module, every label consistent with whether the edge
@@ -809,7 +817,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 885 more. Grouped, because a list of every one of them stopped being
+The test suite adds 887 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
