@@ -6922,14 +6922,18 @@ class TheHooksRefuseWhatCannotBeTakenBack(unittest.TestCase):
         # in the test for the leak. It is not a fixture problem that a marker can solve: a
         # marked line still ships the word.
         self.private_word = "notarealprojectname"
-        with open(os.path.join(self.dir, "tools", "deny.txt"), "w", encoding="utf-8") as fh:
+        # The list lives OUTSIDE the repository now, so the fixture points the hooks at its own
+        # via the environment. Writing one into the fixture's tools/ was silently ignored, and
+        # the test then proved only that an ordinary message passes.
+        self.deny = os.path.join(self.dir, "deny.txt")
+        with open(self.deny, "w", encoding="utf-8") as fh:
             fh.write(scrub._hash(self.private_word) + "\n")
 
     def commit(self, message="a change", **env):
         subprocess.run(["git", "-C", self.dir, "add", "-A"], check=True, capture_output=True)
         return subprocess.run(["git", "-C", self.dir, "commit", "-m", message],
                               capture_output=True, text=True,
-                              env={**os.environ, **env})
+                              env={**os.environ, "CODEGRAPH_DENY": self.deny, **env})
 
     def write(self, rel, body):
         path = os.path.join(self.dir, rel)
