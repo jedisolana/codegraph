@@ -6,6 +6,30 @@ Everything down to the `0.1.0` heading is on `main` and is **not** in the releas
 PyPI, which was uploaded before any of it. Releasing it needs a version bump: PyPI will not
 accept a second 0.1.0, so the tag alone would fail at the upload step.
 
+### A package that re-exports with a star
+
+`httpx/__init__.py` is twelve lines of `from ._api import *`, and every caller then writes
+`httpx.get(...)`. The re-export rule followed a name a package imports BY NAME and had nothing
+to say about a star, so `httpx.get` resolved to nothing: 744 unresolved calls in a clone of
+httpx, which is most of what its tests do. It came out at 0.353 where every other repository
+measured was above 0.72, and that gap was the whole of it.
+
+The tool already reads a star for a bare call - `from turtle import *` then `home()`. The same
+sentence one dot further along had never been asked, and neither had the class side, so
+`httpx.Client()` named no class either and every method call on the result went with it.
+
+What a star carries is the interpreter's rule rather than a guess: `__all__` when the module
+states one, and otherwise the names it defines that do not begin with an underscore. `__all__`
+was not read anywhere in the tool before this. Two starred modules offering one name answer
+neither, on the function side and the class side alike.
+
+httpx 0.353 -> 0.801, 1,730 more resolved calls, and nothing lost on any of the five
+repositories now measured.
+
+The two new repositories were added for exactly this: running the tool over code nobody had
+aimed it at is what has found every real bug in it. `rich` came out at 0.869 first time and
+taught it nothing; `httpx` was worth the trip.
+
 ### The saving footer, on the command line
 
 `--saved` asks for a line saying what the answer replaced, `--help` described the sentence it
@@ -530,7 +554,7 @@ measure of how easy the questions were.
 ### How the tests are checked
 
 `tools/mutation.py` breaks the tool one small way at a time and runs the suite against each
-change — a suite that never fails is not evidence of anything. The file admits 1,345 mutations,
+change — a suite that never fails is not evidence of anything. The file admits 1,372 mutations,
 and the count is checked by a test, because it was published as 208 here and 710 in the README
 while the real number was neither.
 

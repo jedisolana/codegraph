@@ -1184,9 +1184,23 @@ def _defs_and_calls(path, mod):
     # moment it crossed a file. Carried out of the parse so resolution can use it, the same way
     # aliases and from-imports already are.
     singletons = {k: v for k, v in walker.vtypes[0].items() if v}
+    # WHAT A STAR CARRIES OUT OF THIS MODULE. `from .x import *` brings `__all__` when the
+    # module states one, and otherwise every name it defines that does not start with an
+    # underscore - the interpreter's own rule. Reading it is the difference between following
+    # a re-export and guessing at one.
+    exported = None
+    for n in tree.body:
+        tgt = (n.targets[0] if isinstance(n, ast.Assign) and len(n.targets) == 1
+               else getattr(n, "target", None) if isinstance(n, ast.AnnAssign) else None)
+        if isinstance(tgt, ast.Name) and tgt.id == "__all__" and isinstance(
+                getattr(n, "value", None), (ast.List, ast.Tuple)):
+            names = [x.value for x in n.value.elts
+                     if isinstance(x, ast.Constant) and isinstance(x.value, str)]
+            if len(names) == len(n.value.elts):      # a computed entry means we cannot say
+                exported = sorted(set(names))
     return (defs, list(seen.values()), imports, aliases, fromimp,
             {k: v for k, v in fromalt.items() if len(v) > 1}, fromorig, submodules,
-            sorted(refs), singletons)
+            sorted(refs), singletons, exported)
 
 
 # Two call edges are the same relationship only when they would resolve to the same place.
@@ -1635,6 +1649,7 @@ def build(dirs=None, write=True):
     mod_alias, mod_from, mod_root, mod_sub, mod_alt = {}, {}, {}, {}, {}
     mod_single = {}                                            # module -> {name: class name} for `x = Foo()` at top level
     mod_orig = {}                                                # local alias -> the name the module actually defines
+    mod_all = {}                                                 # module -> its __all__, when it states one
     newcache = {}
     for path, d, root in pairs:
         rel = os.path.relpath(path, d)[:-3].replace(os.sep, "/")   # 'memory' for a top-level file, 'sub/mod' for a nested one (no .py) - path-relative id, no nested collision
@@ -1680,10 +1695,10 @@ def build(dirs=None, write=True):
                                 c["imports"], c["aliases"], c["fromimp"])
             sub = c.get("submodules", {}); alt = c.get("fromalt", {})
             orig = c.get("fromorig", {}); mentions = c.get("refs", [])
-            singles = c.get("singletons", {})
+            singles = c.get("singletons", {}); exported = c.get("exported")
         else:
             try:
-                d, e, im, al, fi, alt, orig, sub, mentions, singles = \
+                d, e, im, al, fi, alt, orig, sub, mentions, singles, exported = \
                     _defs_and_calls(path, mid)
             except Unparseable as ex:
                 unreadable.append(str(ex))
@@ -1693,10 +1708,11 @@ def build(dirs=None, write=True):
             newcache[path] = {"stamp": stamp, "defs": d, "calls": [dict(x) for x in e], "imports": im,
                               "aliases": al, "fromimp": fi, "fromalt": alt,
                               "fromorig": orig, "submodules": sub, "refs": mentions,
-                              "singletons": singles}
+                              "singletons": singles, "exported": exported}
         nodes += d; calls += e; imports += im; mentioned.update(mentions)
         mod_alias[mid] = al; mod_from[mid] = fi; mod_root[mid] = root; mod_sub[mid] = sub
         mod_alt[mid] = alt; mod_orig[mid] = orig; mod_single[mid] = singles
+        if exported is not None: mod_all[mid] = exported
     # The cache read off disk has done its job: every file has either been reused from it or
     # reparsed, and the answers are in `newcache` now. Holding it through resolution and two
     # JSON writes is a second copy of the whole tree's parse for nothing - on a large one that
@@ -1839,6 +1855,18 @@ def build(dirs=None, write=True):
                     cls_ids[n["module"]][n["name"]] = n["id"]
     kind_of = {n["id"]: n["kind"] for n in nodes}                # for walking a call's scope chain
 
+    def _star_sources(mod):
+        """The modules a `from ... import *` in `mod` brings names from."""
+        if "*" not in mod_from.get(mod, {}):
+            return ()
+        return mod_alt.get(mod, {}).get("*") or [mod_from[mod]["*"]]
+
+    def _star_carries(mod, name):
+        """Would `import *` from `mod` bring `name` out. `__all__` decides when the module
+        states one; otherwise every name that does not begin with an underscore."""
+        declared = mod_all.get(mod)
+        return name in declared if declared is not None else not name.startswith("_")
+
     def _classes_named(rt, srcmod, scope=None):
         """Which class a type name means HERE: the one this scope defines, then the one this
         module defines or imported, before any tree-wide search. A qualified `svc.Client` says
@@ -1883,6 +1911,13 @@ def build(dirs=None, write=True):
                 if onward:
                     real_name = mod_orig.get(where_, {}).get(cname, cname)
                     cid = by_modname.get((onward, real_name))
+                else:
+                    # ...or the package re-exports it with a STAR, which is how a great many
+                    # of them do it: `pkg/__init__.py` is a column of `from .x import *`, and
+                    # `pkg.Thing()` then names a class the file itself does not define.
+                    star = [by_modname[(m, cname)] for m in _star_sources(where_)
+                            if (m, cname) in by_modname and _star_carries(m, cname)]
+                    if len(star) == 1: cid = star[0]
             if cid and kind_of.get(cid) == "class":
                 return [cid]
             # `Outer.Inner()`: the part before the dot is a CLASS in this module, not a module.
@@ -2086,6 +2121,23 @@ def build(dirs=None, write=True):
                 if came_from:
                     dst = by_modname.get((came_from, callee))
                     conf = "RE-EXPORT" if dst else conf
+                elif "*" in mod_from.get(target_mod, {}):
+                    # A PACKAGE THAT RE-EXPORTS WITH A STAR. `httpx/__init__.py` is twelve lines
+                    # of `from ._api import *`, and every caller then writes `httpx.get(...)`:
+                    # 744 unresolved calls in a clone of httpx, which is most of what its tests
+                    # do. The rule above follows a name a package imports BY NAME and had
+                    # nothing to say about a star - though the tool already reads a star for a
+                    # BARE call, `from turtle import *` then `home()`. The same sentence one dot
+                    # further along was never asked.
+                    #
+                    # What a star carries is the interpreter's rule, not a guess: `__all__` when
+                    # the source states one, and otherwise the names it defines that do not
+                    # begin with an underscore. Two sources offering the name answer neither.
+                    hits = [by_modname[(m, callee)]
+                            for m in _star_sources(target_mod)
+                            if (m, callee) in by_modname and _star_carries(m, callee)]
+                    if len(hits) == 1: dst = hits[0]; conf = "RE-EXPORT"
+                    elif len(hits) > 1: conf = "AMBIGUOUS"; e["candidates"] = sorted(set(hits))
         if (not dst and method and recv and not e.get("recv_local")
                 and recv in mod_from.get(srcmod, {})):
             # AN IMPORTED SINGLETON. `from .globals import display` then `display.warn()`.

@@ -9885,6 +9885,92 @@ class AListIsAsPlainlyStatedAsAClass(Sandbox):
         self.assertEqual(self.edge("get", "j.go")["confidence"], "BUILTIN")
 
 
+class APackageThatReExportsWithAStar(Sandbox):
+    """`httpx/__init__.py` is twelve lines of `from ._api import *`, and then every caller writes
+    `httpx.get(...)`. The re-export rule followed a name a package imports BY NAME and had
+    nothing to say about a star, so `httpx.get` resolved to nothing: 744 unresolved calls in a
+    clone of httpx, which is most of what its tests do.
+
+    A star is a statement about provenance, and the tool already reads it for a bare call -
+    `from turtle import *` then `home()`. The same sentence one dot further along was never
+    asked.
+
+    What a star actually re-exports is `__all__` when the module defines one, and otherwise the
+    names it defines that do not start with an underscore. That is the interpreter's rule, and
+    reading it is the difference between following a re-export and guessing at one."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("pkg/__init__.py", "from pkg.core import *\n")
+        self.write("pkg/core.py",
+                   "class Thing:\n    def go(self):\n        return 1\n\n\n"
+                   "def load():\n    return 2\n\n\n"
+                   "def _hidden():\n    return 3\n")
+
+    def test_a_qualified_call_through_a_star_re_export(self):
+        self.write("app.py", "import pkg\n\n\ndef use():\n    return pkg.load()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.load"), ["app.use"])
+
+    def test_a_class_re_exported_by_a_star(self):
+        self.write("app2.py", "import pkg\n\n\ndef use():\n    return pkg.Thing().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.Thing.go"), ["app2.use"])
+
+    def test_all_says_what_is_exported(self):
+        self.write("pkg2/__init__.py", "from pkg2.core import *\n")
+        self.write("pkg2/core.py",
+                   '__all__ = ["shown"]\n\n\n'
+                   "def shown():\n    return 1\n\n\n"
+                   "def hidden():\n    return 2\n")
+        self.write("app3.py", "import pkg2\n\n\ndef use():\n    return pkg2.shown()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg2/core.shown"), ["app3.use"])
+
+    # ------------------------------------------------------------------------- the controls
+    def test_a_name_all_leaves_out_is_not_exported(self):
+        """`import *` does not bring it, so `pkg2.hidden()` is not that function."""
+        self.write("pkg2/__init__.py", "from pkg2.core import *\n")
+        self.write("pkg2/core.py",
+                   '__all__ = ["shown"]\n\n\n'
+                   "def shown():\n    return 1\n\n\n"
+                   "def hidden():\n    return 2\n")
+        self.write("app4.py", "import pkg2\n\n\ndef use():\n    return pkg2.hidden()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg2/core.hidden"), [])
+
+    def test_an_underscore_name_is_not_carried_by_a_star(self):
+        self.write("app5.py", "import pkg\n\n\ndef use():\n    return pkg._hidden()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core._hidden"), [])
+
+    def test_two_stars_offering_one_name_answer_neither(self):
+        self.write("two/__init__.py", "from two.a import *\nfrom two.b import *\n")
+        self.write("two/a.py", "def load():\n    return 1\n")
+        self.write("two/b.py", "def load():\n    return 2\n")
+        self.write("app6.py", "import two\n\n\ndef use():\n    return two.load()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "two/a.load"), [])
+        self.assertEqual(codegraph.callers_of(g, "two/b.load"), [])
+
+    def test_two_stars_offering_one_class_answer_neither(self):
+        """The same rule on the class side: `two.Thing()` where both starred modules define a
+        Thing is not an answer, and picking the first would type every call on it wrongly half
+        the time."""
+        self.write("cls/__init__.py", "from cls.a import *\nfrom cls.b import *\n")
+        self.write("cls/a.py", "class Thing:\n    def go(self):\n        return 1\n")
+        self.write("cls/b.py", "class Thing:\n    def go(self):\n        return 2\n")
+        self.write("app8.py", "import cls\n\n\ndef use():\n    return cls.Thing().go()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "cls/a.Thing.go"), [])
+        self.assertEqual(codegraph.callers_of(g, "cls/b.Thing.go"), [])
+
+    def test_a_name_no_star_source_defines_answers_nothing(self):
+        self.write("app7.py", "import pkg\n\n\ndef use():\n    return pkg.missing()\n")
+        g = self.graph()
+        self.assertEqual(codegraph.callers_of(g, "pkg/core.load"), [])
+
+
 class AnImportedClassIsStillAClassReceiver(Sandbox):
     """`Helper.tag(1)` where `Helper` came from an import. A class DEFINED in the file resolved
     - that is the `CLASS` label - and the identical statement on an imported one did not, which

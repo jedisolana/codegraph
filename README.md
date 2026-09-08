@@ -151,14 +151,14 @@ Run on this repository, so you can reproduce it — `codegraph build . && codegr
 
 ```json
 {
-  "call_edges": 6394,
-  "call_sites": 8364,
-  "edge_confidence": {"EXTERNAL": 3229, "INHERITED": 998, "BUILTIN": 744, "SELF-METHOD": 595,
-                      "QUALIFIED": 423, "LOCAL": 223, "UNTYPED": 174, "TYPED": 5,
+  "call_edges": 6442,
+  "call_sites": 8441,
+  "edge_confidence": {"EXTERNAL": 3244, "INHERITED": 1016, "BUILTIN": 747, "SELF-METHOD": 595,
+                      "QUALIFIED": 431, "LOCAL": 227, "UNTYPED": 174, "TYPED": 5,
                       "CONSTRUCTOR": 3, "AMBIGUOUS": 0},
-  "resolved_to_one_def": 2247,
-  "could_have_been_resolved": 2421,
-  "resolution_rate": 0.928
+  "resolved_to_one_def": 2277,
+  "could_have_been_resolved": 2451,
+  "resolution_rate": 0.929
 }
 ```
 
@@ -169,7 +169,7 @@ same edges — one of them is two places to look and the other is one, and the n
 the more precise. A number that depends on the interpreter is worth saying out loud rather
 than leaving somebody to find.
 
-That 0.928 says: of the calls that could plausibly have gone to something in this codebase,
+That 0.929 says: of the calls that could plausibly have gone to something in this codebase,
 it placed 93%. It is not the sum being flattered — the rule is the opposite of the usual one.
 A denominator that counts `list.append` and `str.strip` is not measuring how much the tool
 resolved, it is measuring how much of Python you happen to use, and the same reasoning that
@@ -188,6 +188,8 @@ On other people's code, measured on a clone of each and built from its own root:
 | flask | 0.241 | **0.755** |
 | ansible | 0.379 | **0.726** |
 | pandas | 0.359 | **0.811** |
+| httpx | 0.353 | **0.801** |
+| rich | 0.869 | **0.869** |
 
 A rate has a denominator, and two of the changes below move it, so here are the counts as well
 — how many calls are pinned to exactly one definition, and how many the tool answers "I cannot
@@ -289,6 +291,17 @@ using the NEW type on the OLD name — right by luck, and labelled `TYPED` eithe
 sixth is a `super()` that was reaching two classes up. That gained-minus-lost is 8,552, which
 is exactly the change in the count table above; a running total added up from each step said
 6,794, and adding up notes is not the same as measuring.
+
+The last two repositories were added after the rest of this was done, to find out what it
+still got wrong on code nobody had aimed it at. `rich` came out at 0.869 first time and taught
+it nothing. `httpx` came out at **0.353**, and the reason was one line: `httpx/__init__.py` is
+twelve lines of `from ._api import *`, and every caller then writes `httpx.get(...)`. The
+re-export rule followed a name a package imports by name and had nothing to say about a star,
+though the tool already reads a star for a bare call — `from turtle import *` then `home()`.
+The same sentence one dot further along had never been asked. What a star carries is the
+interpreter's rule and not a guess: `__all__` when the module states one, otherwise the names
+it defines that do not begin with an underscore. 1,730 more resolved calls on httpx, none lost
+anywhere.
 
 The tenth rule is a class receiver the file imported. `Helper.tag(1)` where `Helper` is defined
 in the same file resolved — that is the `CLASS` label — and the identical statement on an
@@ -668,7 +681,7 @@ is checked backwards: by breaking the tool on purpose and seeing whether the tes
 change. Every one of them should make something go red, and one that does not is the
 interesting output: it names a behaviour nothing is checking.
 
-**The file admits 1,345 mutations.** A full pass killed every one of the 987 the file admitted
+**The file admits 1,372 mutations.** A full pass killed every one of the 987 the file admitted
 then, and the file has grown a long way since — an MCP server, a shape reader, a saving footer,
 an incompleteness warning, and the rules and fixes above. A sample of 300 drawn from the file as it
 stood one behavioural change short of this one killed 300, one of them by hanging rather than
@@ -719,7 +732,7 @@ including **red-first controls** that prove the naive approach fails where this 
   `from ops import index as _index`, where the module holds `index` and the file says `_index`
 - `from turtle import *` followed by a bare `home()`, next to another module that also has one
 
-The test suite adds 857 more. Grouped, because a list of every one of them stopped being
+The test suite adds 865 more. Grouped, because a list of every one of them stopped being
 readable a long time before it stopped growing:
 
 - **Python's own rules**, which are where the wrong answers come from: what shadows what — a
