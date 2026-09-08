@@ -194,8 +194,9 @@ A rate has a denominator, and two of the changes below move it, so here are the 
 tell" about. Neither column can be flattered by anything but resolving more.
 
 Read the baselines carefully, because they are not the same one. The `before` above is the
-first measurement this README ever published. The `before` here is the build immediately
-preceding the most recent round of work, so this table is that round on its own:
+figure that column has carried since the table was first published — the state before any of
+this resolution work. The `before` here is the build immediately preceding the most recent
+round of it, so this table is that round on its own:
 
 | repo | pinned, before → after | cannot tell, before → after |
 |---|---|---|
