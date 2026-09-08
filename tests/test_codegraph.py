@@ -9248,22 +9248,16 @@ class TheTreeIsNotGoneItIsJustReadOnly(Sandbox):
         return replies[-1]["result"]["content"][0]["text"], r
 
     def test_it_does_not_say_the_tree_is_gone(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores the write bits, so nothing can fail here")
         self.stale_and_unwritable()
         text, r = self.ask()
         self.assertNotIn("is gone", text, r.stderr[-200:])
 
     def test_it_says_what_actually_failed(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores the write bits")
         self.stale_and_unwritable()
         text, _ = self.ask()
         self.assertRegex(text.lower(), r"write|read-only|permission")
 
     def test_and_still_answers_rather_than_dying(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores the write bits")
         self.stale_and_unwritable()
         _, r = self.ask()
         self.assertEqual(r.returncode, 0)
