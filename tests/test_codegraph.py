@@ -10432,7 +10432,7 @@ class APytestFixtureHasAType(Sandbox):
     following a scoping rule that is written down and decidable from the tree: the module's own
     fixtures first, then `conftest.py` in its directory, then each directory above it.
 
-    This is the largest single blind spot left. In a clone of flask, `app` and `client` are 548
+    This is the largest single blind spot left. In a clone of flask, `app` and `client` were 548
     unresolved calls between them - a quarter of everything that could resolve - and both are
     three-line fixtures in `tests/conftest.py`. The tool was reading the fixture's body all
     along; it just never connected the parameter to it.

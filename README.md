@@ -232,7 +232,8 @@ The seventh is the largest single one, and it reads pytest. A test function's pa
 not unknowns — pytest fills them from fixtures, by name, under a scoping rule that is written
 down and decidable from the tree: the module's own fixtures, then `conftest.py` in its
 directory, then each directory above it, first match winning. In flask, `app` and `client` were
-548 unresolved calls between them, a quarter of everything that could resolve, and both are
+548 unresolved calls between them when this was built — a quarter of everything that could
+resolve, and 560 before the rest of this round chipped at them — and both are
 three-line fixtures in `tests/conftest.py` whose bodies this tool was already reading. It never
 connected the parameter to them, so `blast` on a library function stopped at the library — and
 "what breaks if I change this" has the tests in the answer or it has half of it.

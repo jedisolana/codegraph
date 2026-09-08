@@ -604,7 +604,7 @@ def _defs_and_calls(path, mod):
             self.yields.append([])
             # A TEST'S PARAMETERS ARE NOT UNKNOWNS. pytest fills them from fixtures, by name,
             # under a scoping rule that is written down and decidable from the tree. In a clone
-            # of flask, `app` and `client` are 548 unresolved calls between them - a quarter of
+            # of flask, `app` and `client` were 548 unresolved calls between them - a quarter of
             # everything that could resolve - and both are three-line fixtures in
             # `tests/conftest.py` whose bodies this tool was already reading.
             #

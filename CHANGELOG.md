@@ -222,7 +222,8 @@ tree - the module's own fixtures, then `conftest.py` in its directory, then each
 above it, first match winning - and this tool was reading those fixture bodies all along
 without ever connecting a parameter to one.
 
-In a clone of flask, `app` and `client` were 548 unresolved calls between them: a quarter of
+In a clone of flask, `app` and `client` were 548 unresolved calls between them when this was
+built - 560 before the rest of this round chipped at them - which is a quarter of
 everything that could resolve, from two three-line fixtures in `tests/conftest.py`. So `blast`
 on a library function stopped at the library, and the question this tool exists to answer has
 the tests in the answer or it has half of it.
